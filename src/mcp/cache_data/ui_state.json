@@ -1,0 +1,31 @@
+{
+  "theme": "light",
+  "font_family": "Consolas",
+  "font_size": 9,
+  "sidebar_width": 250,
+  "sidebar_visible": true,
+  "active_tab": "",
+  "notebook_tab": "",
+  "scroll_position": 0.0,
+  "selected_conversation_id": "",
+  "auto_scroll": true,
+  "show_line_numbers": true,
+  "word_wrap": true,
+  "recent_files": [],
+  "recent_searches": [],
+  "expanded_sections": [],
+  "pane_sizes": {},
+  "window_states": {
+    "agent_assistant": {
+      "window_id": "agent_assistant",
+      "x": 1127,
+      "y": 53,
+      "width": 580,
+      "height": 960,
+      "maximized": false,
+      "visible": true,
+      "last_opened": 1779518279.0232918
+    }
+  },
+  "custom_styles": {}
+}
