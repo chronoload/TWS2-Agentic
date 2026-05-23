@@ -331,4 +331,5 @@ MIT License
 
 ## 作者
 
-TS2 Team
+Pinechan
+
