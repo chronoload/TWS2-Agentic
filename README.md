@@ -112,7 +112,7 @@ brew install poppler  # PDF转图片
 |------|-----|------|
 | **核心** | numpy, matplotlib, tkinter | 数据处理、可视化、GUI |
 | **MCP系统** | openai, anthropic, aiohttp | LLM支持、异步HTTP |
-| **RAG** | chromadb, faiss-cpu, sentence-transformers | 向量数据库、嵌入模型 |
+| **RAG** | chromadb, faiss-cpu | 向量数据库、嵌入模型 |
 | **PDF处理** | PyPDF2, pdf2image | PDF读取、PDF转图片 |
 | **工具** | pyyaml, requests, beautifulsoup4, feedparser | 数据格式、网络、解析 |
 
