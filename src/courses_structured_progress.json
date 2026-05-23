@@ -1,0 +1,9 @@
+{
+  "课程名称": {
+    "completed_lessons": [],
+    "current_lesson": null,
+    "started_at": null,
+    "last_updated": null,
+    "review_schedule": {}
+  }
+}
