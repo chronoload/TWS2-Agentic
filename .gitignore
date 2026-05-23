@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 配置 (包含密钥)
+config/config.json
+config/*.local.json
+src/agent_config/
+
+# 缓存
+*.cache/
+*.tmp/
+temp/
+*.log
+logs/
+*.db
+
+# 数据文件
+*.jsonl
+*.checkpoint
+cache_data/
+data/
+
+# 课程数据 (可选提交)
+courses_structured.json
+courses_structured_progress.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Windows 快捷方式
+*.lnk
