@@ -1,0 +1,43 @@
+% =============================================
+% preamble-beamer.tex
+% Beamer 导言区：binb::metropolis + 中文支持
+% =============================================
+
+% ---- 中文支持 ----
+\usepackage[UTF8,fontset=windows]{ctex}
+
+% ---- 数学 ----
+\usepackage{amsmath,amssymb,bm}
+
+% ---- 表格 ----
+\usepackage{booktabs,multirow}
+
+% ---- 图形 ----
+\usepackage{graphicx}
+\usepackage{tikz}
+
+% ---- 定理编号 ----
+\setbeamertemplate{theorems}[numbered]
+
+% ---- 额外定理环境 ----
+% beamer 已定义: theorem, corollary, definition, example, lemma, problem, solution, proof
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+\newtheorem{axiom}{Axiom}
+\newtheorem{claim}{Claim}
+\newtheorem{assumption}{Assumption}
+\newtheorem{conjecture}{Conjecture}
+\newtheorem{principle}{Principle}
+
+% ---- metropolis 设置 ----
+\metroset{sectionpage=progressbar}
+
+% ---- 全局 allowframebreaks：内容过长时自动分页 ----
+\beamerdefaultoverlayspecification{}
+
+% ---- 字体回退（无 Fira 时使用系统无衬线字体）----
+\usepackage{ifxetex}
+\ifxetex
+  \setsansfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]
+  \setmonofont{Consolas}
+\fi

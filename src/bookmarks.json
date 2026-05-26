@@ -1,0 +1,173 @@
+[
+  {
+    "name": "arXiv",
+    "url": "https://arxiv.org",
+    "category": "preprint",
+    "icon": "📄",
+    "color": "#b33939",
+    "id": "arxiv",
+    "children": []
+  },
+  {
+    "name": "bioRxiv",
+    "url": "https://www.biorxiv.org",
+    "category": "preprint",
+    "icon": "🧬",
+    "color": "#218c74",
+    "id": "biorxiv",
+    "children": []
+  },
+  {
+    "name": "medRxiv",
+    "url": "https://www.medrxiv.org",
+    "category": "preprint",
+    "icon": "💊",
+    "color": "#227093",
+    "id": "medrxiv",
+    "children": []
+  },
+  {
+    "name": "SSRN",
+    "url": "https://www.ssrn.com",
+    "category": "preprint",
+    "icon": "📊",
+    "color": "#cd6133",
+    "id": "ssrn",
+    "children": []
+  },
+  {
+    "name": "Research Square",
+    "url": "https://www.researchsquare.com",
+    "category": "preprint",
+    "icon": "🔬",
+    "color": "#474787",
+    "id": "researchsquare",
+    "children": []
+  },
+  {
+    "name": "Google Scholar",
+    "url": "https://scholar.google.com",
+    "category": "search",
+    "icon": "🔍",
+    "color": "#3498db",
+    "id": "googlescholar",
+    "children": []
+  },
+  {
+    "name": "Semantic Scholar",
+    "url": "https://www.semanticscholar.org",
+    "category": "search",
+    "icon": "🔎",
+    "color": "#2ecc71",
+    "id": "semanticscholar",
+    "children": []
+  },
+  {
+    "name": "Microsoft Academic",
+    "url": "https://academic.microsoft.com",
+    "category": "search",
+    "icon": "📚",
+    "color": "#9b59b6",
+    "id": "msacademic",
+    "children": []
+  },
+  {
+    "name": "CNKI",
+    "url": "https://www.cnki.net",
+    "category": "search",
+    "icon": "🇨🇳",
+    "color": "#e74c3c",
+    "id": "cnki",
+    "children": []
+  },
+  {
+    "name": "Web of Science",
+    "url": "https://webofscience.com",
+    "category": "search",
+    "icon": "🌐",
+    "color": "#f39c12",
+    "id": "webofscience",
+    "children": []
+  },
+  {
+    "name": "Nature",
+    "url": "https://www.nature.com",
+    "category": "journal",
+    "icon": "🌿",
+    "color": "#1abc9c",
+    "id": "nature",
+    "children": []
+  },
+  {
+    "name": "Science",
+    "url": "https://www.science.org",
+    "category": "journal",
+    "icon": "🔬",
+    "color": "#e67e22",
+    "id": "science",
+    "children": []
+  },
+  {
+    "name": "Cell",
+    "url": "https://www.cell.com",
+    "category": "journal",
+    "icon": "🧫",
+    "color": "#c0392b",
+    "id": "cell",
+    "children": []
+  },
+  {
+    "name": "IEEE Xplore",
+    "url": "https://ieeexplore.ieee.org",
+    "category": "journal",
+    "icon": "⚡",
+    "color": "#2980b9",
+    "id": "ieee",
+    "children": []
+  },
+  {
+    "name": "GitHub",
+    "url": "https://github.com",
+    "category": "tool",
+    "icon": "💻",
+    "color": "#333333",
+    "id": "github",
+    "children": []
+  },
+  {
+    "name": "GitLab",
+    "url": "https://gitlab.com",
+    "category": "tool",
+    "icon": "🔧",
+    "color": "#fca326",
+    "id": "gitlab",
+    "children": []
+  },
+  {
+    "name": "Overleaf",
+    "url": "https://www.overleaf.com",
+    "category": "tool",
+    "icon": "✏️",
+    "color": "#46a046",
+    "id": "overleaf",
+    "children": []
+  },
+  {
+    "name": "Zotero",
+    "url": "https://www.zotero.org",
+    "category": "tool",
+    "icon": "📖",
+    "color": "#cc2a36",
+    "id": "zotero",
+    "children": []
+  },
+  {
+    "name": "Mendeley",
+    "url": "https://www.mendeley.com",
+    "category": "tool",
+    "icon": "📑",
+    "color": "#a3472e",
+    "id": "mendeley",
+    "children": []
+  }
+]
