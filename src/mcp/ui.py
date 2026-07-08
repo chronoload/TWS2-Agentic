@@ -23,6 +23,13 @@ from .agent import Agent, create_agent
 from .config import get_config_manager
 from .config_ui import show_enhanced_config_dialog
 
+# 渲染增强模块
+try:
+    from .renderer import create_renderer, HAS_ENHANCED_RENDERER
+except ImportError:
+    HAS_ENHANCED_RENDERER = False
+    create_renderer = None
+
 
 class AgentChatUI:
     """Agent 聊天界面"""
@@ -144,6 +151,20 @@ class AgentChatUI:
         self.chat_text.tag_config("reasoning", foreground="#996600", font=("Microsoft YaHei UI", 9, "italic"))
         self.chat_text.tag_config("block_sep", foreground="#cccccc", font=("", 6))
         self.chat_text.tag_config("debug", foreground="#999999", font=("Consolas", 8))
+        self.chat_text.tag_config("bold", font=("Microsoft YaHei UI", 10, "bold"))
+        self.chat_text.tag_config("code", font=("Consolas", 9), background="#f0f0f0")
+        self.chat_text.tag_config("md_link", foreground="#0366d6", font=("", 10, "underline"))
+
+        # 初始化增强渲染器
+        self._renderer = None
+        if HAS_ENHANCED_RENDERER:
+            try:
+                self._renderer = create_renderer(self.chat_text)
+            except Exception as e:
+                pass
+
+        # 右键菜单：按段复制
+        self.chat_text.bind("<Button-3>", self._show_chat_context_menu)
 
         # 输入区
         input_frame = ttk.Frame(right_frame)
@@ -438,9 +459,178 @@ class AgentChatUI:
         }.get(role, f"【{role}】\n")
 
         self.chat_text.insert(tk.END, prefix, role)
-        self.chat_text.insert(tk.END, content + "\n\n", role)
+
+        # 增强渲染：如果启用了渲染器，尝试渲染 Markdown 和代码块
+        if self._renderer:
+            self._render_ui_content(content, role)
+        else:
+            self.chat_text.insert(tk.END, content + "\n\n", role)
+        
         self.chat_text.see(tk.END)
         self.chat_text.config(state=tk.DISABLED)
+
+    def _render_ui_content(self, content: str, role: str):
+        """在 ui.py 中渲染 Markdown 内容"""
+        import re
+        # 提取代码块
+        code_block_pattern = r'```(\w*)\n([\s\S]*?)```'
+        code_blocks = list(re.finditer(code_block_pattern, content))
+
+        if not code_blocks:
+            self._insert_ui_inline_md(content, role)
+            self.chat_text.insert(tk.END, "\n\n")
+            return
+
+        last_end = 0
+        for match in code_blocks:
+            if match.start() > last_end:
+                self._insert_ui_inline_md(content[last_end:match.start()], role)
+
+            lang = match.group(1) or "text"
+            code = match.group(2)
+            if self._renderer:
+                self._renderer.render_code(code, lang)
+                self.chat_text.insert(tk.END, "\n")
+
+            last_end = match.end()
+
+        if last_end < len(content):
+            self._insert_ui_inline_md(content[last_end:], role)
+
+        self.chat_text.insert(tk.END, "\n\n")
+
+    def _insert_ui_inline_md(self, text: str, role: str):
+        """在 ui.py 中插入带内联 Markdown 的文本"""
+        import re
+        patterns = [
+            (r'`([^`]+)`', 'code'),
+            (r'\*\*(.+?)\*\*', 'bold'),
+            (r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', 'italic'),
+            (r'\[([^\]]+)\]\(([^)]+)\)', 'link'),
+        ]
+
+        remaining = text
+        while remaining:
+            earliest_match = None
+            earliest_start = len(remaining)
+            earliest_type = None
+
+            for pattern, tag_name in patterns:
+                match = re.search(pattern, remaining)
+                if match and match.start() < earliest_start:
+                    earliest_match = match
+                    earliest_start = match.start()
+                    earliest_type = tag_name
+
+            if earliest_match:
+                if earliest_start > 0:
+                    self.chat_text.insert(tk.END, remaining[:earliest_start], role)
+
+                groups = earliest_match.groups()
+                if earliest_type == 'code':
+                    self.chat_text.insert(tk.END, groups[0], ("code",))
+                elif earliest_type == 'bold':
+                    self.chat_text.insert(tk.END, groups[0], ("bold",))
+                elif earliest_type == 'italic':
+                    self.chat_text.insert(tk.END, groups[0], (role,))
+                elif earliest_type == 'link':
+                    self.chat_text.insert(tk.END, groups[0], ("md_link",))
+
+                remaining = remaining[earliest_match.end():]
+            else:
+                self.chat_text.insert(tk.END, remaining, role)
+                break
+
+    # ─── 右键菜单：按段复制 ───
+
+    def _show_chat_context_menu(self, event):
+        """显示聊天区域右键菜单"""
+        try:
+            menu = tk.Menu(self.chat_text, tearoff=0)
+
+            # 检查是否有选中的文本
+            try:
+                selected_text = self.chat_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+                has_selection = bool(selected_text.strip())
+            except tk.TclError:
+                has_selection = False
+                selected_text = ""
+
+            if has_selection:
+                menu.add_command(label="📋 复制选中", command=lambda: self._copy_text(selected_text))
+                menu.add_separator()
+
+            # 按段复制：右键所在位置的消息
+            menu.add_command(label="📄 按段复制", command=lambda: self._copy_block_at_cursor(event.x, event.y))
+            menu.add_separator()
+
+            menu.add_command(label="📋 复制全部", command=self._copy_all_messages)
+            menu.post(event.x_root, event.y_root)
+        except Exception as e:
+            print(f"右键菜单错误: {e}")
+
+    def _copy_text(self, text):
+        """复制文本到剪贴板"""
+        try:
+            self.chat_text.clipboard_clear()
+            self.chat_text.clipboard_append(text)
+        except Exception as e:
+            print(f"复制失败: {e}")
+
+    def _copy_block_at_cursor(self, click_x, click_y):
+        """复制右键点击所在位置的整个对话块"""
+        try:
+            click_pos = self.chat_text.index(f"@{click_x},{click_y}")
+            line_num = int(click_pos.split(".")[0])
+
+            content = self.chat_text.get("1.0", tk.END)
+            lines = content.split("\n")
+
+            # 块起始标记：分隔线（───）或角色前缀（【】）
+            block_starts = ("───", "【系统】", "【你】", "【助手】", "【工具】", "【思考】")
+
+            # 向上找块开始：遇到分隔线或角色前缀
+            start_line = line_num - 1
+            for i in range(line_num - 1, -1, -1):
+                line = lines[i].strip()
+                if line.startswith("───"):
+                    # 分隔线属于下一个块，从这里开始
+                    start_line = i
+                    break
+                if line.startswith("【"):
+                    start_line = i
+                    break
+
+            # 向下找块结束：遇到下一个分隔线、角色前缀或连续两个空行
+            end_line = len(lines)
+            for i in range(line_num, len(lines)):
+                line = lines[i].strip()
+                if line.startswith(block_starts):
+                    end_line = i
+                    break
+
+            # 提取块文本
+            block_text = "\n".join(lines[start_line:end_line]).strip()
+            if block_text:
+                self.chat_text.clipboard_clear()
+                self.chat_text.clipboard_append(block_text)
+        except Exception as e:
+            print(f"按段复制失败: {e}")
+
+    def _copy_all_messages(self):
+        """复制全部对话到剪贴板"""
+        try:
+            all_text = []
+            for block in self._blocks:
+                role = block["role"]
+                content = block["content"]
+                role_prefix = {"system": "【系统】", "user": "【你】", "assistant": "【助手】",
+                               "tool": "【工具】", "reasoning": "【思考】"}.get(role, f"【{role}】")
+                all_text.append(f"{role_prefix}\n{content}")
+            self.chat_text.clipboard_clear()
+            self.chat_text.clipboard_append("\n\n".join(all_text))
+        except Exception as e:
+            print(f"复制全部失败: {e}")
 
     def _rebuild_chat_display(self):
         """根据当前模式重建聊天区显示"""

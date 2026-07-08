@@ -12,40 +12,36 @@ WS2 Agent 配置界面 - 完全重构，支持多源 API 提供商
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, scrolledtext
 from typing import Optional, List, Callable, Dict, Any
 from pathlib import Path
 import json
 
 from .config import get_config_manager
 
-# 审批相关导入
 try:
     from .harness import ApprovalManager, ApprovalRequest, ApprovalDecision, ApprovalMode
     HAS_APPROVAL = True
 except ImportError:
     HAS_APPROVAL = False
 
-# 工作流引擎导入
 try:
     from .workflow_engine import WorkflowEngine, WorkflowDefinition, StepDefinition, StepType, WorkflowStatus, get_workflow_engine
     HAS_WORKFLOW = True
 except ImportError:
     HAS_WORKFLOW = False
 
+try:
+    from .plugins import TrustGate, LlmTrustConfig
+    HAS_TRUST_GATE = True
+except ImportError:
+    HAS_TRUST_GATE = False
+
 
 class ApprovalDialog:
     """审批弹窗 - 显示待审批请求，让用户决定"""
     
     def __init__(self, parent, request: 'ApprovalRequest', callback: Callable[[str], None]):
-        """
-        初始化审批弹窗
-        
-        Args:
-            parent: 父窗口
-            request: 审批请求对象
-            callback: 回调函数，接收决定字符串 "approve", "deny", "always_approve"
-        """
         self.parent = parent
         self.request = request
         self.callback = callback
@@ -56,8 +52,9 @@ class ApprovalDialog:
         self.dialog.geometry("600x500")
         self.dialog.transient(parent)
         self.dialog.grab_set()
+        self.dialog.attributes("-topmost", True)
+        self.dialog.focus_force()
         
-        # 窗口关闭事件
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
         
         self._create_widgets()
@@ -78,10 +75,11 @@ class ApprovalDialog:
             "high": "#ef4444",
             "critical": "#dc2626",
         }
+        risk_level = self.request.risk_level if self.request.risk_level is not None else "medium"
         risk_label = tk.Label(
             title_frame,
-            text=f"  {self.request.risk_level.upper()}  ",
-            bg=risk_color_map.get(self.request.risk_level, "#f59e0b"),
+            text=f"  {risk_level.upper()}  ",
+            bg=risk_color_map.get(risk_level, "#f59e0b"),
             fg="white",
             font=("", 10, "bold"),
             padx=5,
@@ -89,7 +87,8 @@ class ApprovalDialog:
         )
         risk_label.pack(side=tk.LEFT)
         
-        ttk.Label(title_frame, text=f"工具: {self.request.tool_name}", 
+        tool_name = self.request.tool_name if self.request.tool_name is not None else "未知工具"
+        ttk.Label(title_frame, text=f"工具: {tool_name}", 
                  font=("", 12, "bold")).pack(side=tk.LEFT, padx=(10, 0))
         
         # 请求信息
@@ -97,11 +96,12 @@ class ApprovalDialog:
         info_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
         
         # 请求原因
-        if self.request.reason:
+        reason_text_content = self.request.reason if self.request.reason is not None else ""
+        if reason_text_content:
             ttk.Label(info_frame, text="原因:", font=("", 9, "bold")).pack(anchor=tk.W)
             reason_text = scrolledtext.ScrolledText(info_frame, height=3, wrap=tk.WORD)
             reason_text.pack(fill=tk.X, pady=(5, 10))
-            reason_text.insert(tk.END, self.request.reason)
+            reason_text.insert(tk.END, reason_text_content)
             reason_text.config(state=tk.DISABLED)
         
         # 工具参数
@@ -109,9 +109,10 @@ class ApprovalDialog:
         params_text = scrolledtext.ScrolledText(info_frame, height=8, wrap=tk.WORD)
         params_text.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
         try:
-            params_str = json.dumps(self.request.tool_input, ensure_ascii=False, indent=2)
+            tool_input = self.request.tool_input if self.request.tool_input is not None else {}
+            params_str = json.dumps(tool_input, ensure_ascii=False, indent=2)
         except:
-            params_str = str(self.request.tool_input)
+            params_str = str(self.request.tool_input if self.request.tool_input is not None else {})
         params_text.insert(tk.END, params_str)
         params_text.config(state=tk.DISABLED)
         
@@ -145,25 +146,32 @@ class ApprovalDialog:
         # 关闭按钮
         ttk.Button(
             btn_frame,
-            text="取消",
+            text="❌ 取消(拒绝)",
             command=self._on_close,
-            width=10
+            width=14
         ).pack(side=tk.RIGHT)
     
     def _on_decision(self, decision: str):
         """处理用户决定"""
         self.result = decision
+        try:
+            self.dialog.attributes("-topmost", False)
+            self.dialog.grab_release()
+        except Exception:
+            pass
         self.callback(decision)
         self.dialog.destroy()
     
     def _on_close(self):
         """窗口关闭 - 默认拒绝"""
+        try:
+            self.dialog.attributes("-topmost", False)
+            self.dialog.grab_release()
+        except Exception:
+            pass
         self.callback("deny")
         self.dialog.destroy()
 
-
-# 导入 scrolledtext 用于上面的类
-from tkinter import scrolledtext
 
 # 安全导入 llm 模块中的提供商类型
 try:
@@ -175,6 +183,7 @@ try:
         PROVIDER_DEFAULT_MODELS,
         get_models_for_provider,
         create_default_provider_config,
+        fetch_model_info_from_provider,
     )
     HAS_PROVIDERS = True
 except ImportError as e:
@@ -188,6 +197,7 @@ except ImportError as e:
     PROVIDER_DISPLAY_NAMES = {}
     PROVIDER_DEFAULT_BASE_URL = {}
     PROVIDER_DEFAULT_MODELS = {}
+    fetch_model_info_from_provider = None
 
 
 class ProviderConfigDialog:
@@ -277,21 +287,35 @@ class ProviderConfigDialog:
         
         ttk.Label(form_frame, text="最大 Token:").grid(row=6, column=0, sticky=tk.W, pady=5)
         self.max_tokens_var = tk.IntVar(value=4096)
-        ttk.Spinbox(form_frame, from_=256, to=128000, textvariable=self.max_tokens_var, width=37).grid(row=6, column=1, sticky=tk.W, pady=5)
+        ttk.Spinbox(form_frame, from_=256, to=1024000, textvariable=self.max_tokens_var, width=37).grid(row=6, column=1, sticky=tk.W, pady=5)
+        
+        # 上下文窗口（新增）
+        ctx_frame = ttk.Frame(form_frame)
+        ctx_frame.grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=5)
+        ttk.Label(ctx_frame, text="上下文窗口:").pack(side=tk.LEFT)
+        self.context_window_var = tk.IntVar(value=0)
+        self.ctx_spinbox = ttk.Spinbox(ctx_frame, from_=0, to=1048576, textvariable=self.context_window_var, width=15)
+        self.ctx_spinbox.pack(side=tk.LEFT, padx=(5, 5))
+        ttk.Label(ctx_frame, text="(0=自动)", font=("", 8)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(ctx_frame, text="🔄 从提供商获取", command=self._fetch_model_info).pack(side=tk.LEFT)
         
         # 优先级
-        ttk.Label(form_frame, text="优先级:").grid(row=7, column=0, sticky=tk.W, pady=5)
+        ttk.Label(form_frame, text="优先级:").grid(row=8, column=0, sticky=tk.W, pady=5)
         self.priority_var = tk.IntVar(value=0)
-        ttk.Spinbox(form_frame, from_=0, to=100, textvariable=self.priority_var, width=37).grid(row=7, column=1, sticky=tk.W, pady=5)
+        ttk.Spinbox(form_frame, from_=0, to=100, textvariable=self.priority_var, width=37).grid(row=8, column=1, sticky=tk.W, pady=5)
         
         # 启用开关
         self.enabled_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(form_frame, text="启用此配置", variable=self.enabled_var).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=10)
+        ttk.Checkbutton(form_frame, text="启用此配置", variable=self.enabled_var).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=5)
         
         # 思维链开关（MiMo 等推理模型适用）
         self.thinking_var = tk.BooleanVar(value=False)
         self.thinking_check = ttk.Checkbutton(form_frame, text="启用思维链 (thinking)", variable=self.thinking_var)
-        self.thinking_check.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=5)
+        self.thinking_check.grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=5)
+        
+        # 模型信息提示（新增）
+        self.model_info_label = ttk.Label(form_frame, text="", font=("", 8), foreground="gray")
+        self.model_info_label.grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=2)
         
         form_frame.columnconfigure(1, weight=1)
         
@@ -351,6 +375,7 @@ class ProviderConfigDialog:
         self.model_var.set(config.model)
         self.temperature_var.set(config.temperature)
         self.max_tokens_var.set(config.max_tokens)
+        self.context_window_var.set(getattr(config, 'context_window', 0))
         self.priority_var.set(config.priority)
         self.enabled_var.set(config.enabled)
         thinking_val = getattr(config, 'thinking_enabled', None)
@@ -365,6 +390,77 @@ class ProviderConfigDialog:
             self.model_combo['values'] = models
             if config.model not in models and models:
                 self.model_combo['values'] = models + [config.model]
+        
+        # 显示模型信息
+        self._update_model_info_label(config)
+    
+    def _update_model_info_label(self, config: any = None):
+        """更新模型信息提示标签"""
+        if config is None:
+            cw = self.context_window_var.get()
+            mt = self.max_tokens_var.get()
+            if cw > 0:
+                self.model_info_label.config(text=f"上下文窗口: {cw:,} | 最大 Token: {mt:,}", foreground="green")
+            else:
+                self.model_info_label.config(text=f"最大 Token: {mt:,} (上下文窗口: 自动)", foreground="gray")
+            return
+        cw = getattr(config, 'context_window', 0)
+        if cw > 0:
+            self.model_info_label.config(
+                text=f"上下文窗口: {cw:,} | 最大 Token: {config.max_tokens:,}",
+                foreground="green"
+            )
+        else:
+            try:
+                info = config.model_info
+                cw_auto = info.context_window if hasattr(info, 'context_window') else 8192
+                self.model_info_label.config(
+                    text=f"上下文窗口: {cw_auto:,} (自动) | 最大 Token: {config.max_tokens:,}",
+                    foreground="gray"
+                )
+            except Exception:
+                self.model_info_label.config(text="上下文窗口: 未知 (自动)", foreground="orange")
+    
+    def _fetch_model_info(self):
+        """从提供商获取模型信息"""
+        if not HAS_PROVIDERS:
+            messagebox.showerror("错误", "llm_providers 模块未正确导入")
+            return
+        import asyncio
+        provider_name = self.provider_name_map.get(self.provider_var.get())
+        if not provider_name:
+            messagebox.showwarning("警告", "请先选择 API 提供商")
+            return
+        model = self.custom_model_var.get().strip() or self.model_var.get()
+        if not model:
+            messagebox.showwarning("警告", "请先选择或输入模型名称")
+            return
+        temp_config = ProviderConfig(
+            provider=provider_name,
+            api_key=self.api_key_var.get(),
+            base_url=self.base_url_var.get() or None,
+            model=model,
+            temperature=self.temperature_var.get(),
+            max_tokens=self.max_tokens_var.get(),
+            context_window=self.context_window_var.get(),
+        )
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            info = loop.run_until_complete(fetch_model_info_from_provider(temp_config))
+            loop.close()
+            if info and info.context_window > 0:
+                self.context_window_var.set(info.context_window)
+                self._update_model_info_label()
+                ctx_str = f"{info.context_window:,}"
+                pricing_str = ""
+                if hasattr(info, 'pricing_input') and info.pricing_input > 0:
+                    pricing_str = f" | 定价: 输入 ${info.pricing_input}/M, 输出 ${info.pricing_output:.4f}/M"
+                messagebox.showinfo("获取成功", f"模型 '{model}' 上下文窗口: {ctx_str}{pricing_str}")
+            else:
+                messagebox.showwarning("获取失败", f"无法从提供商获取模型 '{model}' 的信息，请检查模型名称是否正确")
+        except Exception as e:
+            messagebox.showerror("错误", f"获取模型信息失败: {e}")
     
     def _save(self):
         """保存配置"""
@@ -396,6 +492,7 @@ class ProviderConfigDialog:
             model=model,
             temperature=self.temperature_var.get(),
             max_tokens=self.max_tokens_var.get(),
+            context_window=self.context_window_var.get(),
             priority=self.priority_var.get(),
             enabled=self.enabled_var.get(),
             thinking_enabled=self.thinking_var.get() if self.thinking_var.get() else None,
@@ -597,8 +694,15 @@ class EnhancedAgentConfigDialog:
         self.window.title("WS2 Agent 配置中心")
         self.window.geometry("1000x700")
         
-        # 初始化审批管理器和工作流引擎
-        self.approval_manager = ApprovalManager() if HAS_APPROVAL else None
+        # 使用全局审批管理器（与其他组件共享同一个实例）
+        if HAS_APPROVAL:
+            from .harness import get_global_approval_manager as get_harness_approval_manager
+            self.harness_approval_manager = get_harness_approval_manager()
+            self.approval_manager = self.harness_approval_manager
+        else:
+            self.approval_manager = None
+            self.harness_approval_manager = None
+        
         self.workflow_engine = get_workflow_engine() if HAS_WORKFLOW else None
         
         # 初始化统一会话管理器
@@ -635,7 +739,10 @@ class EnhancedAgentConfigDialog:
         
         # MCP 扩展系统标签页
         self._create_extensions_tab(notebook)
-        
+
+        # MCP 远程服务标签页
+        self._create_mcp_services_tab(notebook)
+
         # 审批管理标签页
         self._create_approval_tab(notebook)
         
@@ -737,6 +844,7 @@ class EnhancedAgentConfigDialog:
             (ProviderType.ANTHROPIC, "Claude"),
             (ProviderType.CLAUDE_CODE, "Claude Code"),
             (ProviderType.DEEPSEEK, "DeepSeek"),
+            (ProviderType.DEEPSEEK_PROXY, "DeepSeek Proxy (本地反代)"),
             (ProviderType.QWEN, "通义千问"),
             (ProviderType.QWEN_CODE, "Qwen Code"),
             (ProviderType.MIMO, "小米 MiMo"),
@@ -818,6 +926,12 @@ class EnhancedAgentConfigDialog:
             ("rag", "RAG 检索"),
             ("sandbox", "沙箱执行"),
             ("mcp_client", "MCP 客户端"),
+            ("gt", "GT 证明"),
+            ("feishu", "飞书"),
+            ("lean4", "Lean4"),
+            ("manim", "Manim"),
+            ("mathlens", "MathLens"),
+            ("autoresearch", "AutoResearch"),
         ]
         
         for value, text in categories:
@@ -1279,7 +1393,367 @@ class EnhancedAgentConfigDialog:
                 messagebox.showerror("错误", "加载扩展模块失败！")
         except Exception as e:
             messagebox.showerror("错误", f"加载扩展模块失败：{str(e)}")
-    
+
+    def _create_mcp_services_tab(self, notebook):
+        """创建 MCP 远程服务配置标签页"""
+        svc_frame = ttk.Frame(notebook, padding="10")
+        notebook.add(svc_frame, text="🌐 MCP 远程服务")
+
+        # 说明
+        info_frame = ttk.LabelFrame(svc_frame, text="远程 MCP 服务配置", padding="10")
+        info_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(info_frame, text=(
+            "配置远程 MCP 服务（如百度搜索等），Agent 将自动发现并调用这些服务提供的工具。\n"
+            "API Key 通过环境变量安全存储，不会硬编码到配置文件中。"
+        ), wraplength=750).pack(anchor=tk.W)
+
+        # 服务列表
+        list_frame = ttk.LabelFrame(svc_frame, text="已配置的服务", padding="5")
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        tree_frame = ttk.Frame(list_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 5))
+
+        self.mcp_svc_tree = ttk.Treeview(
+            tree_frame,
+            columns=("name", "type", "transport", "url", "api_key_set", "enabled"),
+            show="headings",
+            height=8,
+        )
+        self.mcp_svc_tree.heading("name", text="服务名称")
+        self.mcp_svc_tree.heading("type", text="类型")
+        self.mcp_svc_tree.heading("transport", text="传输方式")
+        self.mcp_svc_tree.heading("url", text="Endpoint URL")
+        self.mcp_svc_tree.heading("api_key_set", text="API Key")
+        self.mcp_svc_tree.heading("enabled", text="状态")
+        self.mcp_svc_tree.column("name", width=100)
+        self.mcp_svc_tree.column("type", width=60, anchor=tk.CENTER)
+        self.mcp_svc_tree.column("transport", width=70, anchor=tk.CENTER)
+        self.mcp_svc_tree.column("url", width=300)
+        self.mcp_svc_tree.column("api_key_set", width=80, anchor=tk.CENTER)
+        self.mcp_svc_tree.column("enabled", width=50, anchor=tk.CENTER)
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.mcp_svc_tree.yview)
+        self.mcp_svc_tree.configure(yscrollcommand=scrollbar.set)
+        self.mcp_svc_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 操作按钮
+        btn_frame = ttk.Frame(list_frame)
+        btn_frame.pack(fill=tk.X)
+
+        btn_left = ttk.Frame(btn_frame)
+        btn_left.pack(side=tk.LEFT)
+        ttk.Button(btn_left, text="➕ 添加服务", command=self._add_mcp_service).pack(side=tk.LEFT)
+        ttk.Button(btn_left, text="✏️ 编辑", command=self._edit_mcp_service).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(btn_left, text="🗑️ 删除", command=self._delete_mcp_service).pack(side=tk.LEFT, padx=(5, 0))
+
+        btn_right = ttk.Frame(btn_frame)
+        btn_right.pack(side=tk.RIGHT)
+        ttk.Button(btn_right, text="🔑 设置 API Key", command=self._set_mcp_api_key).pack(side=tk.LEFT)
+        ttk.Button(btn_right, text="🔄 测试连接", command=self._test_mcp_service).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(btn_right, text="✅ 启用", command=lambda: self._toggle_mcp_service(True)).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(btn_right, text="❌ 禁用", command=lambda: self._toggle_mcp_service(False)).pack(side=tk.LEFT, padx=(5, 0))
+
+        # 加载服务列表
+        self._refresh_mcp_services_list()
+
+    def _get_mcp_servers_config(self) -> dict:
+        """读取 mcp_servers.json"""
+        config_path = Path(__file__).parent / "mcp_servers.json"
+        if not config_path.exists():
+            return {"servers": {}}
+        try:
+            return json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"servers": {}}
+
+    def _save_mcp_servers_config(self, config: dict):
+        """保存 mcp_servers.json"""
+        config_path = Path(__file__).parent / "mcp_servers.json"
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _refresh_mcp_services_list(self):
+        """刷新 MCP 服务列表"""
+        if not hasattr(self, 'mcp_svc_tree'):
+            return
+        for item in self.mcp_svc_tree.get_children():
+            self.mcp_svc_tree.delete(item)
+
+        config = self._get_mcp_servers_config()
+        import os
+        for name, svc in config.get("servers", {}).items():
+            api_key_env = svc.get("api_key_env", "")
+            api_key_set = "✅ 已设置" if (api_key_env and os.environ.get(api_key_env)) else ("⚠️ 未设置" if api_key_env else "—")
+            enabled = "启用" if svc.get("enabled", True) else "禁用"
+            svc_type = svc.get("service_type", "mcp").upper()
+            transport = svc.get("transport", "http") if svc_type == "MCP" else "REST"
+            self.mcp_svc_tree.insert("", tk.END, iid=name, values=(
+                name,
+                svc_type,
+                transport,
+                svc.get("url", ""),
+                api_key_set,
+                enabled,
+            ))
+
+    def _add_mcp_service(self):
+        """添加 MCP 远程服务"""
+        dialog = tk.Toplevel(self.window)
+        dialog.title("添加远程服务")
+        dialog.geometry("500x450")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        fields = {}
+        row = 0
+        for label, key, default in [
+            ("服务名称", "name", "my-service"),
+            ("服务类型 (rest/mcp)", "service_type", "rest"),
+            ("传输方式 (http/sse/stdio, 仅mcp)", "transport", "http"),
+            ("Endpoint URL", "url", ""),
+            ("HTTP 方法 (仅rest)", "method", "POST"),
+            ("API Key 环境变量名", "api_key_env", ""),
+            ("API Key 获取文档链接", "api_key_doc", ""),
+            ("描述", "description", ""),
+        ]:
+            ttk.Label(dialog, text=label).grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            var = tk.StringVar(value=default)
+            entry = ttk.Entry(dialog, textvariable=var, width=40)
+            entry.grid(row=row, column=1, padx=10, pady=5)
+            fields[key] = var
+            row += 1
+
+        def on_save():
+            name = fields["name"].get().strip()
+            if not name:
+                messagebox.showwarning("提示", "服务名称不能为空", parent=dialog)
+                return
+            config = self._get_mcp_servers_config()
+            api_key_env = fields["api_key_env"].get().strip()
+            service_type = fields["service_type"].get().strip() or "rest"
+            headers = {}
+            if api_key_env:
+                headers["Authorization"] = f"Bearer ${{{api_key_env}}}"
+                headers["Content-Type"] = "application/json"
+            config.setdefault("servers", {})[name] = {
+                "service_type": service_type,
+                "transport": fields["transport"].get().strip() or "http",
+                "url": fields["url"].get().strip(),
+                "method": fields["method"].get().strip() or "POST",
+                "headers": headers,
+                "enabled": True,
+                "description": fields["description"].get().strip(),
+                "api_key_env": api_key_env,
+                "api_key_doc": fields["api_key_doc"].get().strip(),
+                "tools": [],
+            }
+            self._save_mcp_servers_config(config)
+            self._refresh_mcp_services_list()
+            dialog.destroy()
+
+        ttk.Button(dialog, text="保存", command=on_save).grid(row=row, column=0, columnspan=2, pady=20)
+
+    def _edit_mcp_service(self):
+        """编辑选中的 MCP 服务"""
+        sel = self.mcp_svc_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择一个服务")
+            return
+        name = sel[0]
+        config = self._get_mcp_servers_config()
+        svc = config.get("servers", {}).get(name)
+        if not svc:
+            return
+
+        dialog = tk.Toplevel(self.window)
+        dialog.title(f"编辑服务: {name}")
+        dialog.geometry("500x450")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        fields = {}
+        row = 0
+        for label, key, default in [
+            ("服务类型 (rest/mcp)", "service_type", svc.get("service_type", "mcp")),
+            ("传输方式 (http/sse/stdio, 仅mcp)", "transport", svc.get("transport", "http")),
+            ("Endpoint URL", "url", svc.get("url", "")),
+            ("HTTP 方法 (仅rest)", "method", svc.get("method", "POST")),
+            ("API Key 环境变量名", "api_key_env", svc.get("api_key_env", "")),
+            ("API Key 获取文档链接", "api_key_doc", svc.get("api_key_doc", "")),
+            ("描述", "description", svc.get("description", "")),
+        ]:
+            ttk.Label(dialog, text=label).grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            var = tk.StringVar(value=default)
+            entry = ttk.Entry(dialog, textvariable=var, width=40)
+            entry.grid(row=row, column=1, padx=10, pady=5)
+            fields[key] = var
+            row += 1
+
+        def on_save():
+            api_key_env = fields["api_key_env"].get().strip()
+            headers = svc.get("headers", {})
+            if api_key_env:
+                headers["Authorization"] = f"Bearer ${{{api_key_env}}}"
+                headers["Content-Type"] = "application/json"
+            svc["service_type"] = fields["service_type"].get().strip() or "rest"
+            svc["transport"] = fields["transport"].get().strip() or "http"
+            svc["url"] = fields["url"].get().strip()
+            svc["method"] = fields["method"].get().strip() or "POST"
+            svc["headers"] = headers
+            svc["api_key_env"] = api_key_env
+            svc["api_key_doc"] = fields["api_key_doc"].get().strip()
+            svc["description"] = fields["description"].get().strip()
+            self._save_mcp_servers_config(config)
+            self._refresh_mcp_services_list()
+            dialog.destroy()
+
+        ttk.Button(dialog, text="保存", command=on_save).grid(row=row, column=0, columnspan=2, pady=20)
+
+    def _delete_mcp_service(self):
+        """删除选中的 MCP 服务"""
+        sel = self.mcp_svc_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择一个服务")
+            return
+        name = sel[0]
+        if not messagebox.askyesno("确认", f"确定删除服务 '{name}'？"):
+            return
+        config = self._get_mcp_servers_config()
+        config.get("servers", {}).pop(name, None)
+        self._save_mcp_servers_config(config)
+        self._refresh_mcp_services_list()
+
+    def _set_mcp_api_key(self):
+        """设置选中服务的 API Key（写入环境变量 + 持久化到 .env）"""
+        sel = self.mcp_svc_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择一个服务")
+            return
+        name = sel[0]
+        config = self._get_mcp_servers_config()
+        svc = config.get("servers", {}).get(name)
+        if not svc:
+            return
+        api_key_env = svc.get("api_key_env", "")
+        if not api_key_env:
+            messagebox.showinfo("提示", f"服务 '{name}' 未配置 API Key 环境变量")
+            return
+
+        import os
+        current = os.environ.get(api_key_env, "")
+
+        dialog = tk.Toplevel(self.window)
+        dialog.title(f"设置 API Key: {api_key_env}")
+        dialog.geometry("500x150")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text=f"环境变量: {api_key_env}").pack(padx=10, pady=(10, 5), anchor="w")
+        key_var = tk.StringVar(value=current)
+        entry = ttk.Entry(dialog, textvariable=key_var, show="*", width=50)
+        entry.pack(padx=10, pady=5)
+
+        doc_url = svc.get("api_key_doc", "")
+        if doc_url:
+            ttk.Label(dialog, text=f"获取 API Key: {doc_url}", foreground="blue").pack(padx=10, pady=2, anchor="w")
+
+        def on_save():
+            value = key_var.get().strip()
+            if not value:
+                messagebox.showwarning("提示", "API Key 不能为空", parent=dialog)
+                return
+            # 设置到当前进程环境变量
+            os.environ[api_key_env] = value
+            # 持久化到 .env 文件
+            env_path = Path(__file__).parent.parent / ".env"
+            lines = []
+            if env_path.exists():
+                lines = env_path.read_text(encoding="utf-8").splitlines()
+            # 更新或添加
+            found = False
+            for i, line in enumerate(lines):
+                if line.startswith(f"{api_key_env}="):
+                    lines[i] = f"{api_key_env}={value}"
+                    found = True
+                    break
+            if not found:
+                lines.append(f"{api_key_env}={value}")
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self._refresh_mcp_services_list()
+            messagebox.showinfo("成功", f"API Key 已设置并保存到 .env", parent=dialog)
+            dialog.destroy()
+
+        ttk.Button(dialog, text="保存", command=on_save).pack(pady=10)
+
+    def _test_mcp_service(self):
+        """测试选中服务的连接"""
+        sel = self.mcp_svc_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择一个服务")
+            return
+        name = sel[0]
+        config = self._get_mcp_servers_config()
+        svc = config.get("servers", {}).get(name)
+        if not svc:
+            return
+
+        try:
+            from .mcp_client.client import MCPClientManager
+            from .mcp_client.transport import TransportConfig
+            from .tools import _resolve_api_key
+            import re
+
+            # 解析 headers
+            raw_headers = svc.get("headers", {})
+            resolved_headers = {}
+            for key, value in raw_headers.items():
+                if isinstance(value, str) and "${" in value:
+                    resolved_headers[key] = re.sub(
+                        r'\$\{(\w+)\}',
+                        lambda m: _resolve_api_key(m.group(1)) or m.group(0),
+                        value,
+                    )
+                else:
+                    resolved_headers[key] = value
+
+            mgr = MCPClientManager()
+            tc = TransportConfig(
+                type=svc.get("transport", "http"),
+                url=svc.get("url", ""),
+                headers=resolved_headers,
+                timeout=15,
+            )
+            connected = mgr.register(name, tc)
+            if connected:
+                state = mgr.get_state(name)
+                tools = mgr.list_tools()
+                tool_names = [t.get("name", "?") for t in tools]
+                messagebox.showinfo(
+                    "连接成功",
+                    f"服务 '{name}' 连接成功！\n发现 {len(tools)} 个工具: {', '.join(tool_names[:5])}{'...' if len(tool_names) > 5 else ''}",
+                )
+                mgr.unregister(name)
+            else:
+                state = mgr.get_state(name)
+                messagebox.showerror("连接失败", f"服务 '{name}' 连接失败: {state.error if state else 'unknown'}")
+        except Exception as e:
+            messagebox.showerror("测试失败", f"测试服务 '{name}' 时出错: {e}")
+
+    def _toggle_mcp_service(self, enable: bool):
+        """启用/禁用 MCP 服务"""
+        sel = self.mcp_svc_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择一个服务")
+            return
+        name = sel[0]
+        config = self._get_mcp_servers_config()
+        svc = config.get("servers", {}).get(name)
+        if svc:
+            svc["enabled"] = enable
+            self._save_mcp_servers_config(config)
+            self._refresh_mcp_services_list()
+
     def _create_approval_tab(self, notebook):
         """创建审批管理标签页"""
         approval_frame = ttk.Frame(notebook, padding="10")
@@ -1353,6 +1827,120 @@ class EnhancedAgentConfigDialog:
         self.always_approve_text = scrolledtext.ScrolledText(always_approve_frame, height=4, wrap=tk.WORD)
         self.always_approve_text.pack(fill=tk.X)
         self.always_approve_text.config(state=tk.DISABLED)
+        
+        # 添加/删除按钮
+        always_approve_btn_frame = ttk.Frame(approval_frame)
+        always_approve_btn_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Button(always_approve_btn_frame, text="➕ 添加工具", 
+                   command=self._add_always_approve_tool).pack(side=tk.LEFT)
+        ttk.Button(always_approve_btn_frame, text="🗑️ 删除选中", 
+                   command=self._remove_always_approve_tool).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(always_approve_btn_frame, text="🔄 刷新", 
+                   command=self._refresh_always_approve_list).pack(side=tk.LEFT, padx=(5, 0))
+    
+    def _add_always_approve_tool(self):
+        """添加工具到总是批准列表"""
+        if not HAS_APPROVAL or not self.approval_manager:
+            return
+        
+        dialog = tk.Toplevel(self.window)
+        dialog.title("添加总是批准的工具")
+        dialog.geometry("400x150")
+        dialog.transient(self.window)
+        dialog.grab_set()
+        
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="工具名称:").pack(anchor=tk.W)
+        
+        tool_name_var = tk.StringVar()
+        tool_entry = ttk.Entry(frame, textvariable=tool_name_var, width=40)
+        tool_entry.pack(fill=tk.X, pady=(5, 10))
+        tool_entry.focus()
+        
+        def on_add():
+            tool_name = tool_name_var.get().strip()
+            if not tool_name:
+                messagebox.showwarning("警告", "请输入工具名称")
+                return
+            
+            self.approval_manager.add_approved_tool(tool_name)
+            config_manager = get_config_manager()
+            config_manager.add_always_approved_tool(tool_name)
+            
+            self._refresh_always_approve_list()
+            dialog.destroy()
+            messagebox.showinfo("成功", f"已将 '{tool_name}' 添加到总是批准列表")
+        
+        def on_cancel():
+            dialog.destroy()
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="添加", command=on_add).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="取消", command=on_cancel).pack(side=tk.LEFT, padx=(10, 0))
+        
+        tool_entry.bind("<Return>", lambda e: on_add())
+    
+    def _remove_always_approve_tool(self):
+        """从总是批准列表中删除工具"""
+        if not HAS_APPROVAL or not self.approval_manager:
+            return
+        
+        current_tools = sorted(self.approval_manager.get_approved_tools())
+        if not current_tools:
+            messagebox.showinfo("提示", "总是批准列表为空")
+            return
+        
+        dialog = tk.Toplevel(self.window)
+        dialog.title("删除总是批准的工具")
+        dialog.geometry("400x300")
+        dialog.transient(self.window)
+        dialog.grab_set()
+        
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="选择要删除的工具:").pack(anchor=tk.W)
+        
+        list_frame = ttk.Frame(frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        
+        listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=10)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        for tool in sorted(current_tools):
+            listbox.insert(tk.END, tool)
+        
+        def on_remove():
+            selected = listbox.curselection()
+            if not selected:
+                messagebox.showwarning("警告", "请选择要删除的工具")
+                return
+            
+            for idx in reversed(selected):
+                tool_name = listbox.get(idx)
+                self.approval_manager.remove_approved_tool(tool_name)
+                config_manager = get_config_manager()
+                config_manager.remove_always_approved_tool(tool_name)
+            
+            self._refresh_always_approve_list()
+            dialog.destroy()
+            messagebox.showinfo("成功", f"已删除 {len(selected)} 个工具")
+        
+        def on_cancel():
+            dialog.destroy()
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btn_frame, text="删除", command=on_remove).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="取消", command=on_cancel).pack(side=tk.LEFT, padx=(10, 0))
     
     def _set_approval_mode(self):
         """设置审批模式"""
@@ -1365,8 +1953,17 @@ class EnhancedAgentConfigDialog:
             "auto_edit": ApprovalMode.AUTO_EDIT,
             "full_auto": ApprovalMode.FULL_AUTO,
         }
-        self.approval_manager._mode = mode_map[mode_str]
-        messagebox.showinfo("成功", f"审批模式已设置为: {mode_str}")
+        self.approval_manager.set_mode(mode_map[mode_str])
+        
+        config_manager = get_config_manager()
+        config_manager.set_approval_mode(mode_str)
+        
+        mode_names = {
+            "suggest": "建议模式",
+            "auto_edit": "自动编辑模式",
+            "full_auto": "全自动模式"
+        }
+        messagebox.showinfo("成功", f"审批模式已设置为: {mode_names.get(mode_str, mode_str)}\n修改已即时生效")
         self._refresh_always_approve_list()
     
     def _reset_approval_permissions(self):
@@ -1376,6 +1973,8 @@ class EnhancedAgentConfigDialog:
         
         if messagebox.askyesno("确认", "确定要重置所有权限设置吗？\n所有总是批准的设置将被清除。"):
             self.approval_manager.reset_permissions()
+            config_manager = get_config_manager()
+            config_manager.clear_always_approved_tools()
             self._refresh_always_approve_list()
             self._refresh_pending_list()
             messagebox.showinfo("成功", "权限已重置")
@@ -1405,8 +2004,9 @@ class EnhancedAgentConfigDialog:
         self.always_approve_text.config(state=tk.NORMAL)
         self.always_approve_text.delete(1.0, tk.END)
         
-        if self.approval_manager._always_approved:
-            self.always_approve_text.insert(tk.END, "\n".join(sorted(self.approval_manager._always_approved)))
+        approved = self.approval_manager.get_approved_tools()
+        if approved:
+            self.always_approve_text.insert(tk.END, "\n".join(sorted(approved)))
         else:
             self.always_approve_text.insert(tk.END, "暂无总是批准的工具")
         
@@ -1422,7 +2022,7 @@ class EnhancedAgentConfigDialog:
             req_id = values[0]
             self.approval_manager.decide(req_id, ApprovalDecision.APPROVE)
         
-        self._refresh_pending_list()
+        self.window.after(100, self._refresh_pending_list)
     
     def _deny_selected_pending(self):
         """拒绝选中的待审批请求"""
@@ -1434,6 +2034,38 @@ class EnhancedAgentConfigDialog:
             req_id = values[0]
             self.approval_manager.decide(req_id, ApprovalDecision.DENY)
         
+        self.window.after(100, self._refresh_pending_list)
+    
+    def _on_approval_request(self, request: ApprovalRequest):
+        """处理新的审批请求（可能在非主线程调用）"""
+        if not hasattr(self, 'window') or not self.window or not self.window.winfo_exists():
+            import logging
+            logging.getLogger(__name__).warning("[审批] 配置对话框已关闭，无法显示审批弹窗")
+            request.decide(ApprovalDecision.DENY)
+            return
+        self.window.after(0, lambda: self._show_approval_dialog(request))
+    
+    def _show_approval_dialog(self, request: ApprovalRequest):
+        """显示审批对话框"""
+        parent_window = self.window if hasattr(self, 'window') and self.window and self.window.winfo_exists() else self.parent
+        
+        def handle_decision(decision_str: str):
+            decision_map = {
+                "approve": ApprovalDecision.APPROVE,
+                "deny": ApprovalDecision.DENY,
+                "always_approve": ApprovalDecision.ALWAYS_APPROVE,
+            }
+            decision = decision_map.get(decision_str, ApprovalDecision.DENY)
+            request.decide(decision)
+            
+            if decision_str == "always_approve" and request.tool_name:
+                config_manager = get_config_manager()
+                config_manager.add_always_approved_tool(request.tool_name)
+            
+            self._refresh_pending_list()
+            self._refresh_always_approve_list()
+        
+        ApprovalDialog(parent_window, request, handle_decision)
         self._refresh_pending_list()
     
     def _create_workflow_tab(self, notebook):
@@ -1707,7 +2339,7 @@ class EnhancedAgentConfigDialog:
         instances = self.workflow_engine.persistence.list_instances(limit=20)
         for inst in instances:
             progress = f"{inst.get('progress', 0)*100:.0f}%"
-            step_name = inst.get("current_step_name", "") or inst.get("current_step_id", "")
+            step_name = inst.get("current_step_name", "") or inst.get("current_step_id", "") or ""
             status = inst.get("status", "")
             status_icon = {"running": "🔄", "completed": "✅", "failed": "❌", "paused": "⏸️", "cancelled": "🚫"}.get(status, status)
             self.instance_tree.insert("", tk.END, values=(
@@ -2033,8 +2665,76 @@ class EnhancedAgentConfigDialog:
             self.tools_tree.delete(item)
 
         self._all_tools = []  # 清空并重建
+        
+        # 获取所有工具（内置 + WS2 + DataHub）
+        all_tools = list(get_tools())
+        
+        base_dir = getattr(self, 'base_dir', None)
+        
+        # 尝试获取 WS2 工具
+        try:
+            from .ws2_tools import get_ws2_tools
+            ws2_tools = get_ws2_tools(base_dir=base_dir)
+            all_tools.extend(ws2_tools)
+        except Exception:
+            pass
+        
+        # 尝试获取 DataHub 工具
+        try:
+            from .ws2_hub_tools import get_hub_tools
+            hub_tools = get_hub_tools(base_dir=base_dir)
+            all_tools.extend(hub_tools)
+        except Exception:
+            pass
+        
+        # 尝试获取 GT 证明工具
+        try:
+            from .gt.gt_tools import get_gt_tools
+            gt_tools = get_gt_tools()
+            all_tools.extend(gt_tools)
+        except Exception:
+            pass
+
+        # 尝试获取飞书工具
+        try:
+            from .feishu.feishu_tools import get_feishu_tools
+            feishu_tools = get_feishu_tools()
+            all_tools.extend(feishu_tools)
+        except Exception:
+            pass
+        
+        # 尝试获取 Lean4 工具
+        try:
+            from .research.lean4.lean4_tools import get_lean4_tools
+            lean4_tools = get_lean4_tools()
+            all_tools.extend(lean4_tools)
+        except Exception:
+            pass
+        
+        # 尝试获取 Manim 工具
+        try:
+            from .research.manim.manim_tools import get_manim_tools
+            manim_tools = get_manim_tools()
+            all_tools.extend(manim_tools)
+        except Exception:
+            pass
+        
+        # 尝试获取 MathLens 工具
+        try:
+            from .research.mathlens.mathlens_tools import get_mathlens_tools
+            mathlens_tools = get_mathlens_tools()
+            all_tools.extend(mathlens_tools)
+        except Exception:
+            pass
+        
+        try:
+            from .research.autoresearch.autoresearch_tools import get_autoresearch_tools
+            autoresearch_tools = get_autoresearch_tools()
+            all_tools.extend(autoresearch_tools)
+        except Exception:
+            pass
+        
         # 先确保所有工具都有配置
-        all_tools = get_tools()
         self.config_manager.init_default_tool_configs(all_tools)
         # 获取启用的工具名称
         enabled_names = [t.name for t in self.config_manager.get_enabled_tools()]
@@ -2128,6 +2828,68 @@ class EnhancedAgentConfigDialog:
             "rag_retrieval": "rag",
             "sandbox_execute": "sandbox",
             "mcp_client": "mcp_client",
+            # GT 证明工具
+            "gt_validate": "gt",
+            "gt_rate": "gt",
+            "gt_gap_ledger": "gt",
+            "gt_assumption_audit": "gt",
+            "gt_search_replace": "gt",
+            "gt_evolve": "gt",
+            "gt_workflow_run": "gt",
+            "gt_research": "gt",
+            "gt_compile": "gt",
+            # 飞书工具
+            "feishu_doc_read": "feishu",
+            "feishu_doc_write": "feishu",
+            "feishu_msg": "feishu",
+            "feishu_sheet": "feishu",
+            "feishu_bitable": "feishu",
+            "feishu_drive": "feishu",
+            "feishu_calendar": "feishu",
+            "feishu_wiki": "feishu",
+            "feishu_auth": "feishu",
+            "feishu_api": "feishu",
+            # Lean4 工具
+            "lean4_check": "lean4",
+            "lean4_open_file": "lean4",
+            "lean4_get_diagnostics": "lean4",
+            "lean4_get_goal_state": "lean4",
+            "lean4_lake_build": "lean4",
+            "lean4_prove": "lean4",
+            "lean4_formalize": "lean4",
+            "lean4_golf": "lean4",
+            "lean4_review": "lean4",
+            "lean4_refactor": "lean4",
+            "lean4_learn": "lean4",
+            "lean4_agent": "lean4",
+            "lean4_mathlib_search": "lean4",
+            # Manim 工具
+            "manim_generate": "manim",
+            "manim_edit": "manim",
+            "manim_list_renders": "manim",
+            "manim_render": "manim",
+            "manim_rag_search": "manim",
+            "manim_concept_analyze": "manim",
+            "manim_code_review": "manim",
+            "manim_self_critique": "manim",
+            "manim_tts_generate": "manim",
+            "manim_schema_generate": "manim",
+            "manim_skills_list": "manim",
+            # MathLens 工具
+            "mathlens_init": "mathlens",
+            "mathlens_generate_tts": "mathlens",
+            "mathlens_validate_audio": "mathlens",
+            "mathlens_check": "mathlens",
+            "mathlens_render": "mathlens",
+            # AutoResearch 工具
+            "autoresearch_topic_init": "autoresearch",
+            "autoresearch_lit_search": "autoresearch",
+            "autoresearch_synthesis": "autoresearch",
+            "autoresearch_exp_design": "autoresearch",
+            "autoresearch_result_analysis": "autoresearch",
+            "autoresearch_quality_gate": "autoresearch",
+            "autoresearch_skill": "autoresearch",
+            "autoresearch_list_skills": "autoresearch",
         }
         
         # 分类显示名称
@@ -2137,7 +2899,13 @@ class EnhancedAgentConfigDialog:
             "hub": "DataHub",
             "rag": "RAG",
             "sandbox": "沙箱",
-            "mcp_client": "MCP"
+            "mcp_client": "MCP",
+            "gt": "GT证明",
+            "feishu": "飞书",
+            "lean4": "Lean4",
+            "manim": "Manim",
+            "mathlens": "MathLens",
+            "autoresearch": "AutoResearch",
         }
         
         for tool in all_tools:
@@ -2858,12 +3626,12 @@ class EnhancedAgentConfigDialog:
             return
         tasks = engine.list_tasks()
         for t in tasks:
-            enabled = "✅" if t.get("enabled", True) else "⏸️"
+            enabled = "✅" if t.enabled else "⏸️"
             self.auto_task_tree.insert("", tk.END, values=(
-                t.get("task_id", "")[:8],
-                t.get("name", ""),
-                t.get("automation_type", ""),
-                t.get("trigger_type", ""),
+                t.task_id[:8],
+                t.name,
+                t.automation_type,
+                t.trigger_type,
                 enabled
             ))
 
@@ -2921,23 +3689,28 @@ class EnhancedAgentConfigDialog:
 
         def do_add():
             try:
-                from .automation.persistence import AutomationTask, AutomationTrigger
+                from .automation.engine import get_automation_engine
                 from .automation.triggers import TriggerType
                 interval = max(int(interval_var.get()), 30)
-                task = AutomationTask(
-                    task_id="",
+                trigger_type_str = trigger_var.get()
+                trigger_config = {}
+                if trigger_type_str == TriggerType.INTERVAL.value:
+                    trigger_config["interval_seconds"] = interval * 60
+                elif trigger_type_str == TriggerType.CRON.value:
+                    trigger_config["cron_expr"] = cron_var.get()
+                action_config = {}
+                auto_type = type_var.get()
+                if auto_type == "workflow":
+                    action_config["workflow_id"] = wf_var.get()
+                elif auto_type == "model":
+                    action_config["prompt"] = prompt_var.get()
+                engine.register_task(
                     name=name_var.get(),
-                    description="",
-                    automation_type=type_var.get(),
-                    trigger=AutomationTrigger(
-                        type=TriggerType(trigger_var.get()),
-                        interval_minutes=interval,
-                        cron_expr=cron_var.get() if trigger_var.get() == "cron" else None,
-                    ),
-                    workflow_id=wf_var.get() or None,
-                    model_prompt_template=prompt_var.get() or None,
+                    automation_type=auto_type,
+                    trigger_type=trigger_type_str,
+                    trigger_config=trigger_config,
+                    action_config=action_config,
                 )
-                engine.register_task(task)
                 self._refresh_automation_tasks()
                 dlg.destroy()
             except Exception as e:
@@ -2959,8 +3732,8 @@ class EnhancedAgentConfigDialog:
         task_id_short = self.auto_task_tree.item(selection[0], "values")[0]
         tasks = engine.list_tasks()
         for t in tasks:
-            if t.get("task_id", "").startswith(task_id_short):
-                engine.trigger_task(t["task_id"])
+            if t.task_id.startswith(task_id_short):
+                engine.trigger_task(t.task_id)
                 messagebox.showinfo("成功", "任务已触发")
                 return
 
@@ -2973,8 +3746,8 @@ class EnhancedAgentConfigDialog:
             return
         task_id_short = self.auto_task_tree.item(selection[0], "values")[0]
         for t in engine.list_tasks():
-            if t.get("task_id", "").startswith(task_id_short):
-                engine.enable_task(t["task_id"])
+            if t.task_id.startswith(task_id_short):
+                engine.enable_task(t.task_id)
                 self._refresh_automation_tasks()
                 return
 
@@ -2987,8 +3760,8 @@ class EnhancedAgentConfigDialog:
             return
         task_id_short = self.auto_task_tree.item(selection[0], "values")[0]
         for t in engine.list_tasks():
-            if t.get("task_id", "").startswith(task_id_short):
-                engine.disable_task(t["task_id"])
+            if t.task_id.startswith(task_id_short):
+                engine.disable_task(t.task_id)
                 self._refresh_automation_tasks()
                 return
 
@@ -3003,8 +3776,8 @@ class EnhancedAgentConfigDialog:
             return
         task_id_short = self.auto_task_tree.item(selection[0], "values")[0]
         for t in engine.list_tasks():
-            if t.get("task_id", "").startswith(task_id_short):
-                engine.unregister_task(t["task_id"])
+            if t.task_id.startswith(task_id_short):
+                engine.unregister_task(t.task_id)
                 self._refresh_automation_tasks()
                 return
 
@@ -3017,28 +3790,28 @@ class EnhancedAgentConfigDialog:
             return
         task_id_short = self.auto_task_tree.item(selection[0], "values")[0]
         for t in engine.list_tasks():
-            if t.get("task_id", "").startswith(task_id_short):
-                logs = engine.persistence.get_logs(t["task_id"], limit=20)
+            if t.task_id.startswith(task_id_short):
+                logs = engine.persistence.get_logs(t.task_id, limit=20)
                 self.auto_log_text.config(state=tk.NORMAL)
                 self.auto_log_text.delete(1.0, tk.END)
                 for log in reversed(logs):
-                    ts = log.get("created_at", "")[11:19]
+                    ts = (log.get("created_at") or "")[11:19]
                     level = log.get("log_level", "info")
                     self.auto_log_text.insert(tk.END, f"[{ts}] [{level}] {log.get('message', '')}\n")
                 self.auto_log_text.config(state=tk.DISABLED)
 
-                runs = engine.persistence.list_runs(t["task_id"], limit=10)
+                runs = engine.persistence.list_runs(t.task_id, limit=10)
                 for item in self.auto_run_tree.get_children():
                     self.auto_run_tree.delete(item)
                 for r in runs:
-                    status = r.get("status", "")
+                    status = r.status
                     icon = {"completed": "✅", "failed": "❌", "running": "🔄"}.get(status, status)
                     self.auto_run_tree.insert("", tk.END, values=(
-                        r.get("run_id", "")[:8],
-                        t.get("name", ""),
+                        r.run_id[:8],
+                        t.name,
                         icon,
-                        r.get("started_at", "")[11:19] if r.get("started_at") else "",
-                        r.get("duration_seconds", "")
+                        r.started_at[11:19] if r.started_at else "",
+                        f"{r.duration_ms}ms" if r.duration_ms else ""
                     ))
                 return
 
@@ -3060,3 +3833,75 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.withdraw()
     show_enhanced_config_dialog(root)
+
+
+class GlobalApprovalManager:
+    """全局审批弹窗管理器 - 桥接 ApprovalManager 和 UI 弹窗"""
+    
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._root_window = None
+        self._trust_gate = TrustGate() if HAS_TRUST_GATE else None
+    
+    def set_root_window(self, root_window):
+        self._root_window = root_window
+    
+    def show_approval_dialog(self, request):
+        if not HAS_APPROVAL:
+            request.decide(ApprovalDecision.DENY)
+            return
+
+        if self._trust_gate:
+            tool_name = getattr(request, 'tool_name', '') or ''
+            source_plugin = getattr(request, '_source_plugin', '') or ''
+            if source_plugin and not self._trust_gate.check_tool_access(source_plugin, tool_name):
+                import logging
+                logging.getLogger(__name__).warning(f"[审批] TrustGate拒绝: plugin={source_plugin} tool={tool_name}")
+                request.decide(ApprovalDecision.DENY)
+                return
+        
+        if self._root_window and hasattr(self._root_window, 'winfo_exists') and self._root_window.winfo_exists():
+            from .harness import ApprovalDecision
+            
+            def handle_decision(decision_str: str):
+                decision_map = {
+                    "approve": ApprovalDecision.APPROVE,
+                    "deny": ApprovalDecision.DENY,
+                    "always_approve": ApprovalDecision.ALWAYS_APPROVE,
+                }
+                decision = decision_map.get(decision_str, ApprovalDecision.DENY)
+                request.decide(decision)
+                
+                if decision_str == "always_approve" and request.tool_name:
+                    try:
+                        config_manager = get_config_manager()
+                        config_manager.add_always_approved_tool(request.tool_name)
+                    except Exception:
+                        pass
+            
+            self._root_window.after(0, lambda: ApprovalDialog(self._root_window, request, handle_decision))
+        else:
+            import logging
+            logging.getLogger(__name__).warning("[审批] 没有可用的根窗口来显示审批弹窗，自动拒绝")
+            request.decide(ApprovalDecision.DENY)
+
+
+_global_approval_manager = None
+
+
+def get_global_approval_manager() -> GlobalApprovalManager:
+    """获取全局审批弹窗管理器"""
+    global _global_approval_manager
+    if _global_approval_manager is None:
+        _global_approval_manager = GlobalApprovalManager()
+    return _global_approval_manager

@@ -27,6 +27,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+class CancelledError(Exception):
+    """请求被用户取消的异常"""
+    pass
+
 try:
     from openai import OpenAI, APIError, RateLimitError, APITimeoutError, APIConnectionError
     HAS_OPENAI = True
@@ -114,9 +118,42 @@ def _safe_tool_id(tool_id: str) -> str:
     return tool_id
 
 
-def _sanitize_messages(messages: list[dict]) -> list[dict]:
+def filter_content_parts(content: list, model_info: 'ModelInfo') -> list:
+    """根据模型能力过滤多模态 content parts（借鉴 kosong chat_provider 适配层）。
+
+    不支持 image_url 的模型：将 image_url part 转为文本描述 [图片: path]
+    不支持 video_url 的模型：将 video_url part 转为文本描述 [视频: path]
+    """
+    if not isinstance(content, list):
+        return content
+
+    filtered = []
+    for part in content:
+        if not isinstance(part, dict):
+            filtered.append(part)
+            continue
+        part_type = part.get("type")
+        if part_type == "image_url" and not model_info.supports_image_input:
+            # 降级为文本描述
+            url = part.get("image_url", {}).get("url", "")
+            path = ""
+            if url.startswith("data:"):
+                path = part.get("image_url", {}).get("path", "")
+            filtered.append({"type": "text", "text": f"[图片{': ' + path if path else ''} — 当前模型不支持图片输入]"})
+        elif part_type == "video_url" and not model_info.supports_video_input:
+            url = part.get("video_url", {}).get("url", "")
+            path = part.get("video_url", {}).get("path", "")
+            filtered.append({"type": "text", "text": f"[视频{': ' + path if path else ''} — 当前模型不支持视频输入]"})
+        else:
+            filtered.append(part)
+    return filtered
+
+
+def _sanitize_messages(messages: list[dict], model_info: 'ModelInfo | None' = None) -> list[dict]:
     """Ensure all content fields are strings, not null/None.
-    Also ensures tool_call_id is never None (empty string is acceptable)."""
+    Also ensures tool_call_id is never None (empty string is acceptable).
+    Supports multimodal content parts: text, image_url, video_url.
+    When model_info is provided, filters content parts by model capabilities."""
     if not messages:
         return []
     sanitized = []
@@ -126,17 +163,36 @@ def _sanitize_messages(messages: list[dict]) -> list[dict]:
         if content is None:
             msg_copy["content"] = ""
         elif isinstance(content, list):
+            # 先按模型能力过滤
+            if model_info is not None:
+                content = filter_content_parts(content, model_info)
             cleaned_parts = []
+            has_valid_multimodal = False
             for part in content:
                 if isinstance(part, dict):
-                    if part.get("type") == "text" and part.get("text") is None:
-                        part = dict(part)
-                        part["text"] = ""
-                    cleaned_parts.append(part)
-                else:
-                    cleaned_parts.append(part)
-            msg_copy["content"] = cleaned_parts
-        # 确保 tool_call_id 不为 None（API 要求 string 类型）
+                    part_type = part.get("type")
+                    if part_type == "text":
+                        has_valid_multimodal = True
+                        if part.get("text") is None:
+                            part = dict(part)
+                            part["text"] = ""
+                        cleaned_parts.append(part)
+                    elif part_type == "image_url":
+                        has_valid_multimodal = True
+                        cleaned_parts.append(part)
+                    elif part_type == "video_url":
+                        has_valid_multimodal = True
+                        cleaned_parts.append(part)
+                elif isinstance(part, str):
+                    cleaned_parts.append({"type": "text", "text": part})
+            if has_valid_multimodal:
+                msg_copy["content"] = cleaned_parts
+            else:
+                msg_copy["content"] = "\n".join(str(p) if isinstance(p, str) else json.dumps(p, ensure_ascii=False) for p in content)
+        elif isinstance(content, dict):
+            msg_copy["content"] = json.dumps(content, ensure_ascii=False)
+        elif not isinstance(content, str):
+            msg_copy["content"] = str(content)
         if msg_copy.get("role") == "tool" and msg_copy.get("tool_call_id") is None:
             msg_copy["tool_call_id"] = ""
         sanitized.append(msg_copy)
@@ -163,6 +219,7 @@ class LLMResponse:
     completion_tokens: int = 0
     model: str = ""
     finish_reason: str = ""
+    cancelled: bool = False  # 标记请求是否被用户取消
 
     @property
     def message(self) -> dict:
@@ -198,6 +255,8 @@ _PRICING = {
     "gpt-4o-mini": (0.15, 0.6),
     "deepseek-chat": (0.27, 1.10),
     "deepseek-reasoner": (0.55, 2.19),
+    "deepseek-v4-flash": (0, 0),  # DeepSeek 网页版免费
+    "deepseek-v4": (0, 0),  # DeepSeek 网页版免费
     "claude-opus-4-6": (5, 25),
     "claude-sonnet-4-6": (3, 15),
     "claude-haiku-4-5": (1, 5),
@@ -223,6 +282,7 @@ class ProviderType(str, Enum):
     ANTHROPIC = "anthropic"
     CLAUDE_CODE = "claude-code"
     DEEPSEEK = "deepseek"
+    DEEPSEEK_PROXY = "deepseek-proxy"  # DeepSeek 网页版反代（本地免费）
     QWEN = "qwen"
     QWEN_CODE = "qwen-code"
     DOUBAO = "doubao"
@@ -253,6 +313,8 @@ class ProviderType(str, Enum):
     NOUS_RESEARCH = "nous-research"
     WANDB = "wandb"
     MIMO = "mimo"
+    KIMI = "kimi"
+    STEP = "step"
     CUSTOM = "custom"
     SIMULATOR = "simulator"
 
@@ -262,6 +324,7 @@ PROVIDER_DISPLAY_NAMES = {
     ProviderType.ANTHROPIC: "Anthropic (Claude)",
     ProviderType.CLAUDE_CODE: "Claude Code",
     ProviderType.DEEPSEEK: "DeepSeek",
+    ProviderType.DEEPSEEK_PROXY: "DeepSeek Proxy (本地反代)",
     ProviderType.QWEN: "Qwen (通义千问)",
     ProviderType.QWEN_CODE: "Qwen Code",
     ProviderType.DOUBAO: "豆包",
@@ -292,6 +355,8 @@ PROVIDER_DISPLAY_NAMES = {
     ProviderType.NOUS_RESEARCH: "Nous Research",
     ProviderType.WANDB: "Weights & Biases",
     ProviderType.MIMO: "小米 MiMo",
+    ProviderType.KIMI: "Kimi (月之暗面)",
+    ProviderType.STEP: "阶跃星辰 Step",
     ProviderType.CUSTOM: "自定义 API",
     ProviderType.SIMULATOR: "模拟器 (测试用)",
 }
@@ -302,6 +367,7 @@ PROVIDER_DEFAULT_BASE_URL = {
     ProviderType.ANTHROPIC: "https://api.anthropic.com",
     ProviderType.CLAUDE_CODE: "https://api.anthropic.com",
     ProviderType.DEEPSEEK: "https://api.deepseek.com/v1",
+    ProviderType.DEEPSEEK_PROXY: "http://127.0.0.1:5317/v1",  # 本地 DeepSeek 网页版反代
     ProviderType.QWEN: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     ProviderType.QWEN_CODE: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     ProviderType.DOUBAO: "https://ark.cn-beijing.volces.com/api/v3",
@@ -323,6 +389,8 @@ PROVIDER_DEFAULT_BASE_URL = {
     ProviderType.MINIMAX: "https://api.minimax.chat/v1",
     ProviderType.HICAP: "",
     ProviderType.MIMO: "https://api.xiaomimimo.com/v1",
+    ProviderType.KIMI: "https://api.moonshot.cn/v1",
+    ProviderType.STEP: "https://api.stepfun.com/v1",
 }
 
 
@@ -338,14 +406,18 @@ class ModelInfo:
     supports_tools: bool = True
     supports_streaming: bool = True
     is_reasoning_model: bool = False
+    # 多模态能力声明（借鉴 kosong chat_provider capabilities）
+    supports_image_input: bool = False
+    supports_video_input: bool = False
 
 
 PROVIDER_DEFAULT_MODELS: Dict[ProviderType, List[str]] = {
     ProviderType.OPENAI: ["gpt-5.4", "gpt-5.4-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini", "o3-mini"],
-    ProviderType.ANTHROPIC: ["claude-3-5-sonnet-20241022", "claude-3-opus", "claude-3-sonnet"],
-    ProviderType.CLAUDE_CODE: ["claude-3-5-sonnet-20241022"],
+    ProviderType.ANTHROPIC: ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5", "claude-3-5-sonnet-20241022"],
+    ProviderType.CLAUDE_CODE: ["claude-sonnet-4-6"],
     ProviderType.DEEPSEEK: ["deepseek-chat", "deepseek-reasoner"],
-    ProviderType.QWEN: ["qwen-max", "qwen-plus", "qwen-turbo"],
+    ProviderType.DEEPSEEK_PROXY: ["deepseek-v4-flash", "deepseek-v4", "deepseek-v4-pro", "deepseek-reasoner"],
+    ProviderType.QWEN: ["qwen3-max", "qwen3-plus", "qwen-max", "qwen-plus", "qwen-turbo"],
     ProviderType.QWEN_CODE: ["qwen-coder-turbo"],
     ProviderType.DOUBAO: ["doubao-pro-32k", "doubao-lite-32k"],
     ProviderType.MISTRAL: ["mistral-large-2411", "mistral-small-2503"],
@@ -370,6 +442,8 @@ PROVIDER_DEFAULT_MODELS: Dict[ProviderType, List[str]] = {
     ProviderType.NOUS_RESEARCH: ["nousresearch/hermes-3-llama-3.1-70b"],
     ProviderType.WANDB: ["wandb-model"],
     ProviderType.MIMO: ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-flash", "mimo-v2-pro", "mimo-v2-omni"],
+    ProviderType.KIMI: ["kimi-k2.5", "moonshot-v1-128k"],
+    ProviderType.STEP: ["step-2-16k", "step-1-8k"],
     ProviderType.LITELLM: ["gpt-4o-mini"],
     ProviderType.CUSTOM: ["custom-model"],
     ProviderType.SIMULATOR: ["simulator"],
@@ -377,26 +451,52 @@ PROVIDER_DEFAULT_MODELS: Dict[ProviderType, List[str]] = {
 
 
 DEFAULT_MODEL_INFOS: Dict[str, ModelInfo] = {
-    "gpt-5.4": ModelInfo(name="gpt-5.4", provider=ProviderType.OPENAI, max_tokens=8192, context_window=128000, pricing_input=2.5, pricing_output=15.0, is_reasoning_model=True),
-    "gpt-5.4-mini": ModelInfo(name="gpt-5.4-mini", provider=ProviderType.OPENAI, max_tokens=8192, context_window=128000, pricing_input=0.75, pricing_output=4.5),
-    "gpt-4.1": ModelInfo(name="gpt-4.1", provider=ProviderType.OPENAI, max_tokens=8192, context_window=128000, pricing_input=2.0, pricing_output=8.0),
-    "gpt-4o": ModelInfo(name="gpt-4o", provider=ProviderType.OPENAI, max_tokens=4096, context_window=128000, pricing_input=2.5, pricing_output=10.0),
-    "gpt-4o-mini": ModelInfo(name="gpt-4o-mini", provider=ProviderType.OPENAI, max_tokens=4096, context_window=128000, pricing_input=0.15, pricing_output=0.6),
-    "o3-mini": ModelInfo(name="o3-mini", provider=ProviderType.OPENAI, max_tokens=100000, context_window=200000, pricing_input=1.1, pricing_output=4.4, is_reasoning_model=True),
-    "deepseek-chat": ModelInfo(name="deepseek-chat", provider=ProviderType.DEEPSEEK, max_tokens=4096, context_window=128000, pricing_input=0.27, pricing_output=1.10),
-    "deepseek-reasoner": ModelInfo(name="deepseek-reasoner", provider=ProviderType.DEEPSEEK, max_tokens=4096, context_window=128000, pricing_input=0.55, pricing_output=2.19, is_reasoning_model=True),
-    "claude-3-5-sonnet-20241022": ModelInfo(name="claude-3-5-sonnet-20241022", provider=ProviderType.ANTHROPIC, max_tokens=8192, context_window=200000, pricing_input=3.0, pricing_output=15.0),
-    "qwen-max": ModelInfo(name="qwen-max", provider=ProviderType.QWEN, max_tokens=4096, context_window=32000, pricing_input=0.78, pricing_output=3.9),
-    "qwen-plus": ModelInfo(name="qwen-plus", provider=ProviderType.QWEN, max_tokens=4096, context_window=128000, pricing_input=0.26, pricing_output=0.78),
-    "gemini-3-pro-preview": ModelInfo(name="gemini-3-pro-preview", provider=ProviderType.GEMINI, max_tokens=8192, context_window=1048576, pricing_input=2.0, pricing_output=12.0),
-    "gemini-3-flash-preview": ModelInfo(name="gemini-3-flash-preview", provider=ProviderType.GEMINI, max_tokens=65536, context_window=1048576, pricing_input=0.5, pricing_output=3.0),
-    "moonshot-v1-128k": ModelInfo(name="moonshot-v1-128k", provider=ProviderType.MOONSHOT, max_tokens=4096, context_window=128000, pricing_input=6.0, pricing_output=12.0),
-    "llama-3.3-70b-versatile": ModelInfo(name="llama-3.3-70b-versatile", provider=ProviderType.GROQ, max_tokens=8192, context_window=128000, pricing_input=0.29, pricing_output=0.79),
-    "mimo-v2.5-pro": ModelInfo(name="mimo-v2.5-pro", provider=ProviderType.MIMO, max_tokens=131072, context_window=131072, pricing_input=2.0, pricing_output=10.0, is_reasoning_model=True),
-    "mimo-v2.5": ModelInfo(name="mimo-v2.5", provider=ProviderType.MIMO, max_tokens=32768, context_window=131072, pricing_input=1.0, pricing_output=5.0, is_reasoning_model=True),
-    "mimo-v2-flash": ModelInfo(name="mimo-v2-flash", provider=ProviderType.MIMO, max_tokens=65536, context_window=131072, pricing_input=0.1, pricing_output=0.5),
-    "mimo-v2-pro": ModelInfo(name="mimo-v2-pro", provider=ProviderType.MIMO, max_tokens=131072, context_window=131072, pricing_input=1.5, pricing_output=7.5, is_reasoning_model=True),
-    "mimo-v2-omni": ModelInfo(name="mimo-v2-omni", provider=ProviderType.MIMO, max_tokens=32768, context_window=131072, pricing_input=1.0, pricing_output=5.0),
+    "gpt-5.4": ModelInfo(name="gpt-5.4", provider=ProviderType.OPENAI, max_tokens=8192, context_window=128000, pricing_input=2.5, pricing_output=15.0, is_reasoning_model=True, supports_image_input=True),
+    "gpt-5.4-mini": ModelInfo(name="gpt-5.4-mini", provider=ProviderType.OPENAI, max_tokens=8192, context_window=128000, pricing_input=0.75, pricing_output=4.5, supports_image_input=True),
+    "gpt-4.1": ModelInfo(name="gpt-4.1", provider=ProviderType.OPENAI, max_tokens=8192, context_window=128000, pricing_input=2.0, pricing_output=8.0, supports_image_input=True),
+    "gpt-4o": ModelInfo(name="gpt-4o", provider=ProviderType.OPENAI, max_tokens=4096, context_window=128000, pricing_input=2.5, pricing_output=10.0, supports_image_input=True),
+    "gpt-4o-mini": ModelInfo(name="gpt-4o-mini", provider=ProviderType.OPENAI, max_tokens=4096, context_window=128000, pricing_input=0.15, pricing_output=0.6, supports_image_input=True),
+    "o3-mini": ModelInfo(name="o3-mini", provider=ProviderType.OPENAI, max_tokens=100000, context_window=200000, pricing_input=1.1, pricing_output=4.4, is_reasoning_model=True, supports_image_input=True),
+    "deepseek-chat": ModelInfo(name="deepseek-chat", provider=ProviderType.DEEPSEEK, max_tokens=8192, context_window=1_000_000, pricing_input=0.27, pricing_output=1.10),
+    "deepseek-reasoner": ModelInfo(name="deepseek-reasoner", provider=ProviderType.DEEPSEEK, max_tokens=8192, context_window=1_000_000, pricing_input=0.55, pricing_output=2.19, is_reasoning_model=True),
+    "deepseek-v4-flash": ModelInfo(name="deepseek-v4-flash", provider=ProviderType.DEEPSEEK_PROXY, max_tokens=8192, context_window=1_000_000, pricing_input=0, pricing_output=0),
+    "deepseek-v4": ModelInfo(name="deepseek-v4", provider=ProviderType.DEEPSEEK_PROXY, max_tokens=16384, context_window=1_000_000, pricing_input=0, pricing_output=0),
+    "deepseek-v4-pro": ModelInfo(name="deepseek-v4-pro", provider=ProviderType.DEEPSEEK_PROXY, max_tokens=16384, context_window=1_000_000, pricing_input=0, pricing_output=0),
+    "claude-3-5-sonnet-20241022": ModelInfo(name="claude-3-5-sonnet-20241022", provider=ProviderType.ANTHROPIC, max_tokens=8192, context_window=200000, pricing_input=3.0, pricing_output=15.0, supports_image_input=True),
+    "qwen-max": ModelInfo(name="qwen-max", provider=ProviderType.QWEN, max_tokens=4096, context_window=32000, pricing_input=0.78, pricing_output=3.9, supports_image_input=True, supports_video_input=True),
+    "qwen-plus": ModelInfo(name="qwen-plus", provider=ProviderType.QWEN, max_tokens=4096, context_window=128000, pricing_input=0.26, pricing_output=0.78, supports_image_input=True, supports_video_input=True),
+    "gemini-3-pro-preview": ModelInfo(name="gemini-3-pro-preview", provider=ProviderType.GEMINI, max_tokens=8192, context_window=1048576, pricing_input=2.0, pricing_output=12.0, supports_image_input=True, supports_video_input=True),
+    "gemini-3-flash-preview": ModelInfo(name="gemini-3-flash-preview", provider=ProviderType.GEMINI, max_tokens=65536, context_window=1048576, pricing_input=0.5, pricing_output=3.0, supports_image_input=True, supports_video_input=True),
+    "moonshot-v1-128k": ModelInfo(name="moonshot-v1-128k", provider=ProviderType.MOONSHOT, max_tokens=4096, context_window=128000, pricing_input=6.0, pricing_output=12.0, supports_image_input=True),
+    "llama-3.3-70b-versatile": ModelInfo(name="llama-3.3-70b-versatile", provider=ProviderType.GROQ, max_tokens=8192, context_window=128000, pricing_input=0.29, pricing_output=0.79, supports_image_input=True),
+    "mimo-v2.5-pro": ModelInfo(name="mimo-v2.5-pro", provider=ProviderType.MIMO, max_tokens=131072, context_window=131072, pricing_input=2.0, pricing_output=10.0, is_reasoning_model=True, supports_image_input=True),
+    "mimo-v2.5": ModelInfo(name="mimo-v2.5", provider=ProviderType.MIMO, max_tokens=32768, context_window=131072, pricing_input=1.0, pricing_output=5.0, is_reasoning_model=True, supports_image_input=True),
+    "mimo-v2-flash": ModelInfo(name="mimo-v2-flash", provider=ProviderType.MIMO, max_tokens=65536, context_window=131072, pricing_input=0.1, pricing_output=0.5, supports_image_input=True),
+    "mimo-v2-pro": ModelInfo(name="mimo-v2-pro", provider=ProviderType.MIMO, max_tokens=131072, context_window=131072, pricing_input=1.5, pricing_output=7.5, is_reasoning_model=True, supports_image_input=True),
+    "mimo-v2-omni": ModelInfo(name="mimo-v2-omni", provider=ProviderType.MIMO, max_tokens=32768, context_window=131072, pricing_input=1.0, pricing_output=5.0, supports_image_input=True, supports_video_input=True),
+    # 补全缺失的模型条目（多模态能力标记）
+    "claude-3-opus": ModelInfo(name="claude-3-opus", provider=ProviderType.ANTHROPIC, max_tokens=4096, context_window=200000, pricing_input=15.0, pricing_output=75.0, supports_image_input=True),
+    "claude-3-sonnet": ModelInfo(name="claude-3-sonnet", provider=ProviderType.ANTHROPIC, max_tokens=4096, context_window=200000, pricing_input=3.0, pricing_output=15.0, supports_image_input=True),
+    "qwen-turbo": ModelInfo(name="qwen-turbo", provider=ProviderType.QWEN, max_tokens=4096, context_window=128000, pricing_input=0.3, pricing_output=0.6, supports_image_input=True),
+    "qwen-coder-turbo": ModelInfo(name="qwen-coder-turbo", provider=ProviderType.QWEN_CODE, max_tokens=4096, context_window=128000, pricing_input=0.3, pricing_output=0.6),
+    "doubao-pro-32k": ModelInfo(name="doubao-pro-32k", provider=ProviderType.DOUBAO, max_tokens=4096, context_window=32000, pricing_input=0.5, pricing_output=1.0, supports_image_input=True),
+    "doubao-lite-32k": ModelInfo(name="doubao-lite-32k", provider=ProviderType.DOUBAO, max_tokens=4096, context_window=32000, pricing_input=0.1, pricing_output=0.2),
+    "mistral-large-2411": ModelInfo(name="mistral-large-2411", provider=ProviderType.MISTRAL, max_tokens=4096, context_window=128000, pricing_input=2.0, pricing_output=6.0, supports_image_input=True),
+    "mistral-small-2503": ModelInfo(name="mistral-small-2503", provider=ProviderType.MISTRAL, max_tokens=4096, context_window=32000, pricing_input=0.2, pricing_output=0.6),
+    "gemini-2.5-pro": ModelInfo(name="gemini-2.5-pro", provider=ProviderType.GEMINI, max_tokens=8192, context_window=1048576, pricing_input=1.25, pricing_output=10.0, supports_image_input=True, supports_video_input=True),
+    "grok-3-latest": ModelInfo(name="grok-3-latest", provider=ProviderType.XAI, max_tokens=4096, context_window=131072, pricing_input=3.0, pricing_output=15.0, supports_image_input=True),
+    "moonshot-v1-32k": ModelInfo(name="moonshot-v1-32k", provider=ProviderType.MOONSHOT, max_tokens=4096, context_window=32000, pricing_input=6.0, pricing_output=12.0, supports_image_input=True),
+    "mixtral-8x7b-32768": ModelInfo(name="mixtral-8x7b-32768", provider=ProviderType.GROQ, max_tokens=4096, context_window=32768, pricing_input=0.27, pricing_output=0.27),
+    "o4-mini": ModelInfo(name="o4-mini", provider=ProviderType.OPENAI, max_tokens=100000, context_window=200000, pricing_input=1.1, pricing_output=4.4, is_reasoning_model=True, supports_image_input=True),
+    # Anthropic Claude 4 系列
+    "claude-sonnet-4-6": ModelInfo(name="claude-sonnet-4-6", provider=ProviderType.ANTHROPIC, max_tokens=8192, context_window=200000, pricing_input=3.0, pricing_output=15.0, supports_image_input=True),
+    "claude-opus-4-6": ModelInfo(name="claude-opus-4-6", provider=ProviderType.ANTHROPIC, max_tokens=8192, context_window=200000, pricing_input=5.0, pricing_output=25.0, supports_image_input=True),
+    "claude-haiku-4-5": ModelInfo(name="claude-haiku-4-5", provider=ProviderType.ANTHROPIC, max_tokens=8192, context_window=200000, pricing_input=1.0, pricing_output=5.0, supports_image_input=True),
+    # Kimi K2.5
+    "kimi-k2.5": ModelInfo(name="kimi-k2.5", provider=ProviderType.KIMI, max_tokens=8192, context_window=128000, pricing_input=0.6, pricing_output=3.0, supports_image_input=True),
+    # 阶跃星辰 Step
+    "step-2-16k": ModelInfo(name="step-2-16k", provider=ProviderType.STEP, max_tokens=4096, context_window=16000, pricing_input=0.5, pricing_output=2.0, supports_image_input=True),
+    "step-1-8k": ModelInfo(name="step-1-8k", provider=ProviderType.STEP, max_tokens=4096, context_window=8000, pricing_input=0.2, pricing_output=0.8),
 }
 
 
@@ -414,6 +514,7 @@ class ProviderConfig:
     priority: int = 0
     name: str = ""
     thinking_enabled: Optional[bool] = None
+    context_window: int = 0  # 0=自动(使用默认或尝试获取), >0=用户手动设置
 
     def __post_init__(self):
         if not self.name:
@@ -423,7 +524,21 @@ class ProviderConfig:
     def model_info(self) -> ModelInfo:
         if self.model in DEFAULT_MODEL_INFOS:
             return DEFAULT_MODEL_INFOS[self.model]
-        return ModelInfo(name=self.model, provider=self.provider, max_tokens=self.max_tokens, context_window=8192)
+        return ModelInfo(name=self.model, provider=self.provider, max_tokens=self.max_tokens, context_window=self.get_context_window())
+
+    def get_context_window(self) -> int:
+        """获取有效的上下文窗口大小。优先级: 手动设置 > 已知模型 > 默认值"""
+        if self.context_window > 0:
+            return self.context_window
+        if self.model in DEFAULT_MODEL_INFOS:
+            return DEFAULT_MODEL_INFOS[self.model].context_window
+        return 8192
+
+    def get_effective_max_tokens(self) -> int:
+        """获取有效的 max_tokens。不超过模型上限。"""
+        if self.model in DEFAULT_MODEL_INFOS:
+            return min(self.max_tokens, DEFAULT_MODEL_INFOS[self.model].max_tokens)
+        return self.max_tokens
 
 
 def get_models_for_provider(provider: ProviderType) -> List[ModelInfo]:
@@ -434,6 +549,117 @@ def get_models_for_provider(provider: ProviderType) -> List[ModelInfo]:
         else:
             models.append(ModelInfo(name=name, provider=provider, max_tokens=4096, context_window=8192))
     return models
+
+
+def register_custom_model(
+    name: str,
+    provider: ProviderType = ProviderType.CUSTOM,
+    max_tokens: int = 4096,
+    context_window: int = 8192,
+    supports_image_input: bool = False,
+    supports_video_input: bool = False,
+    supports_tools: bool = True,
+    is_reasoning_model: bool = False,
+    pricing_input: float = 0.0,
+    pricing_output: float = 0.0,
+) -> ModelInfo:
+    """注册自定义模型到 DEFAULT_MODEL_INFOS（运行时动态添加）
+
+    允许用户添加不在预置列表中的模型，并声明其多模态能力。
+    注册后 filter_content_parts() 会自动按能力降级。
+    """
+    info = ModelInfo(
+        name=name,
+        provider=provider,
+        max_tokens=max_tokens,
+        context_window=context_window,
+        supports_image_input=supports_image_input,
+        supports_video_input=supports_video_input,
+        supports_tools=supports_tools,
+        is_reasoning_model=is_reasoning_model,
+        pricing_input=pricing_input,
+        pricing_output=pricing_output,
+    )
+    DEFAULT_MODEL_INFOS[name] = info
+    logger.info(f"已注册自定义模型: {name} (provider={provider.value}, img={supports_image_input}, vid={supports_video_input})")
+    return info
+
+
+async def fetch_model_info_from_provider(config: ProviderConfig) -> Optional[ModelInfo]:
+    """从提供商API获取模型信息（上下文窗口、能力等）。
+    
+    支持的提供商:
+    - OpenRouter: GET /api/v1/models 返回 context_length
+    - OpenAI 兼容: GET /v1/models/{model}
+    - Ollama: GET /api/tags
+    
+    使用 asyncio.to_thread + urllib 以避免额外依赖。
+    """
+    import asyncio
+    import urllib.request, urllib.error
+    import json as _json
+
+    model_name = config.model
+    base_url = config.base_url or PROVIDER_DEFAULT_BASE_URL.get(config.provider, "")
+    if not base_url:
+        return None
+    base_url = base_url.rstrip("/")
+
+    def _do_fetch(url: str, headers: dict = None) -> Optional[dict]:
+        req = urllib.request.Request(url, headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return _json.loads(resp.read().decode())
+        except Exception:
+            return None
+
+    try:
+        if config.provider == ProviderType.OPENROUTER:
+            url = "https://openrouter.ai/api/v1/models"
+            data = await asyncio.to_thread(_do_fetch, url)
+            if data:
+                for m in data.get("data", []):
+                    if m.get("id") == model_name:
+                        ctx = m.get("context_length", 0) or 0
+                        pricing = m.get("pricing", {}) or {}
+                        return ModelInfo(
+                            name=model_name, provider=config.provider,
+                            context_window=ctx or 128000,
+                            max_tokens=min(config.max_tokens, ctx or 128000),
+                            pricing_input=float(pricing.get("prompt", 0)),
+                            pricing_output=float(pricing.get("completion", 0)),
+                        )
+
+        elif config.provider in (ProviderType.OLLAMA,):
+            url = f"{base_url}/api/tags"
+            data = await asyncio.to_thread(_do_fetch, url)
+            if data:
+                for m in data.get("models", []):
+                    if m.get("name", "").startswith(model_name):
+                        details = m.get("details", {}) or {}
+                        return ModelInfo(
+                            name=model_name, provider=config.provider,
+                            context_window=int(m.get("context_length", 8192) or 8192),
+                            max_tokens=config.max_tokens,
+                            supports_image_input="vision" in details.get("families", []),
+                        )
+
+        else:
+            url = f"{base_url}/models/{model_name}"
+            headers = {}
+            if config.api_key:
+                headers["Authorization"] = f"Bearer {config.api_key}"
+            data = await asyncio.to_thread(_do_fetch, url, headers)
+            if data:
+                ctx = data.get("context_window", 0) or data.get("max_context_length", 0) or 0
+                return ModelInfo(
+                    name=model_name, provider=config.provider,
+                    context_window=ctx or 128000,
+                    max_tokens=config.max_tokens,
+                )
+    except Exception as e:
+        logger.debug(f"[fetch_model_info] 获取模型信息失败 ({config.provider.value}/{model_name}): {e}")
+    return None
 
 
 def create_default_provider_config(provider: ProviderType, api_key: str = "") -> ProviderConfig:
@@ -626,6 +852,7 @@ class LLM(BaseLLMProvider):
         self.extra = kwargs
         self.client = None
         self._init_client()
+        self._cancel_event = None
 
     def _init_client(self):
         if HAS_OPENAI:
@@ -639,6 +866,15 @@ class LLM(BaseLLMProvider):
 
     def is_available(self) -> bool:
         return self.client is not None
+
+    def cancel(self):
+        """取消当前请求"""
+        if self._cancel_event:
+            self._cancel_event.set()
+
+    def _check_cancel(self) -> bool:
+        """检查是否被取消"""
+        return self._cancel_event is not None and self._cancel_event.is_set()
 
     def generate(self, prompt: str, system_prompt: str = None) -> str:
         """简单的文本生成接口"""
@@ -655,10 +891,14 @@ class LLM(BaseLLMProvider):
         tools: list[dict] | None = None,
         on_token: Callable[[str], Any] | None = None,
     ) -> LLMResponse:
+        import threading
+        self._cancel_event = threading.Event()
+        
         if not self.client:
+            self._cancel_event = None
             return self._simulate_response(messages)
 
-        safe_messages = _sanitize_messages(messages)
+        safe_messages = _sanitize_messages(messages, self.config.model_info)
 
         # === DEBUG: 打印即将发送的消息 ===
         print("\n" + "=" * 70, flush=True)
@@ -703,9 +943,18 @@ class LLM(BaseLLMProvider):
         try:
             params["stream_options"] = {"include_usage": True}
             stream = self._call_with_retry(params, extra_body=extra_body)
+        except CancelledError:
+            logger.info("[LLM.chat] 请求在建立连接前被取消")
+            self._cancel_event = None
+            return LLMResponse(content="", tool_calls=[], cancelled=True)
         except Exception:
-            params.pop("stream_options", None)
-            stream = self._call_with_retry(params, extra_body=extra_body)
+            try:
+                params.pop("stream_options", None)
+                stream = self._call_with_retry(params, extra_body=extra_body)
+            except CancelledError:
+                logger.info("[LLM.chat] 请求在建立连接前被取消")
+                self._cancel_event = None
+                return LLMResponse(content="", tool_calls=[], cancelled=True)
 
         return self._process_stream(stream, on_token)
 
@@ -716,8 +965,13 @@ class LLM(BaseLLMProvider):
         prompt_tok = 0
         completion_tok = 0
         chunk_count = 0
+        was_cancelled = False
 
         for chunk in stream:
+            if self._check_cancel():
+                logger.info("[LLM._process_stream] 用户取消，停止处理")
+                was_cancelled = True
+                break
             chunk_count += 1
             if chunk is None:
                 continue
@@ -757,7 +1011,10 @@ class LLM(BaseLLMProvider):
                         if getattr(func, "arguments", None):
                             tc_map[idx]["args"] += func.arguments
 
-        if chunk_count == 0:
+        if was_cancelled:
+            self._cancel_event = None
+
+        if chunk_count == 0 and not was_cancelled:
             logger.warning("[LLM._process_stream] stream produced 0 chunks")
             return LLMResponse(content="", tool_calls=[])
 
@@ -778,27 +1035,54 @@ class LLM(BaseLLMProvider):
             tool_calls=parsed,
             prompt_tokens=prompt_tok,
             completion_tokens=completion_tok,
+            cancelled=was_cancelled,
         )
 
     def _call_with_retry(self, params: dict, max_retries: int = 3, extra_body: dict = None):
         for attempt in range(max_retries):
+            # 检查是否已取消
+            if self._check_cancel():
+                logger.info("[LLM._call_with_retry] 请求已取消，停止重试")
+                raise CancelledError("用户取消请求")
+            
             try:
                 if extra_body:
                     return self.client.chat.completions.create(**params, extra_body=extra_body)
                 return self.client.chat.completions.create(**params)
             except (RateLimitError, APITimeoutError, APIConnectionError) as e:
+                # 重试前再次检查取消
+                if self._check_cancel():
+                    logger.info("[LLM._call_with_retry] 请求已取消，停止重试")
+                    raise CancelledError("用户取消请求") from e
+                
                 if attempt == max_retries - 1:
                     raise
                 wait = 2 ** attempt
                 logger.warning(f"Transient error, retrying in {wait}s ({attempt+1}/{max_retries})")
-                time.sleep(wait)
+                # 使用可取消的等待
+                self._sleep_with_cancel(wait)
             except APIError as e:
+                # 重试前再次检查取消
+                if self._check_cancel():
+                    logger.info("[LLM._call_with_retry] 请求已取消，停止重试")
+                    raise CancelledError("用户取消请求") from e
+                
                 if e.status_code and e.status_code >= 500 and attempt < max_retries - 1:
                     wait = 2 ** attempt
                     logger.warning(f"Server error, retrying in {wait}s ({attempt+1}/{max_retries})")
-                    time.sleep(wait)
+                    self._sleep_with_cancel(wait)
                 else:
                     raise
+    
+    def _sleep_with_cancel(self, seconds: float):
+        """可取消的等待，每秒检查一次取消状态"""
+        import time
+        start_time = time.time()
+        while time.time() - start_time < seconds:
+            if self._check_cancel():
+                raise CancelledError("用户取消请求")
+            # 每次只睡 0.1 秒，保证快速响应取消
+            time.sleep(min(0.1, seconds - (time.time() - start_time)))
 
     def _simulate_response(self, messages: list[dict]) -> LLMResponse:
         time.sleep(0.3)
@@ -869,6 +1153,7 @@ class LiteLLM(BaseLLMProvider):
         super().__init__(config)
         self.extra = kwargs
         self._check_litellm()
+        self._cancel_event = None
 
     def _check_litellm(self):
         try:
@@ -877,6 +1162,15 @@ class LiteLLM(BaseLLMProvider):
         except ImportError:
             logger.warning("LiteLLM 未安装")
             self._litellm_available = False
+
+    def cancel(self):
+        """取消当前请求"""
+        if self._cancel_event:
+            self._cancel_event.set()
+
+    def _check_cancel(self) -> bool:
+        """检查是否被取消"""
+        return self._cancel_event is not None and self._cancel_event.is_set()
 
     def is_available(self) -> bool:
         return self._litellm_available
@@ -887,12 +1181,16 @@ class LiteLLM(BaseLLMProvider):
         tools: list[dict] | None = None,
         on_token: Callable[[str], Any] | None = None,
     ) -> LLMResponse:
+        import threading
+        self._cancel_event = threading.Event()
+        
         if not self._litellm_available:
+            self._cancel_event = None
             return LLMResponse(content="LiteLLM not installed. Install with: pip install litellm")
 
         import litellm
 
-        safe_messages = _sanitize_messages(messages)
+        safe_messages = _sanitize_messages(messages, self.config.model_info)
 
         # === DEBUG: 打印即将发送的消息 ===
         print("\n" + "=" * 70, flush=True)
@@ -940,6 +1238,9 @@ class LiteLLM(BaseLLMProvider):
         chunk_count = 0
 
         for chunk in stream:
+            if self._check_cancel():
+                logger.info("[LiteLLM._process_stream] 用户取消，停止处理")
+                break
             chunk_count += 1
             if chunk is None:
                 continue
@@ -1076,3 +1377,26 @@ class MultiProviderManager:
         for provider in self.providers:
             provider.total_prompt_tokens = 0
             provider.total_completion_tokens = 0
+
+
+_default_provider: Optional[BaseLLMProvider] = None
+
+
+def get_model_provider() -> Optional[BaseLLMProvider]:
+    global _default_provider
+    if _default_provider is not None and _default_provider.is_available():
+        return _default_provider
+    try:
+        from .config import get_config_manager
+        config_manager = get_config_manager()
+        if hasattr(config_manager, 'get_provider_configs_for_manager'):
+            configs = config_manager.get_provider_configs_for_manager()
+            if configs:
+                manager = MultiProviderManager(configs)
+                provider = manager.get_provider()
+                if provider:
+                    _default_provider = provider
+                    return provider
+    except Exception as e:
+        logger.warning(f"get_model_provider: 无法从配置获取提供商: {e}")
+    return None

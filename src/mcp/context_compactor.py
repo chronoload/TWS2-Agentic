@@ -55,8 +55,40 @@ class AutoCompact:
         messages = compactor.compact(messages, llm_summarize_fn)
     """
 
+    PRESERVE_KEYWORDS = [
+        # 关键/重要类
+        "关键", "重要", "核心", "核心概念", "关键信息",
+        "记住", "important", "key", "critical", "essential", "vital",
+        # 定义/定理类
+        "定义", "定理", "公式", "定律", "法则", "原理", "公理",
+        "definition", "theorem", "formula", "law", "principle", "axiom",
+        # 建议/警告类
+        "必须", "应该", "建议", "注意", "警告", "强调",
+        "must", "should", "must not", "required", "warning", "caution",
+        # 技术配置类
+        "函数", "变量", "参数", "配置", "设置", "选项",
+        "function", "variable", "parameter", "config", "setting", "option",
+        "mode", "type", "level", "enable", "disable", "true", "false",
+        "on", "off", "yes", "no", "enabled", "disabled",
+        "auto", "manual", "default", "custom",
+        # 结果/结论类
+        "摘要", "总结", "结论", "结果", "答案", "输出", "返回",
+        "summary", "conclusion", "result", "answer", "output", "return",
+        # 错误/bug类
+        "bug", "错误", "fix", "修复", "问题", "issue", "error",
+        "failed", "failure", "exception", "warning",
+        # 数值/阈值类
+        "阈值", "上限", "下限", "最大", "最小", "初始", "默认",
+        "threshold", "max", "min", "limit", "initial", "default",
+        "value", "range", "size", "length", "count", "number",
+        # 路径/文件类
+        "路径", "目录", "文件", "地址", "url", "path", "file", "directory",
+        # 名称/标识类
+        "名称", "标识", "id", "name", "identifier", "label", "title",
+    ]
+
     def __init__(self, max_tokens: int = 100000, threshold: float = 0.95,
-                 keep_recent: int = 4, model: str = "gpt-4"):
+                 keep_recent: int = 10, model: str = "gpt-4"):
         self.max_tokens = max_tokens
         self.threshold = threshold
         self.keep_recent = keep_recent
@@ -68,6 +100,16 @@ class AutoCompact:
         """判断是否需要压缩"""
         current = estimate_messages_tokens(messages, self.model)
         return current >= self.max_tokens * self.threshold
+
+    def _has_preserved_keywords(self, content: str) -> bool:
+        """检查内容是否包含需要保留的关键词"""
+        if not content:
+            return False
+        content_lower = content.lower()
+        for keyword in self.PRESERVE_KEYWORDS:
+            if keyword.lower() in content_lower:
+                return True
+        return False
 
     def compact(self, messages: List[Dict],
                 summarize_fn: Optional[Callable] = None) -> List[Dict]:
@@ -87,24 +129,40 @@ class AutoCompact:
 
         n = len(messages)
 
-        # 保留最后 keep_recent 条 + 系统消息
-        to_keep = self.keep_recent + (1 if messages[0].get("role") == "system" else 0)
-        if n <= to_keep:
+        # 保留系统消息
+        system_msgs = [msg for msg in messages if msg.get("role") == "system"]
+        non_system = [msg for msg in messages if msg.get("role") != "system"]
+        
+        if len(non_system) <= self.keep_recent:
             return messages
 
-        front = messages[:n - self.keep_recent]
-        recent = messages[n - self.keep_recent:]
+        # 第一优先级：关键词保护的消息（从全部非系统消息中筛选）
+        keyword_preserved = []
+        for msg in non_system:
+            content = str(msg.get("content", ""))
+            tool_result = str(msg.get("tool_result", ""))
+            if self._has_preserved_keywords(content) or self._has_preserved_keywords(tool_result):
+                keyword_preserved.append(msg)
+
+        # 第二优先级：最近 keep_recent 条消息
+        recent = non_system[-self.keep_recent:]
+
+        # 被保护的消息ID集合（关键词保护 + 最近保护）
+        preserved_ids = set(id(msg) for msg in keyword_preserved + recent)
+
+        # 进入摘要的消息（既没有关键词保护，也不是最近的）
+        remaining_for_summary = [msg for msg in non_system if id(msg) not in preserved_ids]
 
         if summarize_fn:
-            summary = summarize_fn(front)
+            summary = summarize_fn(remaining_for_summary) if remaining_for_summary else ""
         else:
-            summary = self._builtin_summary(front)
+            summary = self._builtin_summary(remaining_for_summary) if remaining_for_summary else "（无）"
 
         self._compaction_count += 1
         self._last_summary = summary
 
-        # 重建消息列表
-        compacted = [msg for msg in messages if msg.get("role") == "system"]
+        # 重建消息列表：系统消息 + 摘要 + 关键词保护的消息 + 最近消息
+        compacted = list(system_msgs)
 
         summary_msg = {
             "role": "system",
@@ -115,6 +173,15 @@ class AutoCompact:
             ),
         }
         compacted.append(summary_msg)
+        
+        # 关键词保护的消息（去除重复，按原顺序）
+        seen_preserved = set()
+        for msg in keyword_preserved:
+            msg_id = id(msg)
+            if msg_id not in seen_preserved:
+                compacted.append(msg)
+                seen_preserved.add(msg_id)
+        
         compacted.extend(recent)
 
         # 递归压缩，直到满足限制
@@ -132,7 +199,7 @@ class AutoCompact:
 
         # 提取用户问题摘要
         if user_msgs:
-            questions = [m.get("content", "")[:100] for m in user_msgs[-5:]]
+            questions = [(m.get("content") or "")[:100] for m in user_msgs[-5:]]
             parts.append(f"用户主要问题: {'; '.join(questions)}")
 
         # 提取关键回复

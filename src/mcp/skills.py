@@ -53,88 +53,68 @@ class SkillRegistry:
 
     def _load_builtin_skills(self):
         """加载内置技能"""
-        from .tools import (
-            read_file, write_file, list_directory,
-            analyze_paper, web_search, crawl_website,
-            github_search, calculate, get_current_time
-        )
-
-        builtin_skills = [
-            SkillDefinition(
-                name="read_file",
-                description="读取文件内容",
-                parameters=[
-                    SkillParameter("path", "str", "文件路径", required=True),
-                    SkillParameter("encoding", "str", "文件编码", required=False, default="utf-8")
-                ],
-                handler=read_file
-            ),
-            SkillDefinition(
-                name="write_file",
-                description="写入文件内容",
-                parameters=[
-                    SkillParameter("path", "str", "文件路径", required=True),
-                    SkillParameter("content", "str", "内容", required=True),
-                    SkillParameter("encoding", "str", "编码", required=False, default="utf-8")
-                ],
-                handler=write_file
-            ),
-            SkillDefinition(
-                name="list_directory",
-                description="列出目录内容",
-                parameters=[
-                    SkillParameter("path", "str", "目录路径", required=True)
-                ],
-                handler=list_directory
-            ),
-            SkillDefinition(
-                name="calculate",
-                description="数学计算",
-                parameters=[
-                    SkillParameter("expression", "str", "数学表达式", required=True)
-                ],
-                handler=calculate
-            ),
-            SkillDefinition(
-                name="get_current_time",
-                description="获取当前时间",
-                parameters=[],
-                handler=get_current_time
-            ),
-            SkillDefinition(
-                name="web_search",
-                description="网络搜索",
-                parameters=[
-                    SkillParameter("query", "str", "搜索关键词", required=True),
-                    SkillParameter("num_results", "int", "结果数量", required=False, default=10)
-                ],
-                handler=web_search
-            ),
-            SkillDefinition(
-                name="analyze_paper",
-                description="分析科研论文",
-                parameters=[
-                    SkillParameter("file_path", "str", "论文文件路径", required=True)
-                ],
-                handler=analyze_paper
-            ),
-            SkillDefinition(
-                name="crawl_website",
-                description="爬取网站内容",
-                parameters=[
-                    SkillParameter("url", "str", "网站URL", required=True)
-                ],
-                handler=crawl_website
-            ),
-            SkillDefinition(
-                name="github_search",
-                description="搜索 GitHub 项目",
-                parameters=[
-                    SkillParameter("query", "str", "搜索关键词", required=True)
-                ],
-                handler=github_search
+        try:
+            from .tools import (
+                ReadFileTool, WriteFileTool, ListDirectoryTool,
+                CalculateTool, WebSearchTool, AnalyzePaperTool,
             )
-        ]
+            builtin_skills = [
+                SkillDefinition(
+                    name="read_file",
+                    description="读取文件内容",
+                    parameters=[
+                        SkillParameter("path", "str", "文件路径", required=True),
+                        SkillParameter("encoding", "str", "文件编码", required=False, default="utf-8")
+                    ],
+                    handler=ReadFileTool().execute
+                ),
+                SkillDefinition(
+                    name="write_file",
+                    description="写入文件内容",
+                    parameters=[
+                        SkillParameter("path", "str", "文件路径", required=True),
+                        SkillParameter("content", "str", "内容", required=True),
+                        SkillParameter("encoding", "str", "编码", required=False, default="utf-8")
+                    ],
+                    handler=WriteFileTool().execute
+                ),
+                SkillDefinition(
+                    name="list_directory",
+                    description="列出目录内容",
+                    parameters=[
+                        SkillParameter("path", "str", "目录路径", required=True)
+                    ],
+                    handler=ListDirectoryTool().execute
+                ),
+                SkillDefinition(
+                    name="calculate",
+                    description="数学计算",
+                    parameters=[
+                        SkillParameter("expression", "str", "数学表达式", required=True)
+                    ],
+                    handler=CalculateTool().execute
+                ),
+                SkillDefinition(
+                    name="web_search",
+                    description="网络搜索",
+                    parameters=[
+                        SkillParameter("query", "str", "搜索关键词", required=True),
+                        SkillParameter("num_results", "int", "结果数量", required=False, default=10)
+                    ],
+                    handler=WebSearchTool().execute
+                ),
+                SkillDefinition(
+                    name="analyze_paper",
+                    description="分析科研论文",
+                    parameters=[
+                        SkillParameter("file_path", "str", "论文文件路径", required=True)
+                    ],
+                    handler=AnalyzePaperTool().execute
+                ),
+            ]
+        except ImportError as e:
+            logger.warning(f"内置工具类导入失败，使用空技能列表: {e}")
+            builtin_skills = []
 
         for skill in builtin_skills:
             self.register_skill(skill)

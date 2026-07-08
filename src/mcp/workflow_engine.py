@@ -20,12 +20,27 @@ import sqlite3
 import threading
 import time
 import traceback
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
 from typing import Dict, Any, Optional, List, Callable, Union, Set
 from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger(__name__)
+
+try:
+    from .middleware import MiddlewareChain, MiddlewareContext, LoopDetectionMiddleware, ToolErrorMiddleware
+    HAS_MIDDLEWARE = True
+except ImportError:
+    HAS_MIDDLEWARE = False
+
+try:
+    from .runtime import RunManager, RunStatus
+    HAS_RUNTIME = True
+except ImportError:
+    HAS_RUNTIME = False
 
 
 class StepType(Enum):
@@ -36,6 +51,11 @@ class StepType(Enum):
     LOOP = "loop"
     WAIT = "wait"
     NOTIFY = "notify"
+    GT_PROVE = "gt_prove"
+    LEAN_CHECK = "lean_check"
+    MANIM_GEN = "manim_gen"
+    MATHLENS = "mathlens"
+    AUTORESEARCH = "autoresearch"
 
 
 class StepStatus(Enum):
@@ -128,6 +148,8 @@ class WorkflowContext:
     current_step: Optional[str] = None
     step_results: Dict[str, StepResult] = field(default_factory=dict)
     variables: Dict[str, Any] = field(default_factory=dict)
+    node_outputs: Dict[str, Any] = field(default_factory=dict)
+    param_chains: Dict[str, dict] = field(default_factory=dict)
     started_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -145,6 +167,8 @@ class WorkflowContext:
             "current_step": self.current_step,
             "step_results": {k: v.to_dict() for k, v in self.step_results.items()},
             "variables": self.variables,
+            "node_outputs": self.node_outputs,
+            "param_chains": self.param_chains,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
         }
@@ -157,12 +181,31 @@ class WorkflowContext:
             input_data=data.get("input_data", {}),
             current_step=data.get("current_step"),
             variables=data.get("variables", {}),
+            node_outputs=data.get("node_outputs", {}),
+            param_chains=data.get("param_chains", {}),
             started_at=data.get("started_at"),
             updated_at=data.get("updated_at"),
         )
         for sid, sr in data.get("step_results", {}).items():
             ctx.step_results[sid] = StepResult.from_dict(sr)
         return ctx
+
+    def set_node_output(self, node_id: str, key: str, value: Any):
+        if node_id not in self.node_outputs:
+            self.node_outputs[node_id] = {}
+        if not isinstance(self.node_outputs[node_id], dict):
+            self.node_outputs[node_id] = {"_value": self.node_outputs[node_id]}
+        self.node_outputs[node_id][key] = value
+
+    def get_node_output(self, node_id: str, key: Optional[str] = None) -> Any:
+        node = self.node_outputs.get(node_id)
+        if node is None:
+            return None
+        if key is None:
+            return node
+        if isinstance(node, dict):
+            return node.get(key)
+        return node
 
 
 @dataclass
@@ -186,6 +229,10 @@ class StepDefinition:
     loop_items: Optional[str] = None
     max_iterations: int = 10
 
+    param_inputs: Optional[List[Dict[str, Any]]] = None
+    param_outputs: Optional[List[Dict[str, Any]]] = None
+    param_transforms: Optional[Dict[str, str]] = None
+
     def to_dict(self) -> dict:
         d = {"step_id": self.step_id, "name": self.name,
              "step_type": self.step_type.value, "config": self.config}
@@ -207,6 +254,12 @@ class StepDefinition:
             d["loop_var"] = self.loop_var
         if self.loop_items:
             d["loop_items"] = self.loop_items
+        if self.param_inputs:
+            d["param_inputs"] = self.param_inputs
+        if self.param_outputs:
+            d["param_outputs"] = self.param_outputs
+        if self.param_transforms:
+            d["param_transforms"] = self.param_transforms
         return d
 
     @classmethod
@@ -282,6 +335,8 @@ class WorkflowPersistence:
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            
+            # 先创建表
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS workflow_definitions (
                     workflow_id TEXT PRIMARY KEY,
@@ -354,6 +409,42 @@ class WorkflowPersistence:
                 CREATE INDEX IF NOT EXISTS idx_logs_instance
                     ON workflow_logs(instance_id);
             """)
+            
+            # 数据库迁移：添加缺失的列
+            self._migrate_db(conn)
+    
+    def _migrate_db(self, conn):
+        """添加缺失的列"""
+        # 表和需要添加的列
+        tables = {
+            "workflow_instances": {
+                "current_step_name": "TEXT",
+            },
+            "workflow_logs": {
+                "step_name": "TEXT",
+            },
+            "checkpoints": {
+                # 已完整
+            },
+            "workflow_artifacts": {
+                # 已完整
+            },
+        }
+        
+        for table_name, required_cols in tables.items():
+            if not required_cols:
+                continue
+            # 获取现有列
+            cursor = conn.execute(f"PRAGMA table_info({table_name})")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            
+            for col_name, col_type in required_cols.items():
+                if col_name not in existing_cols:
+                    try:
+                        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
+                        logger.info(f"数据库迁移：添加列 {table_name}.{col_name}")
+                    except Exception as e:
+                        logger.warning(f"添加列失败: {e}")
 
     def save_definition(self, wf_def: WorkflowDefinition):
         with self._lock, sqlite3.connect(str(self.db_path)) as conn:
@@ -524,16 +615,39 @@ class WorkflowPersistence:
                 metadata: dict = None):
         log_id = str(uuid.uuid4())
         with self._lock, sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
-                INSERT INTO workflow_logs
-                (log_id, instance_id, step_id, step_name, log_level, message,
-                 metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                log_id, instance_id, step_id, step_name, level, message,
-                json.dumps(metadata or {}, ensure_ascii=False),
-                datetime.now().isoformat(),
-            ))
+            # 确保迁移：添加缺失的 step_name 列
+            cursor = conn.execute("PRAGMA table_info(workflow_logs)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if "step_name" not in cols:
+                try:
+                    conn.execute("ALTER TABLE workflow_logs ADD COLUMN step_name TEXT")
+                except:
+                    pass
+            
+            # 插入日志
+            if "step_name" in cols:
+                conn.execute("""
+                    INSERT INTO workflow_logs
+                    (log_id, instance_id, step_id, step_name, log_level, message,
+                     metadata, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    log_id, instance_id, step_id, step_name, level, message,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    datetime.now().isoformat(),
+                ))
+            else:
+                # 回退：不使用 step_name
+                conn.execute("""
+                    INSERT INTO workflow_logs
+                    (log_id, instance_id, step_id, log_level, message,
+                     metadata, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    log_id, instance_id, step_id, level, message,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    datetime.now().isoformat(),
+                ))
 
     def get_logs(self, instance_id: str, limit: int = 100,
                  level: Optional[str] = None) -> List[dict]:
@@ -570,6 +684,15 @@ class WorkflowEngine:
         self._agent = None
         self._tools = None
         self._harness_runner = None
+        self._middleware_chain = None
+        if HAS_MIDDLEWARE:
+            try:
+                self._middleware_chain = MiddlewareChain()
+                self._middleware_chain.add(ToolErrorMiddleware())
+                self._middleware_chain.add(LoopDetectionMiddleware())
+            except Exception:
+                self._middleware_chain = None
+        self._run_manager = RunManager() if HAS_RUNTIME else None
 
     @classmethod
     def get_instance(cls, db_path: Optional[Path] = None) -> "WorkflowEngine":
@@ -683,7 +806,7 @@ class WorkflowEngine:
         self.persistence.update_instance(instance_id, status=WorkflowStatus.RUNNING.value)
         self.persistence.add_log(instance_id, "工作流恢复执行")
 
-        from_step = checkpoint["step_id"] if checkpoint else None
+        from_step = checkpoint["step_id"] if checkpoint else (instance.get("current_step_id") or None)
         runner = WorkflowRunner(self, definition, ctx)
         self._running[instance_id] = runner
         self._executor.submit(runner.run_sync, from_step)
@@ -782,7 +905,11 @@ class WorkflowRunner:
 
         if from_step:
             idx = self.definition.get_step_index(from_step)
-            steps = self.definition.steps[idx + 1:]
+            if idx >= 0:
+                steps = self.definition.steps[idx:]
+            else:
+                steps = list(self.definition.steps)
+                self._snapshot_to_db()
         else:
             steps = list(self.definition.steps)
             self._snapshot_to_db()
@@ -868,6 +995,7 @@ class WorkflowRunner:
         )
 
         try:
+            self._apply_param_chain_inputs(step_def)
             st = step_def.step_type
 
             if st == StepType.AGENT:
@@ -884,11 +1012,22 @@ class WorkflowRunner:
                 output = self._run_wait(step_def)
             elif st == StepType.NOTIFY:
                 output = self._run_notify(step_def)
+            elif st == StepType.GT_PROVE:
+                output = self._run_gt_prove(step_def)
+            elif st == StepType.LEAN_CHECK:
+                output = self._run_lean_check(step_def)
+            elif st == StepType.MANIM_GEN:
+                output = self._run_manim_gen(step_def)
+            elif st == StepType.MATHLENS:
+                output = self._run_mathlens(step_def)
+            elif st == StepType.AUTORESEARCH:
+                output = self._run_autoresearch(step_def)
             else:
                 output = None
 
             result.status = StepStatus.COMPLETED
             result.output = output
+            self._apply_param_chain_outputs(step_def, output)
 
         except Exception as e:
             result.status = StepStatus.FAILED
@@ -899,23 +1038,282 @@ class WorkflowRunner:
         return result
 
     def _run_agent(self, step_def: StepDefinition) -> str:
+        # 优先使用 HarnessRunner（如果可用）
+        if self.engine._harness_runner:
+            prompt = self._render(step_def.prompt_template or "")
+            ctx = json.dumps(self.context.variables, ensure_ascii=False, indent=2)
+            full_prompt = f"{prompt}\n\n上下文数据:\n```json\n{ctx}\n```"
+            messages = [{"role": "user", "content": full_prompt}]
+            turn_result = self.engine._harness_runner.run_turn(messages)
+            return turn_result.final_response or turn_result.content or ""
+        
+        # 回退：使用 Agent
         agent = self.engine._agent
         if not agent:
-            raise RuntimeError("Agent 未初始化")
+            return f"警告：Agent 未初始化，无法执行步骤 '{step_def.name or step_def.step_id}'。请先初始化 Agent。"
 
         prompt = self._render(step_def.prompt_template or "")
         ctx = json.dumps(self.context.variables, ensure_ascii=False, indent=2)
         full_prompt = f"{prompt}\n\n上下文数据:\n```json\n{ctx}\n```"
 
-        if self.engine._harness_runner:
-            messages = [{"role": "user", "content": full_prompt}]
-            turn_result = self.engine._harness_runner.run_turn(messages)
-            return turn_result.final_response or turn_result.content or ""
+        wf_messages = []
+        if agent.messages and agent.messages[0].get("role") == "system":
+            wf_messages.append(dict(agent.messages[0]))
+        else:
+            wf_messages.append({"role": "system", "content": "你是工作流执行助手。"})
+        wf_messages.append({"role": "user", "content": full_prompt})
+
+        llm = agent.llm
+        if not llm:
+            return "警告：Agent LLM 未初始化"
+
+        tools = agent._get_tool_schemas() if hasattr(agent, '_get_tool_schemas') else None
+
+        max_rounds = 5
+        last_content = ""
+        for _ in range(max_rounds):
+            if self._cancelled or self._abort_event.is_set():
+                return last_content or "(工作流步骤已取消)"
+
+            response = llm.chat(wf_messages, tools=tools)
+
+            if getattr(response, 'cancelled', False):
+                return response.content or last_content or "(工作流步骤已取消)"
+
+            if not response.tool_calls:
+                return response.content or ""
+
+            last_content = response.content or last_content
+            wf_messages.append(response.message)
+            for tc in response.tool_calls:
+                if self._cancelled or self._abort_event.is_set():
+                    return last_content or "(工作流步骤已取消)"
+                result = agent._execute_tool(tc)
+                wf_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+
+        return last_content or "(工作流Agent步骤达到最大轮次)"
+
+    def _run_gt_prove(self, step_def: StepDefinition) -> Any:
+        try:
+            from .gt.gt_workflow import GTWorkflowStep
+        except ImportError:
+            return "GT Agent 模块不可用"
+
+        source_code = self._render(step_def.prompt_template or "")
+        context = json.dumps(self.context.variables, ensure_ascii=False, indent=2)
+        mode = step_def.config.get("gt_mode", "basic") if step_def.config else "basic"
+        allowed = step_def.config.get("allowed_references", []) if step_def.config else []
+        forbidden = step_def.config.get("forbidden_assumptions", []) if step_def.config else []
+
+        llm = None
+        if self.engine._agent:
+            llm = getattr(self.engine._agent, 'llm', None)
+
+        step = GTWorkflowStep(
+            mode=mode,
+            llm=llm,
+        )
+
+        def abort_check():
+            return self._cancelled or self._abort_event.is_set()
+
+        result = step.execute(
+            source_code=source_code,
+            context=context,
+            allowed_references=allowed,
+            forbidden_assumptions=forbidden,
+            abort_check=abort_check,
+        )
+
+        if result.get("status") == "PROVED":
+            for key, value in result.items():
+                if key != "final_code":
+                    self.context.set_variable(f"gt_{key}", value)
+        else:
+            for key, value in result.items():
+                self.context.set_variable(f"gt_{key}", value)
+
+        return json.dumps(result, ensure_ascii=False)
+
+    def _run_lean_check(self, step_def: StepDefinition) -> Any:
+        try:
+            from .research.lean4.lean4_tools import _run_lean, _run_lean4_mcp, _find_lean4_mcp
+        except ImportError:
+            return json.dumps({"error": "Lean4 模块不可用"}, ensure_ascii=False)
+
+        code = self._render(step_def.prompt_template or "")
+        if not code.strip():
+            code = self.context.variables.get("source_code", "")
+        timeout = step_def.config.get("timeout", 60) if step_def.config else 60
+
+        if _find_lean4_mcp():
+            result = _run_lean4_mcp("check", "--code", code, timeout=timeout)
+        else:
+            result = _run_lean(code, timeout=timeout)
+
+        for key, value in result.items():
+            self.context.set_variable(f"lean4_{key}", value)
+        return json.dumps(result, ensure_ascii=False)
+
+    def _run_manim_gen(self, step_def: StepDefinition) -> Any:
+        try:
+            from .research.manim.manim_tools import _run_manim_mcp, _run_manim, _find_manim_mcp
+        except ImportError:
+            return json.dumps({"error": "Manim 模块不可用"}, ensure_ascii=False)
+
+        prompt = self._render(step_def.prompt_template or "")
+        config = step_def.config or {}
+        mode = config.get("mode", "simple")
+        quality = config.get("quality", "h")
+        audio = config.get("audio", False)
+
+        if _find_manim_mcp():
+            args = ["gen", prompt, "--mode", mode, "--quality", quality]
+            if audio:
+                args.append("--audio")
+            result = _run_manim_mcp(*args, timeout=600)
+        else:
+            script_path = config.get("script_path", "")
+            scene_name = config.get("scene_name", "")
+            if script_path and scene_name:
+                result = _run_manim(script_path, scene_name, quality)
+            else:
+                result = {"error": "manim-mcp 不可用且未提供 script_path/scene_name"}
+
+        for key, value in result.items():
+            self.context.set_variable(f"manim_{key}", value)
+        return json.dumps(result, ensure_ascii=False)
+
+    def _run_mathlens(self, step_def: StepDefinition) -> Any:
+        try:
+            from .research.mathlens.mathlens_tools import _run_script, SKILLS_DIR
+        except ImportError:
+            return json.dumps({"error": "MathLens 模块不可用"}, ensure_ascii=False)
+
+        config = step_def.config or {}
+        action = config.get("action", "render")
+        project_dir = self._render(config.get("project_dir", ""))
+        script_path = config.get("script_path", "script.py")
+        scene_name = config.get("scene_name", "MathScene")
+        quality = config.get("quality", "h")
+
+        if action == "init":
+            result = _run_script("init.py", project_dir or ".", timeout=30)
+        elif action == "tts":
+            csv_path = config.get("csv_path", "")
+            voice = config.get("voice", "xiaoxiao")
+            result = _run_script("generate_tts.py", csv_path, "./audio", "--voice", voice, timeout=300)
+        elif action == "validate":
+            storyboard_path = config.get("storyboard_path", "")
+            result = _run_script("validate_audio.py", storyboard_path, "./audio", timeout=30)
+        elif action == "check":
+            result = _run_script("check.py", script_path, timeout=15)
+        else:
+            args = ["-f", script_path, "-s", scene_name, "-q", quality]
+            result = _run_script("render.py", *args, timeout=600)
+
+        for key, value in result.items():
+            self.context.set_variable(f"mathlens_{key}", value)
+        return json.dumps(result, ensure_ascii=False)
+
+    def _run_autoresearch(self, step_def: StepDefinition) -> Any:
+        config = step_def.config or {}
+        topic = self._render(step_def.prompt_template or "")
+        if not topic.strip():
+            topic = self.context.variables.get("topic", "")
+        if not topic.strip():
+            topic = self.context.variables.get("research_topic", "")
+
+        stages = config.get("stages", [
+            "topic_init", "problem_decompose", "search_strategy",
+            "literature_collect", "knowledge_extract", "synthesis",
+            "hypothesis_gen", "experiment_design", "result_analysis",
+        ])
+        max_iterations = config.get("max_iterations", 1)
+
+        stage_contracts = {
+            "topic_init": {"outputs": ["research_scope.md"], "description": "研究范围界定"},
+            "problem_decompose": {"outputs": ["sub_problems.md"], "description": "问题拆解"},
+            "search_strategy": {"outputs": ["search_plan.md"], "description": "搜索策略"},
+            "literature_collect": {"outputs": ["literature_list.md"], "description": "文献收集"},
+            "literature_screen": {"outputs": ["screened_literature.md"], "description": "文献筛选"},
+            "knowledge_extract": {"outputs": ["knowledge_notes.md"], "description": "知识提取"},
+            "synthesis": {"outputs": ["synthesis_report.md"], "description": "知识综合"},
+            "hypothesis_gen": {"outputs": ["hypotheses.md"], "description": "假设生成"},
+            "experiment_design": {"outputs": ["experiment_plan.md"], "description": "实验设计"},
+            "code_generation": {"outputs": ["experiment_code.py"], "description": "代码生成"},
+            "resource_planning": {"outputs": ["resource_plan.md"], "description": "资源规划"},
+            "experiment_run": {"outputs": ["experiment_log.txt"], "description": "实验执行"},
+            "iterative_refine": {"outputs": ["refined_code.py"], "description": "迭代优化"},
+            "result_analysis": {"outputs": ["analysis_report.md"], "description": "结果分析"},
+            "research_decision": {"outputs": ["decision.md"], "description": "研究决策"},
+            "paper_outline": {"outputs": ["paper_outline.md"], "description": "论文大纲"},
+            "paper_draft": {"outputs": ["paper_draft.tex"], "description": "论文初稿"},
+            "peer_review": {"outputs": ["review_comments.md"], "description": "同行评审"},
+            "paper_revision": {"outputs": ["paper_revised.tex"], "description": "论文修改"},
+            "quality_gate": {"outputs": ["quality_report.md"], "description": "质量门控"},
+            "knowledge_archive": {"outputs": ["archive_summary.md"], "description": "知识归档"},
+            "export_publish": {"outputs": ["final_paper.pdf"], "description": "导出发布"},
+            "citation_verify": {"outputs": ["citation_report.md"], "description": "引用验证"},
+        }
 
         try:
-            return agent.chat_sync(full_prompt)
-        except AttributeError:
-            return agent.chat(full_prompt)
+            from .research.autoresearch.autoresearch_tools import _inject_skills
+        except ImportError:
+            _inject_skills = None
+
+        results = []
+        for stage in stages:
+            contract = stage_contracts.get(stage, {"outputs": [], "description": stage})
+            skills_prompt = ""
+            if _inject_skills:
+                try:
+                    skills_prompt = _inject_skills({"stage": stage, "topic": topic})
+                except Exception:
+                    pass
+
+            stage_prompt = f"执行研究阶段 {stage}: {contract['description']}\n\n研究主题: {topic}\n预期输出: {', '.join(contract['outputs'])}"
+            if skills_prompt:
+                stage_prompt += f"\n\n## 匹配到的研究技能\n{skills_prompt[:3000]}"
+            if results:
+                last = results[-1]
+                stage_prompt += f"\n\n前序阶段 ({last['stage']}) 结果摘要:\n{str(last.get('summary', last.get('output', '')))[:2000]}"
+
+            try:
+                output = self._run_agent(StepDefinition(
+                    step_id=f"autoresearch_{stage}",
+                    name=f"AutoResearch: {stage}",
+                    step_type=StepType.AGENT,
+                    prompt_template=stage_prompt,
+                ))
+                output_str = str(output)
+            except Exception as e:
+                output_str = f"[ERROR] {e}"
+
+            results.append({
+                "stage": stage,
+                "description": contract["description"],
+                "expected_outputs": contract["outputs"],
+                "output": output_str[:5000],
+                "summary": output_str[:500],
+                "status": "error" if "[ERROR]" in output_str else "done",
+            })
+
+            self.context.set_variable(f"autoresearch_{stage}", output_str)
+            self.context.set_variable("autoresearch_current_stage", stage)
+
+        self.context.set_variable("autoresearch_results", results)
+        self.context.set_variable("autoresearch_stages_completed", len(results))
+
+        return json.dumps({
+            "stages_completed": len(results),
+            "topic": topic,
+            "stages": [{"stage": r["stage"], "status": r["status"], "description": r["description"]} for r in results],
+        }, ensure_ascii=False)
 
     def _run_tool(self, step_def: StepDefinition) -> Any:
         tools = self.engine._tools
@@ -958,7 +1356,8 @@ class WorkflowRunner:
                 futures[pool.submit(self._execute_step, sd)] = sd.step_id
             for future in futures:
                 try:
-                    results.append(future.result(timeout=300))
+                    step_result = future.result(timeout=300)
+                    results.append(step_result)
                 except Exception as e:
                     results.append(StepResult(
                         step_id=futures[future],
@@ -966,11 +1365,11 @@ class WorkflowRunner:
                         error=str(e),
                     ))
 
-        return [r.output for r in results]
+        return [r.output if isinstance(r, StepResult) else r for r in results]
 
     def _run_condition(self, step_def: StepDefinition) -> bool:
         expr = step_def.condition_expr or "true"
-        rendered = self._render(f"${{{expr}}}")
+        rendered = self._render_string(expr)
         return self._eval_condition(rendered, step_def)
 
     def _run_loop(self, step_def: StepDefinition) -> List[Any]:
@@ -1022,6 +1421,133 @@ class WorkflowRunner:
         except Exception:
             return bool(self._render(expr))
 
+    def _apply_param_chain_inputs(self, step_def: StepDefinition):
+        if not step_def.param_inputs:
+            return
+        try:
+            from .param_chain import ParamBinding, resolve_step_params
+        except ImportError:
+            return
+        args = step_def.config.setdefault("args", {})
+        for binding in step_def.param_inputs:
+            target = binding.get("target", "")
+            source = binding.get("source", "")
+            if not target or not source:
+                continue
+            transform = binding.get("transform")
+            default = binding.get("default")
+            try:
+                value = self._resolve_param_source(source)
+                if transform:
+                    value = self._apply_param_transform(value, transform, source)
+                if value is None and default is not None:
+                    value = default
+                args[target] = value
+            except Exception as e:
+                logger.warning(f"param_chain input failed for {step_def.step_id}.{target}: {e}")
+                if "default" in binding:
+                    args[target] = binding["default"]
+
+    def _apply_param_chain_outputs(self, step_def: StepDefinition, output: Any):
+        if not step_def.param_outputs:
+            return
+        if output is None:
+            return
+        try:
+            output_data = json.loads(output) if isinstance(output, str) else output
+        except (json.JSONDecodeError, TypeError):
+            output_data = {"_raw": str(output)[:5000]}
+        for binding in step_def.param_outputs:
+            name = binding.get("name", "")
+            path = binding.get("path", "")
+            target_type = binding.get("type", "auto")
+            if not name:
+                continue
+            if path:
+                cur = output_data
+                for part in path.split("."):
+                    if isinstance(cur, dict):
+                        cur = cur.get(part)
+                    else:
+                        cur = None
+                        break
+            elif isinstance(output_data, dict):
+                cur = output_data.get(name, output_data)
+            else:
+                cur = output_data
+            if target_type and target_type != "auto" and cur is not None:
+                try:
+                    if target_type in ("string", "str"):
+                        cur = str(cur)
+                    elif target_type in ("int", "integer"):
+                        cur = int(cur)
+                    elif target_type in ("float", "number"):
+                        cur = float(cur)
+                    elif target_type in ("bool", "boolean"):
+                        cur = bool(cur)
+                except (ValueError, TypeError):
+                    pass
+            self.context.set_node_output(step_def.step_id, name, cur)
+            self.context.node_outputs[f"{step_def.step_id}.{name}"] = cur
+            self.context.set_var(f"{step_def.step_id}.{name}", cur)
+
+    def _resolve_param_source(self, source: str) -> Any:
+        if not source:
+            return None
+        if source.startswith("$input."):
+            path = source[len("$input."):]
+            cur = self.context.input_data
+            for part in path.split("."):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            return cur
+        if source.startswith("$node."):
+            path = source[len("$node."):]
+            parts = path.split(".", 1)
+            node_id = parts[0]
+            key = parts[1] if len(parts) > 1 else None
+            node = self.context.node_outputs.get(node_id)
+            if isinstance(node, dict) and key:
+                return node.get(key)
+            return node
+        if source.startswith("$step."):
+            path = source[len("$step."):]
+            parts = path.split(".", 1)
+            step_id = parts[0]
+            key = parts[1] if len(parts) > 1 else None
+            step_result = self.context.step_results.get(step_id)
+            if not step_result:
+                return None
+            if key is None:
+                return step_result.output
+            try:
+                output_data = json.loads(step_result.output) if isinstance(step_result.output, str) else step_result.output
+            except (json.JSONDecodeError, TypeError):
+                output_data = {}
+            if isinstance(output_data, dict):
+                return output_data.get(key)
+            return output_data
+        if source.startswith("$var."):
+            path = source[len("$var."):]
+            cur = self.context.variables
+            for part in path.split("."):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            return cur
+        if source in self.context.variables:
+            return self.context.variables[source]
+        if source in self.context.input_data:
+            return self.context.input_data[source]
+        return None
+
+    def _apply_param_transform(self, value: Any, transform: str, source: str) -> Any:
+        try:
+            from .param_chain import _apply_transform
+        except ImportError:
+            return value
+        return _apply_transform(value, transform, {
+            "context": self.context,
+            "source": source,
+        })
+
     def _render(self, template: Any, **extra) -> Any:
         if isinstance(template, str):
             return self._render_string(template)
@@ -1042,6 +1568,8 @@ class WorkflowRunner:
         result = result.replace("{step_results}",
             json.dumps({k: v.to_dict() for k, v in self.context.step_results.items()},
                        ensure_ascii=False, indent=2))
+        result = result.replace("{node_outputs}",
+            json.dumps(self.context.node_outputs, ensure_ascii=False, indent=2))
         return result
 
     def _snapshot_to_db(self):

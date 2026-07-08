@@ -57,6 +57,7 @@ class APIConfig:
                 "claude": ProviderType.ANTHROPIC,
                 "anthropic": ProviderType.ANTHROPIC,
                 "deepseek": ProviderType.DEEPSEEK,
+                "deepseek-proxy": ProviderType.DEEPSEEK_PROXY,
                 "qwen": ProviderType.QWEN,
                 "ollama": ProviderType.OLLAMA,
                 "mimo": ProviderType.MIMO,
@@ -105,18 +106,93 @@ class ToolConfig:
 class ConfigManager:
     """配置管理器"""
 
-    def __init__(self, config_dir: Optional[Path] = None):
-        self.config_dir = config_dir or Path(__file__).parent.parent / "agent_config"
-        self.config_dir.mkdir(exist_ok=True)
+    _LEGACY_CONFIG_DIRS = []
 
-        self.api_configs_file = self.config_dir / "apis.json"
-        self.skills_config_file = self.config_dir / "skills.json"
-        self.tools_config_file = self.config_dir / "tools.json"  # 新增工具配置文件
-        self.settings_file = self.config_dir / "settings.json"
-        # 新的提供商配置文件
-        self.providers_config_file = self.config_dir / "providers.json"
-        # 子 Agent 配置文件
-        self.sub_agents_config_file = self.config_dir / "sub_agents.json"
+    @classmethod
+    def _get_legacy_dirs(cls):
+        if not cls._LEGACY_CONFIG_DIRS:
+            try:
+                import sys
+                if getattr(sys, 'frozen', False):
+                    base = Path(sys.executable).parent
+                else:
+                    base = Path(__file__).resolve().parent.parent
+                for candidate in [base / "agent_config", base / "mcp" / "agent_config"]:
+                    if candidate.exists():
+                        cls._LEGACY_CONFIG_DIRS.append(candidate)
+            except Exception:
+                pass
+        return cls._LEGACY_CONFIG_DIRS
+
+    def _resolve_config_file(self, filename: str) -> Path:
+        """查找配置文件，优先系统目录，回退旧位置"""
+        user_path = self.config_dir / filename
+        if user_path.exists():
+            return user_path
+        for legacy_dir in self._get_legacy_dirs():
+            legacy_path = legacy_dir / filename
+            if legacy_path.exists():
+                return legacy_path
+        return user_path
+
+    def _get_all_config_paths(self, filename: str) -> List[Path]:
+        """获取所有配置文件路径 - 合取逻辑（同时读取多个目录）"""
+        paths = []
+        user_path = self.config_dir / filename
+        
+        if user_path.exists():
+            paths.append(user_path)
+        
+        for legacy_dir in self._get_legacy_dirs():
+            legacy_path = legacy_dir / filename
+            if legacy_path.exists() and legacy_path not in paths:
+                paths.append(legacy_path)
+        
+        if not paths:
+            paths.append(user_path)
+        
+        return paths
+
+    def _merge_json_configs(self, paths: List[Path], key: str) -> Dict:
+        """合并多个 JSON 配置文件的指定键值"""
+        merged = {}
+        seen_keys = set()
+        
+        for path in paths:
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                items = data.get(key, [])
+                for item in items:
+                    if isinstance(item, dict) and "name" in item:
+                        item_key = item["name"]
+                        if item_key not in seen_keys:
+                            seen_keys.add(item_key)
+                            merged[item_key] = item
+                    elif isinstance(item, dict) and "id" in item:
+                        item_key = item["id"]
+                        if item_key not in seen_keys:
+                            seen_keys.add(item_key)
+                            merged[item_key] = item
+            except Exception as e:
+                logger.warning(f"加载配置文件 {path} 失败: {e}")
+        
+        return merged
+
+    def __init__(self, config_dir: Optional[Path] = None):
+        if config_dir:
+            self.config_dir = config_dir
+        else:
+            self.config_dir = Path.home() / ".ts2" / "agent_config"
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+
+        self.api_configs_file = self._resolve_config_file("apis.json")
+        self.skills_config_file = self._resolve_config_file("skills.json")
+        self.tools_config_file = self._resolve_config_file("tools.json")
+        self.settings_file = self._resolve_config_file("settings.json")
+        self.providers_config_file = self._resolve_config_file("providers.json")
+        self.sub_agents_config_file = self._resolve_config_file("sub_agents.json")
 
         self.api_configs: Dict[str, APIConfig] = {}
         self.provider_configs: List['ProviderConfig'] = []  # 新的提供商配置
@@ -486,7 +562,7 @@ class ConfigManager:
             try:
                 data = json.loads(self.skills_config_file.read_text("utf-8"))
                 for item in data:
-                    self.skill_configs[item["name"]] = SkillConfig(**item)
+                    self.skill_configs[item["name"]] = SkillConfig(**{k: v for k, v in item.items() if k in SkillConfig.__dataclass_fields__})
             except Exception as e:
                 logger.warning(f"加载 Skill 配置失败: {e}")
 
@@ -496,7 +572,7 @@ class ConfigManager:
             try:
                 data = json.loads(self.tools_config_file.read_text("utf-8"))
                 for item in data:
-                    self.tool_configs[item["name"]] = ToolConfig(**item)
+                    self.tool_configs[item["name"]] = ToolConfig(**{k: v for k, v in item.items() if k in ToolConfig.__dataclass_fields__})
             except Exception as e:
                 logger.warning(f"加载 Tool 配置失败: {e}")
 
@@ -526,6 +602,41 @@ class ConfigManager:
     def _save_settings(self):
         """保存通用设置"""
         self.settings_file.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 审批模式管理
+    def get_approval_mode(self) -> str:
+        """获取审批模式"""
+        return self.settings.get("approval_mode", "suggest")
+
+    def set_approval_mode(self, mode: str):
+        """设置审批模式"""
+        self.settings["approval_mode"] = mode
+        self._save_settings()
+
+    def get_always_approved_tools(self) -> List[str]:
+        """获取总是批准的工具列表"""
+        return self.settings.get("always_approved_tools", [])
+
+    def add_always_approved_tool(self, tool_name: str):
+        """添加总是批准的工具"""
+        tools = self.get_always_approved_tools()
+        if tool_name not in tools:
+            tools.append(tool_name)
+            self.settings["always_approved_tools"] = tools
+            self._save_settings()
+
+    def remove_always_approved_tool(self, tool_name: str):
+        """移除总是批准的工具"""
+        tools = self.get_always_approved_tools()
+        if tool_name in tools:
+            tools.remove(tool_name)
+            self.settings["always_approved_tools"] = tools
+            self._save_settings()
+
+    def clear_always_approved_tools(self):
+        """清除所有总是批准的工具"""
+        self.settings["always_approved_tools"] = []
+        self._save_settings()
 
     # 提供商配置管理（新增）
     def add_provider_config(self, config: 'ProviderConfig') -> bool:
@@ -700,13 +811,31 @@ class ConfigManager:
         return [config for config in self.tool_configs.values() if config.enabled]
 
     def init_default_tool_configs(self, tools_list: List[Any]) -> None:
-        """初始化默认工具配置（从工具列表）"""
+        """初始化默认工具配置（从工具列表，自动分类）"""
+        from .tool_search import _classify_tool
         for tool in tools_list:
             if tool.name not in self.tool_configs:
+                group = _classify_tool(tool.name)
+                # 映射分组名到 category
+                category_map = {
+                    "core": "builtin",
+                    "ws2": "ws2",
+                    "datahub_core": "hub",
+                    "datahub_pro": "hub",
+                    "scholar": "scholar",
+                    "wolfram": "wolfram",
+                    "lean4": "lean4",
+                    "manim": "manim",
+                    "mathlens": "mathlens",
+                    "autoresearch": "autoresearch",
+                    "feishu": "feishu",
+                    "gt": "gt",
+                    "other": "builtin",
+                }
                 cfg = ToolConfig(
                     name=tool.name,
                     description=tool.description,
-                    category="builtin",  # 默认分类
+                    category=category_map.get(group, "builtin"),
                     enabled=True
                 )
                 self.add_tool_config(cfg)
@@ -737,13 +866,13 @@ class ConfigManager:
         data = json.loads(import_path.read_text("utf-8"))
         if "apis" in data:
             for item in data["apis"]:
-                self.api_configs[item["name"]] = APIConfig(**item)
+                self.api_configs[item["name"]] = APIConfig(**{k: v for k, v in item.items() if k in APIConfig.__dataclass_fields__})
         if "skills" in data:
             for item in data["skills"]:
-                self.skill_configs[item["name"]] = SkillConfig(**item)
+                self.skill_configs[item["name"]] = SkillConfig(**{k: v for k, v in item.items() if k in SkillConfig.__dataclass_fields__})
         if "tools" in data:
             for item in data["tools"]:
-                self.tool_configs[item["name"]] = ToolConfig(**item)
+                self.tool_configs[item["name"]] = ToolConfig(**{k: v for k, v in item.items() if k in ToolConfig.__dataclass_fields__})
         if "settings" in data:
             self.settings = data["settings"]
         self._save_api_configs()

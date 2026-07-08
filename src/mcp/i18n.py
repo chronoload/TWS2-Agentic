@@ -88,4 +88,60 @@ class Translator:
             "approval.always": "总是批准的工具",
             "workflow.title": "⚡ 工作流管理",
             "workflow.definitions": "工作流定义",
-            "workflow.create_sample": "➕
+            "workflow.create_sample": "➕ 创建示例",
+            "workflow.run": "▶️ 运行",
+            "workflow.stop": "⏹️ 停止",
+            "workflow.delete": "🗑️ 删除",
+            "workflow.status": "状态",
+            "workflow.steps": "步骤",
+        }
+        
+        self.translations["en"] = {
+            "config.title": "WS2 Agent Configuration",
+            "config.subtitle": "Manage your API providers and tools",
+            "config.save_close": "Save & Close",
+            "config.test": "Test Config",
+            "provider.title": "Configured Providers",
+            "provider.add": "➕ Add",
+            "provider.edit": "✏️ Edit",
+            "provider.delete": "🗑️ Delete",
+            "tools.title": "Tool Configuration",
+            "tools.enable_all": "✅ Enable All",
+            "tools.disable_all": "❌ Disable All",
+            "approval.title": "🔒 Approval Management",
+            "workflow.title": "⚡ Workflow Management",
+        }
+    
+    def get(self, key: str, default: str = None, **kwargs) -> str:
+        lang = self.current_language
+        translations = self.translations.get(lang, {})
+        text = translations.get(key, default or key)
+        if kwargs:
+            try:
+                text = text.format(**kwargs)
+            except (KeyError, IndexError):
+                pass
+        return text
+    
+    def set_language(self, language: str):
+        if language in self.translations:
+            self.current_language = language
+        else:
+            logger.warning(f"语言 {language} 不可用，保持 {self.current_language}")
+    
+    def t(self, key: str, default: str = None, **kwargs) -> str:
+        return self.get(key, default, **kwargs)
+
+
+_translator: Optional[Translator] = None
+
+
+def get_translator() -> Translator:
+    global _translator
+    if _translator is None:
+        _translator = Translator()
+    return _translator
+
+
+def t(key: str, default: str = None, **kwargs) -> str:
+    return get_translator().get(key, default, **kwargs)

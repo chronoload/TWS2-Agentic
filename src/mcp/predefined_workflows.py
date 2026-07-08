@@ -12,7 +12,7 @@ WS2 预定义工作流 — 参考 DeerFlow 的 Skills + Metaflow 的 Flow 模式
 """
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from .workflow_engine import (
     WorkflowDefinition, StepDefinition, StepType,
@@ -595,6 +595,812 @@ def course_mode_workflow() -> WorkflowDefinition:
     )
 
 
+def gt_basic_prove_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_gt_basic_prove",
+        name="GT基础证明",
+        description="使用GT Agent基础模式进行数学证明：验证→评分→Gap分析→假设审计",
+        checkpoint_after={"validate", "rate", "gap_analysis"},
+        steps=[
+            StepDefinition(
+                step_id="validate",
+                name="验证证明",
+                step_type=StepType.GT_PROVE,
+                config={
+                    "gt_mode": "basic",
+                    "allowed_references": [],
+                    "forbidden_assumptions": [],
+                },
+                prompt_template="{source_code}",
+            ),
+            StepDefinition(
+                step_id="report",
+                name="生成报告",
+                step_type=StepType.AGENT,
+                prompt_template="""基于GT证明结果，生成可读的证明报告:
+
+证明结果: {step_results}
+
+请整理:
+1. 证明状态（成功/失败/部分）
+2. 已关闭的引理
+3. 剩余Gap列表
+4. 假设审计结果
+5. 评分和改进建议
+
+输出 Markdown 格式报告。""",
+            ),
+        ],
+    )
+
+
+def gt_evolution_prove_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_gt_evolution_prove",
+        name="GT进化证明",
+        description="使用GT Agent进化模式：种群搜索+P-UCB平衡探索与利用，适合困难证明",
+        checkpoint_after={"evolve_prove", "validate_final"},
+        steps=[
+            StepDefinition(
+                step_id="evolve_prove",
+                name="进化搜索证明",
+                step_type=StepType.GT_PROVE,
+                config={
+                    "gt_mode": "evolution",
+                    "allowed_references": [],
+                    "forbidden_assumptions": [],
+                },
+                prompt_template="{source_code}",
+            ),
+            StepDefinition(
+                step_id="validate_final",
+                name="最终验证",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "gt_validate",
+                    "args": {"final": True},
+                },
+            ),
+            StepDefinition(
+                step_id="report",
+                name="生成报告",
+                step_type=StepType.AGENT,
+                prompt_template="""基于GT进化证明结果，生成完整证明报告:
+
+证明结果: {step_results}
+
+请整理:
+1. 证明状态和进化代数
+2. 最优候选证明
+3. 种群多样性分析
+4. Gap解决路径
+5. 假设审计结果
+6. 评分和改进建议
+
+输出 Markdown 格式报告。""",
+            ),
+        ],
+    )
+
+
+# ============================================================
+# Lean4 证明检查工作流
+# ============================================================
+
+def lean4_proof_check_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_lean4_proof_check",
+        name="Lean4证明检查",
+        description="Lean 4 代码编译检查→诊断→目标状态查询→报告生成",
+        checkpoint_after={"check", "diagnose"},
+        steps=[
+            StepDefinition(
+                step_id="check",
+                name="编译检查",
+                step_type=StepType.LEAN_CHECK,
+                config={"timeout": 60},
+                prompt_template="{source_code}",
+            ),
+            StepDefinition(
+                step_id="diagnose",
+                name="获取诊断",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "lean4_get_diagnostics",
+                    "args": {"uri": "{file_uri}"},
+                },
+            ),
+            StepDefinition(
+                step_id="goal_state",
+                name="查询目标状态",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "lean4_get_goal_state",
+                    "args": {"uri": "{file_uri}", "line": 0},
+                },
+            ),
+            StepDefinition(
+                step_id="report",
+                name="生成报告",
+                step_type=StepType.AGENT,
+                prompt_template="""基于 Lean 4 检查结果，生成证明状态报告:
+
+编译检查: {step_results}
+诊断信息: {step_results}
+目标状态: {step_results}
+
+请整理:
+1. 编译是否通过
+2. 错误和警告列表
+3. 未完成的目标状态
+4. 修复建议（含代码示例）
+5. 下一步行动
+
+输出 Markdown 格式。""",
+            ),
+        ],
+    )
+
+
+def lean4_lake_build_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_lean4_lake_build",
+        name="Lean4项目构建",
+        description="Lake 项目构建→诊断→报告",
+        checkpoint_after={"build"},
+        steps=[
+            StepDefinition(
+                step_id="build",
+                name="Lake Build",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "lean4_lake_build",
+                    "args": {"project_dir": "{project_dir}", "timeout": 300},
+                },
+            ),
+            StepDefinition(
+                step_id="report",
+                name="构建报告",
+                step_type=StepType.AGENT,
+                prompt_template="""基于 Lake Build 结果，生成构建报告:
+
+构建结果: {step_results}
+
+请整理:
+1. 构建是否成功
+2. 编译错误列表
+3. 依赖问题
+4. 修复建议
+
+输出 Markdown 格式。""",
+            ),
+        ],
+    )
+
+
+# ============================================================
+# Manim 动画生成工作流
+# ============================================================
+
+def manim_animation_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_manim_animation",
+        name="Manim动画生成",
+        description="从文本描述生成 Manim 动画视频：生成→检查→渲染",
+        checkpoint_after={"generate", "review"},
+        steps=[
+            StepDefinition(
+                step_id="generate",
+                name="生成动画",
+                step_type=StepType.MANIM_GEN,
+                config={
+                    "mode": "simple",
+                    "quality": "h",
+                    "audio": False,
+                },
+                prompt_template="{animation_prompt}",
+            ),
+            StepDefinition(
+                step_id="review",
+                name="审查代码",
+                step_type=StepType.AGENT,
+                prompt_template="""审查以下 Manim 动画生成结果:
+
+生成结果: {step_results}
+
+请检查:
+1. 场景结构是否完整
+2. 动画逻辑是否正确
+3. 是否有渲染风险（内存/时间）
+4. 改进建议
+
+输出审查意见。""",
+            ),
+            StepDefinition(
+                step_id="edit",
+                name="编辑优化",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_edit",
+                    "args": {"render_id": "{manim_render_id}", "instruction": "{edit_instruction}"},
+                },
+            ),
+        ],
+    )
+
+
+def manim_rag_search_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_manim_rag_search",
+        name="Manim场景搜索",
+        description="搜索 RAG 数据库中的相似 Manim 场景，辅助动画开发",
+        steps=[
+            StepDefinition(
+                step_id="search",
+                name="RAG搜索",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_rag_search",
+                    "args": {"query": "{query}", "collection": "manim_scenes", "limit": 5},
+                },
+            ),
+            StepDefinition(
+                step_id="summarize",
+                name="汇总结果",
+                step_type=StepType.AGENT,
+                prompt_template="""汇总 Manim RAG 搜索结果:
+
+搜索结果: {step_results}
+
+请整理:
+1. 最相关的场景
+2. 可复用的代码模式
+3. API 用法参考
+4. 建议的动画方案
+
+输出 Markdown 格式。""",
+            ),
+        ],
+    )
+
+
+# ============================================================
+# Lean4 形式化工作流
+# ============================================================
+
+def lean4_formalize_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_lean4_formalize",
+        name="Lean4形式化",
+        description="非正式数学→Lean4代码→编译→证明→审查: formalize→check→prove→review",
+        checkpoint_after={"draft", "check", "prove"},
+        steps=[
+            StepDefinition(
+                step_id="draft",
+                name="形式化草案",
+                step_type=StepType.TOOL,
+                config={"tool_name": "lean4_formalize", "args": {"informal_spec": "{spec}", "mode": "autonomous"}},
+            ),
+            StepDefinition(
+                step_id="check",
+                name="编译检查",
+                step_type=StepType.LEAN_CHECK,
+                config={"timeout": 60},
+                prompt_template="{lean4_code}",
+            ),
+            StepDefinition(
+                step_id="prove",
+                name="引导式证明",
+                step_type=StepType.TOOL,
+                config={"tool_name": "lean4_prove", "args": {"file_path": "{target_file}", "max_cycles": 10}},
+            ),
+            StepDefinition(
+                step_id="review",
+                name="审查",
+                step_type=StepType.TOOL,
+                config={"tool_name": "lean4_review", "args": {"file_path": "{target_file}", "focus": "all"}},
+            ),
+            StepDefinition(
+                step_id="report",
+                name="形式化报告",
+                step_type=StepType.AGENT,
+                prompt_template="""基于 Lean 4 形式化结果，生成报告:
+
+草案: {step_results}
+编译: {step_results}
+证明: {step_results}
+审查: {step_results}
+
+请整理:
+1. 形式化覆盖率
+2. 编译状态
+3. 证明完成度
+4. 审查问题和建议""",
+            ),
+        ],
+    )
+
+
+def lean4_golf_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_lean4_golf",
+        name="Lean4证明优化",
+        description="Lean 4 证明高尔夫: review→golf→check 循环优化证明",
+        checkpoint_after={"golf"},
+        steps=[
+            StepDefinition(
+                step_id="review_before",
+                name="优化前审查",
+                step_type=StepType.TOOL,
+                config={"tool_name": "lean4_review", "args": {"file_path": "{file_path}", "focus": "all"}},
+            ),
+            StepDefinition(
+                step_id="golf",
+                name="Golf优化",
+                step_type=StepType.TOOL,
+                config={"tool_name": "lean4_golf", "args": {"file_path": "{file_path}", "search_mode": "quick", "max_hunks": 3}},
+            ),
+            StepDefinition(
+                step_id="verify",
+                name="验证编译",
+                step_type=StepType.LEAN_CHECK,
+                config={"timeout": 60},
+                prompt_template="{lean4_code}",
+            ),
+            StepDefinition(
+                step_id="report",
+                name="优化报告",
+                step_type=StepType.AGENT,
+                prompt_template="""Lean4 证明优化结果:
+
+优化前: {step_results}
+优化后: {step_results}
+编译验证: {step_results}
+
+请总结:
+1. 行数变化
+2. mathlib 引用优化
+3. 可读性改进
+4. 性能影响""",
+            ),
+        ],
+    )
+
+
+# ============================================================
+# Manim 完整流水线工作流
+# ============================================================
+
+def manim_pipeline_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_manim_pipeline",
+        name="Manim动画流水线",
+        description="完整动画制作流水线: 概念分析→Schema规划→代码生成→审查→渲染",
+        checkpoint_after={"analyze", "schema", "review"},
+        steps=[
+            StepDefinition(
+                step_id="analyze",
+                name="概念分析",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_concept_analyze",
+                    "args": {"concept": "{concept}", "style": "{style}", "target_audience": "{audience}"},
+                },
+            ),
+            StepDefinition(
+                step_id="schema",
+                name="Schema规划",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_schema_generate",
+                    "args": {"concept": "{concept}", "use_latex": True, "scene_count": 5},
+                },
+            ),
+            StepDefinition(
+                step_id="generate",
+                name="生成动画",
+                step_type=StepType.MANIM_GEN,
+                config={"mode": "simple", "quality": "h"}, prompt_template="{animation_prompt}",
+            ),
+            StepDefinition(
+                step_id="review",
+                name="代码审查",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_code_review",
+                    "args": {"code": "{manim_code}", "engine": "manimce"},
+                },
+            ),
+            StepDefinition(
+                step_id="render",
+                name="渲染",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_render",
+                    "args": {"script_path": "script.py", "scene_name": "MainScene", "quality": "h"},
+                },
+            ),
+        ],
+    )
+
+
+def manim_self_improve_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_manim_self_improve",
+        name="Manim自我改进",
+        description="Manim 动画自我审查→改进循环: critique→edit→render",
+        checkpoint_after={"critique", "render"},
+        steps=[
+            StepDefinition(
+                step_id="critique",
+                name="自我审查",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_self_critique",
+                    "args": {"render_id": "{render_id}", "check_aspects": ["layout", "timing", "color", "text", "math"]},
+                },
+            ),
+            StepDefinition(
+                step_id="fix",
+                name="修复问题",
+                step_type=StepType.AGENT,
+                prompt_template="""根据 self_critique 结果修复 Manim 动画问题:
+
+批评: {step_results}
+代码: {manim_code}
+
+请修复布局、时机、颜色、文字和数学方面的问题。输出修复后的完整代码。""",
+            ),
+            StepDefinition(
+                step_id="edit",
+                name="应用修改",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_edit",
+                    "args": {"render_id": "{render_id}", "instruction": "{fix_result}"},
+                },
+            ),
+            StepDefinition(
+                step_id="render",
+                name="重新渲染",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "manim_render",
+                    "args": {"script_path": "{script_path}", "scene_name": "{scene_name}", "quality": "h"},
+                },
+            ),
+        ],
+    )
+
+
+# ============================================================
+# MathLens 教学视频工作流
+# ============================================================
+
+def mathlens_video_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_mathlens_video",
+        name="MathLens教学视频",
+        description="8步 MathLens 工作流：初始化→脚本编写→TTS→验证→检查→渲染→报告",
+        checkpoint_after={"init", "tts", "render"},
+        steps=[
+            StepDefinition(
+                step_id="init",
+                name="初始化项目",
+                step_type=StepType.MATHLENS,
+                config={"action": "init", "project_dir": "{project_dir}"},
+            ),
+            StepDefinition(
+                step_id="write_script",
+                name="编写分镜脚本",
+                step_type=StepType.AGENT,
+                prompt_template="""为以下数学主题编写 MathLens 分镜脚本:
+
+主题: {math_topic}
+项目目录: {project_dir}
+
+请按照 MathLens 分镜脚本格式编写:
+1. 每个分镜包含: scene_id, narration, manim_code, duration
+2. narration 用于 TTS 配音
+3. manim_code 使用 Manim Community Edition 语法
+4. 合理控制每个分镜时长（3-10秒）
+
+输出分镜脚本 CSV 格式。""",
+                tools=["write_file"],
+            ),
+            StepDefinition(
+                step_id="tts",
+                name="生成TTS音频",
+                step_type=StepType.MATHLENS,
+                config={
+                    "action": "tts",
+                    "csv_path": "{csv_path}",
+                    "voice": "xiaoxiao",
+                },
+            ),
+            StepDefinition(
+                step_id="validate",
+                name="验证音频",
+                step_type=StepType.MATHLENS,
+                config={
+                    "action": "validate",
+                    "storyboard_path": "{storyboard_path}",
+                },
+            ),
+            StepDefinition(
+                step_id="check",
+                name="检查Manim代码",
+                step_type=StepType.MATHLENS,
+                config={"action": "check", "script_path": "script.py"},
+            ),
+            StepDefinition(
+                step_id="render",
+                name="渲染视频",
+                step_type=StepType.MATHLENS,
+                config={
+                    "action": "render",
+                    "script_path": "script.py",
+                    "scene_name": "MathScene",
+                    "quality": "h",
+                },
+            ),
+            StepDefinition(
+                step_id="report",
+                name="生成报告",
+                step_type=StepType.AGENT,
+                prompt_template="""基于 MathLens 教学视频制作结果，生成报告:
+
+初始化: {step_results}
+TTS: {step_results}
+验证: {step_results}
+检查: {step_results}
+渲染: {step_results}
+
+请整理:
+1. 视频制作状态
+2. 音频同步情况
+3. 代码质量评估
+4. 渲染输出信息
+5. 改进建议
+
+输出 Markdown 格式。""",
+            ),
+        ],
+    )
+
+
+# ============================================================
+# AutoResearch 自动研究工作流
+# ============================================================
+
+def autoresearch_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_autoresearch",
+        name="自动研究",
+        description="AutoResearch 23阶段研究管线的简化版：选题→文献→综合→实验→分析→报告",
+        checkpoint_after={"scope", "literature", "experiment", "analysis"},
+        steps=[
+            StepDefinition(
+                step_id="scope",
+                name="研究范围界定",
+                step_type=StepType.AUTORESEARCH,
+                config={
+                    "stages": ["topic_init", "problem_decompose"],
+                    "max_iterations": 1,
+                },
+                prompt_template="{research_topic}",
+            ),
+            StepDefinition(
+                step_id="literature",
+                name="文献发现与筛选",
+                step_type=StepType.AUTORESEARCH,
+                config={
+                    "stages": ["search_strategy", "literature_collect", "literature_screen", "knowledge_extract"],
+                    "max_iterations": 1,
+                },
+                prompt_template="{research_topic}",
+            ),
+            StepDefinition(
+                step_id="synthesis",
+                name="知识综合与假设生成",
+                step_type=StepType.AUTORESEARCH,
+                config={
+                    "stages": ["synthesis", "hypothesis_gen"],
+                    "max_iterations": 1,
+                },
+                prompt_template="{research_topic}",
+            ),
+            StepDefinition(
+                step_id="experiment",
+                name="实验设计与执行",
+                step_type=StepType.AUTORESEARCH,
+                config={
+                    "stages": ["experiment_design", "code_generation", "experiment_run", "iterative_refine"],
+                    "max_iterations": 1,
+                },
+                prompt_template="{research_topic}",
+            ),
+            StepDefinition(
+                step_id="analysis",
+                name="结果分析与决策",
+                step_type=StepType.AUTORESEARCH,
+                config={
+                    "stages": ["result_analysis", "research_decision"],
+                    "max_iterations": 1,
+                },
+                prompt_template="{research_topic}",
+            ),
+            StepDefinition(
+                step_id="paper",
+                name="论文撰写与审校",
+                step_type=StepType.AUTORESEARCH,
+                config={
+                    "stages": ["paper_outline", "paper_draft", "peer_review", "paper_revision"],
+                    "max_iterations": 1,
+                },
+                prompt_template="{research_topic}",
+            ),
+            StepDefinition(
+                step_id="finalize",
+                name="质量门控与发布",
+                step_type=StepType.AUTORESEARCH,
+                config={
+                    "stages": ["quality_gate", "knowledge_archive", "export_publish", "citation_verify"],
+                    "max_iterations": 1,
+                },
+                prompt_template="{research_topic}",
+            ),
+            StepDefinition(
+                step_id="report",
+                name="研究总结",
+                step_type=StepType.AGENT,
+                prompt_template="""基于自动研究管线的结果，生成完整研究报告:
+
+研究范围: {step_results}
+文献综述: {step_results}
+知识综合: {step_results}
+实验结果: {step_results}
+分析决策: {step_results}
+论文草稿: {step_results}
+质量门控: {step_results}
+
+请整理:
+1. 研究主题和问题
+2. 文献综述摘要
+3. 核心假设
+4. 实验设计与结果
+5. 主要发现
+6. 论文状态
+7. 后续建议
+
+输出 Markdown 格式。""",
+            ),
+        ],
+    )
+
+
+# ============================================================
+# 参数链示例工作流 — 展示 param_inputs / param_outputs
+# ============================================================
+
+def param_chain_demo_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_param_chain_demo",
+        name="参数链示例",
+        description="演示参数链: 步骤A的输出作为步骤B的输入，支持 transform、默认值、类型转换",
+        checkpoint_after={"normalize", "fetch", "report"},
+        steps=[
+            StepDefinition(
+                step_id="normalize",
+                name="规范化主题",
+                step_type=StepType.AGENT,
+                param_inputs=[
+                    {"target": "raw_topic", "source": "$input.topic", "transform": "strip", "default": ""},
+                    {"target": "topic_length", "source": "$input.topic", "transform": "length", "default": 0},
+                ],
+                param_outputs=[
+                    {"name": "normalized_topic", "path": "topic", "type": "string"},
+                    {"name": "tokens", "path": "tokens", "type": "list"},
+                ],
+                prompt_template="""规范化用户输入的研究主题:
+原始主题: {raw_topic}
+长度: {topic_length}
+
+请以 JSON 格式输出:
+{
+  "topic": "规范化后的主题",
+  "tokens": ["token1", "token2", "token3"]
+}""",
+            ),
+            StepDefinition(
+                step_id="fetch",
+                name="拉取数据",
+                step_type=StepType.TOOL,
+                config={"tool_name": "lean4_mathlib_search"},
+                param_inputs=[
+                    {"target": "query", "source": "$node.normalize.normalized_topic", "default": ""},
+                    {"target": "max_results", "source": "$node.normalize.tokens", "transform": "length", "default": 3},
+                ],
+                param_outputs=[
+                    {"name": "fetched_results", "path": "results", "type": "list"},
+                ],
+            ),
+            StepDefinition(
+                step_id="report",
+                name="生成报告",
+                step_type=StepType.AGENT,
+                prompt_template="""基于规范化主题和搜索结果生成报告:
+
+主题: $node.normalize.normalized_topic
+搜索词数: $node.normalize.tokens
+搜索结果: $node.fetch.fetched_results
+
+输出 Markdown 报告。""",
+            ),
+        ],
+    )
+
+
+def lean4_param_chain_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id="wf_lean4_param_chain",
+        name="Lean4参数链工作流",
+        description="Lean4 形式化+证明+优化: 三步通过参数链自动传递 source_code/diagnostics/suggestions",
+        checkpoint_after={"formalize", "check", "prove"},
+        steps=[
+            StepDefinition(
+                step_id="formalize",
+                name="形式化",
+                step_type=StepType.TOOL,
+                config={"tool_name": "lean4_formalize", "args": {"mode": "autonomous"}},
+                param_inputs=[
+                    {"target": "informal_spec", "source": "$input.spec", "default": ""},
+                    {"target": "target_file", "source": "$input.file", "default": "Theorem.lean"},
+                ],
+                param_outputs=[
+                    {"name": "code", "path": "code", "type": "string"},
+                    {"name": "file_path", "path": "file_path", "type": "string"},
+                ],
+            ),
+            StepDefinition(
+                step_id="check",
+                name="编译检查",
+                step_type=StepType.LEAN_CHECK,
+                config={"timeout": 60},
+                param_inputs=[
+                    {"target": "code", "source": "$node.formalize.code", "default": ""},
+                ],
+                prompt_template="{code}",
+            ),
+            StepDefinition(
+                step_id="prove",
+                name="引导证明",
+                step_type=StepType.TOOL,
+                config={"tool_name": "lean4_prove", "args": {"max_cycles": 8}},
+                param_inputs=[
+                    {"target": "file_path", "source": "$node.formalize.file_path", "default": "Theorem.lean"},
+                ],
+                param_outputs=[
+                    {"name": "proof_status", "path": "status", "type": "string"},
+                ],
+            ),
+            StepDefinition(
+                step_id="report",
+                name="报告",
+                step_type=StepType.AGENT,
+                prompt_template="""Lean4 形式化+证明结果:
+
+形式化代码:
+{node_outputs}
+
+证明状态: $node.prove.proof_status
+
+请生成总结报告。""",
+            ),
+        ],
+    )
+
+
 WORKFLOW_REGISTRY: Dict[str, WorkflowDefinition] = {
     "code_analysis": code_analysis_workflow(),
     "research": research_workflow(),
@@ -605,6 +1411,20 @@ WORKFLOW_REGISTRY: Dict[str, WorkflowDefinition] = {
     "course_progress_reminder": course_progress_reminder_workflow(),
     "pending_task_reminder": pending_task_reminder_workflow(),
     "course_mode": course_mode_workflow(),
+    "gt_basic_prove": gt_basic_prove_workflow(),
+    "gt_evolution_prove": gt_evolution_prove_workflow(),
+    "lean4_proof_check": lean4_proof_check_workflow(),
+    "lean4_lake_build": lean4_lake_build_workflow(),
+    "lean4_formalize": lean4_formalize_workflow(),
+    "lean4_golf": lean4_golf_workflow(),
+    "manim_animation": manim_animation_workflow(),
+    "manim_rag_search": manim_rag_search_workflow(),
+    "manim_pipeline": manim_pipeline_workflow(),
+    "manim_self_improve": manim_self_improve_workflow(),
+    "mathlens_video": mathlens_video_workflow(),
+    "autoresearch": autoresearch_workflow(),
+    "param_chain_demo": param_chain_demo_workflow(),
+    "lean4_param_chain": lean4_param_chain_workflow(),
 }
 
 
@@ -620,8 +1440,8 @@ def list_workflows() -> Dict[str, str]:
     }
 
 
-def register_workflow(wf: WorkflowDefinition):
-    WORKFLOW_REGISTRY[wf.workflow_id.split("_")[0]] = wf
+def register_workflow(wf: WorkflowDefinition, registry_key: Optional[str] = None):
+    WORKFLOW_REGISTRY[registry_key or wf.workflow_id] = wf
 
 
 __all__ = [

@@ -49,6 +49,7 @@ def find_wolframscript() -> Optional[str]:
                 [path, "-code", "2+2"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8', errors='replace',
                 timeout=10
             )
             if result.returncode == 0 and "4" in result.stdout:
@@ -133,6 +134,8 @@ class WolframCalculateTool(Tool):
     Wolfram 计算工具 - 通用数学计算
     """
     name = "wolfram_calculate"
+    category = "math"
+    keywords = ["wolfram", "calculate", "计算", "数学"]
     description = """使用 Mathematica/Wolfram 进行数学计算，支持：
     - 数值计算（加减乘除、开方、三角函数等）
     - 符号计算（代数化简、因式分解、积分、微分等）
@@ -195,6 +198,8 @@ class WolframIntegrateTool(Tool):
     Wolfram 积分工具
     """
     name = "wolfram_integrate"
+    category = "math"
+    keywords = ["wolfram", "integrate", "积分"]
     description = """计算积分（不定积分/定积分）
     
     示例：
@@ -231,6 +236,8 @@ class WolframDifferentiateTool(Tool):
     Wolfram 微分工具
     """
     name = "wolfram_differentiate"
+    category = "math"
+    keywords = ["wolfram", "differentiate", "微分", "求导"]
     description = """计算导数
     
     示例：
@@ -262,6 +269,8 @@ class WolframPlotTool(Tool):
     Wolfram 绘图工具
     """
     name = "wolfram_plot"
+    category = "math"
+    keywords = ["wolfram", "plot", "绘图", "可视化"]
     description = """使用 Mathematica 绘制图形
     
     支持多种图形类型：Plot, Plot3D, ContourPlot, ListPlot 等
@@ -328,6 +337,8 @@ class WolframSimplifyTool(Tool):
     Wolfram 简化工具
     """
     name = "wolfram_simplify"
+    category = "math"
+    keywords = ["wolfram", "simplify", "化简"]
     description = """简化数学表达式
     
     示例：
@@ -361,6 +372,8 @@ class WolframLinearAlgebraTool(Tool):
     Wolfram 线性代数工具
     """
     name = "wolfram_linear_algebra"
+    category = "math"
+    keywords = ["wolfram", "linear", "algebra", "线性代数"]
     description = """线性代数计算：矩阵运算、行列式、特征值等
     
     操作类型：Inverse（逆矩阵）, Det（行列式）, Eigenvalues（特征值）, NullSpace, RowReduce
@@ -389,6 +402,8 @@ class WolframStatisticsTool(Tool):
     Wolfram 统计工具
     """
     name = "wolfram_statistics"
+    category = "math"
+    keywords = ["wolfram", "statistics", "统计"]
     description = """统计计算：分布、期望、方差、随机数等
     
     示例：
@@ -424,6 +439,8 @@ class WolframQueryTool(Tool):
     Wolfram 查询工具 - 直接运行任意 Wolfram 代码
     """
     name = "wolfram_query"
+    category = "math"
+    keywords = ["wolfram", "query", "查询"]
     description = """直接运行任意 Wolfram 代码（高级功能）
     
     警告：请确保代码安全，避免破坏性操作！

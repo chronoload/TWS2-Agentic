@@ -19,10 +19,19 @@ import hashlib
 import subprocess
 import tempfile
 import asyncio
+import locale
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
+
+
+def _get_output_encoding() -> str:
+    """获取系统首选编码"""
+    try:
+        return locale.getpreferredencoding(False) or "utf-8"
+    except Exception:
+        return "utf-8"
 
 
 @dataclass
@@ -125,9 +134,10 @@ class GitSearcher:
             cmd.extend(file_patterns)
 
         try:
+            encoding = _get_output_encoding()
             output = subprocess.run(
                 cmd, cwd=str(repo), capture_output=True, text=True,
-                timeout=30, encoding="utf-8", errors="replace",
+                timeout=30, encoding=encoding, errors="replace",
             )
             if output.returncode not in (0, 1):
                 return results
@@ -166,12 +176,13 @@ class GitSearcher:
             return []
 
         try:
+            encoding = _get_output_encoding()
             output = subprocess.run(
                 ["git", "log", f"--max-count={max_commits}",
                  "--pretty=format:%H|%s|%an|%ad", "--date=short",
                  "--", file_path],
-                cwd=str(repo), capture_output=True, text=True,
-                timeout=15, encoding="utf-8", errors="replace",
+                cwd=str(repo), capture_output=True,
+                timeout=15, encoding=encoding, errors="replace",
             )
             commits = []
             for line in output.stdout.strip().split("\n"):
@@ -197,10 +208,11 @@ class GitSearcher:
             return []
 
         try:
+            encoding = _get_output_encoding()
             output = subprocess.run(
                 ["git", "blame", "--line-porcelain", file_path],
-                cwd=str(repo), capture_output=True, text=True,
-                timeout=30, encoding="utf-8", errors="replace",
+                cwd=str(repo), capture_output=True,
+                timeout=30, encoding=encoding, errors="replace",
             )
             lines: List[BlameLine] = []
             current: Dict[str, str] = {}
@@ -210,7 +222,7 @@ class GitSearcher:
                     current["content"] = line[1:]
                     lines.append(BlameLine(
                         line_number=len(lines) + 1,
-                        commit_hash=current.get("commit", "")[:12],
+                        commit_hash=(current.get("commit") or "")[:12],
                         author=current.get("author", ""),
                         date=current.get("author-time", ""),
                         content=current.get("content", ""),
@@ -238,9 +250,10 @@ class GitSearcher:
             cmd.extend(["--", file_path])
 
         try:
+            encoding = _get_output_encoding()
             output = subprocess.run(
-                cmd, cwd=str(repo), capture_output=True, text=True,
-                timeout=30, encoding="utf-8", errors="replace",
+                cmd, cwd=str(repo), capture_output=True,
+                timeout=30, encoding=encoding, errors="replace",
             )
             return output.stdout[:20000]  # 限制输出
         except Exception:
