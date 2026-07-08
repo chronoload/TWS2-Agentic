@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import copy
 import hashlib
 import webbrowser
 import platform
@@ -22,7 +23,34 @@ from collections import Counter
 import numpy as np
 
 # ─── TS2 基础路径 ──────────────────────────────────────────────────────
-BASE = Path(__file__).parent.resolve()
+if getattr(sys, 'frozen', False):
+    BASE = Path(sys.executable).parent.resolve()
+else:
+    try:
+        BASE = Path(__file__).parent.resolve()
+    except NameError:
+        BASE = Path.cwd().resolve()
+# TS2系统数据目录
+TS2_USER_DIR = Path.home() / ".ts2"
+TS2_USER_DIR.mkdir(parents=True, exist_ok=True)
+# Template路径
+USER_TEMPLATE_DIR = TS2_USER_DIR / "template"
+SOURCE_TEMPLATE_DIR = BASE / "Notes" / "template"
+# 旧位置兼容路径（程序目录下的数据文件）
+LEGACY_DATA_DIR = BASE
+
+
+def _resolve_data_file(filename):
+    """查找数据文件路径，优先 ~/.ts2/，回退旧位置（程序目录）
+    返回 Path 对象，保证指向存在的文件，或默认系统目录路径
+    """
+    user_path = TS2_USER_DIR / filename
+    if user_path.exists():
+        return user_path
+    legacy_path = LEGACY_DATA_DIR / filename
+    if legacy_path.exists():
+        return legacy_path
+    return user_path
 
 # ─── 跨平台工具函数 ──────────────────────────────────────────────────────
 PLATFORM = platform.system().lower()
@@ -82,6 +110,89 @@ def open_url(url):
     except Exception:
         return False
 
+
+def _find_source_template_dir():
+    """查找源template目录（兼容打包/开发/旧位置）"""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        bundle_dir = Path(sys._MEIPASS)
+        candidate = bundle_dir / "template"
+        if candidate.exists():
+            return candidate
+    if SOURCE_TEMPLATE_DIR.exists():
+        return SOURCE_TEMPLATE_DIR
+    legacy_tpl = LEGACY_DATA_DIR / "Notes" / "template"
+    if legacy_tpl.exists():
+        return legacy_tpl
+    return None
+
+
+def initialize_templates():
+    """
+    初始化template文件夹，从程序目录复制到用户目录
+    支持向后兼容：旧位置迁移 + 增量同步
+    """
+    import shutil
+
+    source_tpl_dir = _find_source_template_dir()
+
+    if USER_TEMPLATE_DIR.exists():
+        if source_tpl_dir and source_tpl_dir.exists():
+            _sync_templates_incremental(source_tpl_dir, USER_TEMPLATE_DIR)
+        return True
+
+    if not source_tpl_dir or not source_tpl_dir.exists():
+        return False
+
+    try:
+        shutil.copytree(source_tpl_dir, USER_TEMPLATE_DIR)
+        return True
+    except Exception:
+        return False
+
+
+def _sync_templates_incremental(src_dir, dst_dir):
+    """增量同步模板文件：仅复制目标中不存在或比源更旧的文件"""
+    import shutil
+    if not src_dir.exists() or not dst_dir.exists():
+        return
+    for src_file in src_dir.rglob("*"):
+        if not src_file.is_file():
+            continue
+        rel = src_file.relative_to(src_dir)
+        dst_file = dst_dir / rel
+        if not dst_file.exists():
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src_file, dst_file)
+            except Exception:
+                pass
+        elif src_file.stat().st_mtime > dst_file.stat().st_mtime:
+            try:
+                shutil.copy2(src_file, dst_file)
+            except Exception:
+                pass
+
+
+def get_template_path(note_dir):
+    """
+    获取相对于笔记目录的template路径
+    优先使用用户目录 ~/.ts2/template，回退到程序目录
+
+    Args:
+        note_dir: 笔记文件所在目录的Path对象
+
+    Returns:
+        相对路径字符串，如 '../template'
+    """
+    tpl_dir = USER_TEMPLATE_DIR if USER_TEMPLATE_DIR.exists() else SOURCE_TEMPLATE_DIR
+    if not tpl_dir.exists():
+        tpl_dir = LEGACY_DATA_DIR / "Notes" / "template"
+    try:
+        rel_path = os.path.relpath(tpl_dir, note_dir)
+        return str(Path(rel_path))
+    except Exception:
+        return "../template"
+
 # ============================================================
 # JSON 校验层 (TS2 适配)
 # ============================================================
@@ -126,6 +237,220 @@ def validate_course_json(data):
         if "sections" in c and not isinstance(c["sections"], list):
             return False, f"courses[{idx}] 'sections' 必须是数组"
     return True, f"校验通过: {len(data['courses'])} 门课程，格式正确"
+
+
+# ============================================================
+# 任务清单管理器 — 持久化为 Markdown Checklist
+# ============================================================
+
+class TaskChecklistManager:
+    """任务清单管理器：持久化为 ~/.ts2/task_checklist.md
+    每项格式: - [ ] 任务内容 |2026-06-12
+    """
+
+    CHECKLIST_FILE = TS2_USER_DIR / "task_checklist.md"
+
+    def __init__(self):
+        self.items = []  # [(checked: bool, text: str, date_str: str), ...]
+        self.load()
+
+    def load(self):
+        """从 MD 文件加载任务列表"""
+        self.items = []
+        if not self.CHECKLIST_FILE.exists():
+            return
+        try:
+            content = self.CHECKLIST_FILE.read_text(encoding="utf-8")
+            for line in content.split("\n"):
+                line = line.rstrip()
+                m = re.match(r"^-\s+\[([ xX])\]\s+(.*)$", line)
+                if m:
+                    checked = m.group(1).lower() == "x"
+                    rest = m.group(2).strip()
+                    date_str = ""
+                    # 解析末尾时间戳 |YYYY-MM-DD
+                    parts = rest.rsplit("|", 1)
+                    if len(parts) == 2 and re.match(r"^\d{4}-\d{2}-\d{2}$", parts[1].strip()):
+                        date_str = parts[1].strip()
+                        text = parts[0].strip()
+                    else:
+                        text = rest
+                    if text:
+                        self.items.append((checked, text, date_str))
+        except Exception:
+            self.items = []
+
+    def save(self):
+        """保存到 MD 文件"""
+        try:
+            lines = []
+            for checked, text, date_str in self.items:
+                mark = "x" if checked else " "
+                line = f"- [{mark}] {text}"
+                if date_str:
+                    line += f" |{date_str}"
+                lines.append(line)
+            self.CHECKLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self.CHECKLIST_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as e:
+            print(f"[TaskChecklist] 保存失败: {e}")
+
+    def add(self, text: str, date_str: str = ""):
+        text = text.strip()
+        if text:
+            self.items.append((False, text, date_str))
+            self.save()
+
+    def toggle(self, index: int):
+        if 0 <= index < len(self.items):
+            checked, text, date_str = self.items[index]
+            self.items[index] = (not checked, text, date_str)
+            self.save()
+
+    def set_date(self, index: int, date_str: str):
+        if 0 <= index < len(self.items):
+            checked, text, _ = self.items[index]
+            self.items[index] = (checked, text, date_str)
+            self.save()
+
+    def remove(self, index: int):
+        if 0 <= index < len(self.items):
+            self.items.pop(index)
+            self.save()
+
+    def set_items(self, items):
+        """批量设置, items 为纯文本列表"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.items = [(False, t.strip(), today) for t in items if t.strip()]
+        self.save()
+
+    def get_grouped(self):
+        """按时间分区返回: [(section_title, [(index, checked, text, date_str), ...]), ...]"""
+        today = datetime.now().date()
+        sections = {"overdue": [], "today": [], "week": [], "month": [], "future": []}
+        unassigned = []
+        for i, (checked, text, date_str) in enumerate(self.items):
+            if not date_str:
+                unassigned.append((i, checked, text, date_str))
+                continue
+            try:
+                d = datetime.strptime(date_str, "%Y-%m-%d").date()
+                if d < today:
+                    sections["overdue"].append((i, checked, text, date_str))
+                elif d == today:
+                    sections["today"].append((i, checked, text, date_str))
+                elif d <= today + timedelta(days=6 - today.weekday()):
+                    sections["week"].append((i, checked, text, date_str))
+                elif d.month == today.month and d.year == today.year:
+                    sections["month"].append((i, checked, text, date_str))
+                else:
+                    sections["future"].append((i, checked, text, date_str))
+            except ValueError:
+                unassigned.append((i, checked, text, date_str))
+
+        # 每个分区内按时间排序
+        for k in sections:
+            sections[k].sort(key=lambda x: x[3])
+        unassigned.sort(key=lambda x: (x[1], x[2]))
+
+        result = []
+        if sections["overdue"]:
+            result.append(("🔴 逾期", sections["overdue"]))
+        if sections["today"]:
+            result.append(("🟡 今日", sections["today"]))
+        if sections["week"]:
+            result.append(("🟢 本周", sections["week"]))
+        if sections["month"]:
+            result.append(("🔵 本月", sections["month"]))
+        if sections["future"]:
+            result.append(("⚪ 未来", sections["future"]))
+        if unassigned:
+            result.append(("📋 未指定", unassigned))
+        return result
+
+    def to_markdown(self) -> str:
+        """导出为 MD 文本"""
+        lines = ["# 任务清单\n"]
+        for checked, text, date_str in self.items:
+            mark = "x" if checked else " "
+            line = f"- [{mark}] {text}"
+            if date_str:
+                line += f" |{date_str}"
+            lines.append(line)
+        return "\n".join(lines)
+
+
+def show_task_checklist_dialog(parent=None, allow_cancel=False) -> list:
+    """弹窗让用户创建/编辑任务清单，返回任务文本列表。
+    当 allow_cancel=False 时（初始化弹窗），取消或关闭窗口将退出程序。
+    当 allow_cancel=True 时（编辑弹窗），取消则关闭对话框。
+    """
+    import tkinter.simpledialog
+    dlg = tk.Toplevel(parent) if parent else tk.Tk()
+    if parent:
+        dlg.transient(parent)
+        dlg.grab_set()
+    else:
+        dlg.withdraw()
+        dlg.title("任务清单")
+
+    dlg.title("📋 任务清单")
+    dlg.geometry("600x380")
+    dlg.minsize(450, 200)
+    dlg.resizable(True, True)  # 允许双向拉伸
+    if not allow_cancel:
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (_exit_program(), None))
+
+    frame = ttk.Frame(dlg, padding=12)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(frame, text="请输入本阶段需要完成的任务（每行一个）：",
+              font=("", 11, "bold")).pack(anchor=tk.W, pady=(0, 6))
+
+    # 根据已有任务数自适应高度
+    mgr = TaskChecklistManager()
+    task_count = len(mgr.items)
+    auto_height = max(5, min(12, task_count + 2))
+    text_widget = tk.Text(frame, font=("Consolas", 11), wrap=tk.WORD,
+                           relief=tk.SUNKEN, borderwidth=1, height=auto_height)
+    text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+    # 加载已有任务
+    for checked, t, date_str in mgr.items:
+        text_widget.insert(tk.END, t + "\n")
+
+    btn_frame = ttk.Frame(frame)
+    btn_frame.pack(fill=tk.X, pady=(4, 0))
+
+    def on_ok():
+        lines = text_widget.get("1.0", tk.END).strip().split("\n")
+        lines = [l.strip() for l in lines if l.strip()]
+        mgr.set_items(lines)
+        dlg.result = lines
+        dlg.destroy()
+
+    def on_cancel():
+        if allow_cancel:
+            dlg.result = None
+            dlg.destroy()
+        else:
+            _exit_program()
+
+    ttk.Button(btn_frame, text="✅ 确认", command=on_ok).pack(side=tk.RIGHT, padx=4)
+    if allow_cancel:
+        ttk.Button(btn_frame, text="❌ 取消", command=on_cancel).pack(side=tk.RIGHT, padx=4)
+    else:
+        ttk.Button(btn_frame, text="❌ 退出程序", command=on_cancel).pack(side=tk.RIGHT, padx=4)
+
+    if not parent:
+        dlg.deiconify()
+    dlg.wait_window()
+    return getattr(dlg, 'result', None)
+
+
+def _exit_program():
+    """退出整个程序"""
+    os._exit(0)
 
 
 # ============================================================
@@ -270,12 +595,16 @@ class ProjectManager:
     """项目管理数据管理 - 类似IDE的项目空间"""
     
     def __init__(self, data_dir=None):
-        self.data_dir = Path(data_dir) if data_dir else BASE
-        self.data_file = self.data_dir / "projects.json"
+        if data_dir:
+            self.data_dir = Path(data_dir)
+        else:
+            self.data_dir = Path.home() / ".ts2"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.data_file = _resolve_data_file("projects.json")
         self.projects = self._load_projects()
     
     def _load_projects(self):
-        """加载项目数据"""
+        """加载项目数据（兼容旧位置）"""
         if self.data_file.exists():
             try:
                 projects = json.loads(self.data_file.read_text(encoding="utf-8"))
@@ -380,12 +709,16 @@ class TaskBoardManager:
     RECURRENCE_TYPES = ["不循环", "每天", "每周", "每月", "每年"]
     
     def __init__(self, data_dir=None):
-        self.data_dir = Path(data_dir) if data_dir else BASE
-        self.data_file = self.data_dir / "task_board.json"
+        if data_dir:
+            self.data_dir = Path(data_dir)
+        else:
+            self.data_dir = Path.home() / ".ts2"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.data_file = _resolve_data_file("task_board.json")
         self.tasks = self._load_tasks()
     
     def _load_tasks(self):
-        """加载任务数据"""
+        """加载任务数据（兼容旧位置）"""
         if self.data_file.exists():
             try:
                 tasks = json.loads(self.data_file.read_text(encoding="utf-8"))
@@ -489,35 +822,68 @@ class CourseSystem:
                       "courses_structured_progress.bak.json"}
 
     def _init_paths(self):
-        """初始化默认路径，并自动扫描目录下所有课程 JSON 文件"""
+        """初始化默认路径，并自动扫描目录下所有课程 JSON 文件
+        向后兼容：如果系统目录无数据，回退读取旧位置（程序目录）
+        """
+        ts2_dir = Path.home() / ".ts2"
+        ts2_dir.mkdir(exist_ok=True)
+
         if self.json_path is None:
-            self.json_path = str(BASE / "courses_structured.json")
+            user_json = ts2_dir / "courses_structured.json"
+            legacy_json = LEGACY_DATA_DIR / "courses_structured.json"
+            if user_json.exists():
+                self.json_path = str(user_json)
+            elif legacy_json.exists():
+                self.json_path = str(legacy_json)
+            else:
+                self.json_path = str(user_json)
+
         if self.progress_path is None:
-            self.progress_path = self.json_path.replace(".json", "_progress.json")
+            user_prog = ts2_dir / "courses_structured_progress.json"
+            legacy_prog = LEGACY_DATA_DIR / "courses_structured_progress.json"
+            if user_prog.exists():
+                self.progress_path = str(user_prog)
+            elif legacy_prog.exists():
+                self.progress_path = str(legacy_prog)
+            else:
+                self.progress_path = str(user_prog)
+
         if self.resource_path is None:
-            self.resource_path = str(BASE / "resource_index.json")
+            user_res = ts2_dir / "resource_index.json"
+            legacy_res = LEGACY_DATA_DIR / "resource_index.json"
+            if user_res.exists():
+                self.resource_path = str(user_res)
+            elif legacy_res.exists():
+                self.resource_path = str(legacy_res)
+            else:
+                self.resource_path = str(user_res)
         # 默认数据库源
         self.db_paths = [Path(self.json_path)]
-        # 自动扫描目录下其他包含 courses 的 JSON 文件
+        # 同时也扫描程序目录和系统目录下的其他课程 JSON 文件
         self._auto_discover_json_sources()
 
     def _auto_discover_json_sources(self):
-        """扫描 BASE 目录下所有有效的课程 JSON 文件，自动加入 db_paths"""
-        for f in BASE.glob("*.json"):
-            if f.name in self._EXCLUDED_JSON:
+        """扫描 BASE 目录和系统目录下所有有效的课程 JSON 文件，自动加入 db_paths"""
+        ts2_dir = Path.home() / ".ts2"
+        # 扫描两个目录
+        for scan_dir in [BASE, ts2_dir]:
+            if not scan_dir.exists():
                 continue
-            if f in self.db_paths:
-                continue
-            # 跳过进度文件（文件名含 _progress）
-            if "_progress" in f.name:
-                continue
-            # 尝试读取，检查是否包含 courses 数组
-            try:
-                d = json.loads(f.read_text(encoding="utf-8"))
-                if isinstance(d, dict) and isinstance(d.get("courses"), list) and len(d["courses"]) > 0:
-                    self.db_paths.append(f)
-            except Exception:
-                pass
+            for f in scan_dir.glob("*.json"):
+                if f.name in self._EXCLUDED_JSON:
+                    continue
+                if f in self.db_paths:
+                    continue
+                # 跳过进度文件（文件名含 _progress）
+                if "_progress" in f.name:
+                    continue
+                # 尝试读取，检查是否包含 courses 数组
+                try:
+                    d = json.loads(f.read_text(encoding="utf-8"))
+                    if isinstance(d, dict) and isinstance(d.get("courses"), list) and len(d["courses"]) > 0:
+                        self.db_paths.append(f)
+                except Exception:
+                    pass
 
     def _load_data(self):
         """加载主数据文件，然后合并所有数据库源"""
@@ -615,6 +981,21 @@ class CourseSystem:
         self.courses = merged_courses
         self._init_progress()
         self._save_progress()
+        
+        # 刷新所有已打开的 agent 助手窗口的系统引用
+        self._refresh_agent_windows()
+    
+    def _refresh_agent_windows(self):
+        """刷新所有 agent 助手窗口的系统引用"""
+        try:
+            from mcp.agent_assistant import _global_agent_windows
+            for aw in _global_agent_windows:
+                try:
+                    aw.refresh_system_refs(system=self, project_mgr=self.project_mgr, task_board_mgr=self.task_board_mgr)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def save_courses_to(self, path, courses_list):
         """保存课程列表到指定 JSON 文件"""
@@ -943,12 +1324,13 @@ class CourseSystem:
     # ─── 笔记生成 ──────────────────────────────────────────────────────
 
     @staticmethod
-    def generate_note_yaml(course, lesson=None):
-        """生成 Rmd YAML front-matter，适配 note_template.Rmd 格式
+    def generate_note_yaml(course, lesson=None, note_dir=None):
+        """生成详细 Rmd 笔记模板
 
         Args:
             course: 课程 dict
             lesson: 课时 dict（可选，为 None 则生成课程级笔记）
+            note_dir: 笔记文件所在目录的 Path 对象（可选）
 
         Returns:
             (yaml_str, body_str) — yaml 首部 + 正文模板
@@ -956,14 +1338,21 @@ class CourseSystem:
         domain = course.get("domain", "UNKNOWN")
         domain_name = DOMAIN_NAMES.get(domain, domain) if 'DOMAIN_NAMES' in globals() else domain
         course_title = course.get("course_title", "Lecture Notes")
-        subtitle = f"{domain_name}/{course_title}"
         if lesson:
-            subtitle = f"{domain_name}/{course_title} — 课时{lesson.get('lesson_number', '')} {lesson.get('lesson_title', '')}"
+            lnum = lesson.get("lesson_number", 0)
+            ltitle = lesson.get("lesson_title", "")
+            subtitle = f"{domain_name}/{course_title} — 课时{lnum:04d} {ltitle}"
+        else:
+            subtitle = f"{domain_name}/{course_title}"
 
-        # 选择输出格式
+        if note_dir:
+            tpl_rel_path = get_template_path(note_dir)
+        else:
+            tpl_rel_path = "../template"
+
         yaml_lines = [
             "---",
-            f'title: "Lecture Notes"',
+            'title: "Lecture Notes"',
             f'subtitle: "{subtitle}"',
             'author: "P.C."',
             'date: "`r Sys.Date()`"',
@@ -972,11 +1361,9 @@ class CourseSystem:
             '# header-includes: \\newcommand{\\envlang}{en}',
             'output:',
             '  pdf_document:',
-            '    template: null',
             '    includes:',
-            '      in_header: ../template/preamble-book.tex',
-            '    pandoc_args:',
-            '      - --lua-filter=../template/env_mapping.lua',
+            f'      in_header: {tpl_rel_path}/preamble-book.tex',
+            '    pandoc_args: ["--lua-filter", "../template/env_mapping.lua"]',
             '    latex_engine: xelatex',
             '    fig_caption: true',
             '    number_sections: true',
@@ -987,7 +1374,6 @@ class CourseSystem:
             '    keep_md: false',
             '    extra_dependencies:',
             '      ctex: []',
-            '      geometry: [top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm]',
             '      fancyhdr: []',
             '      lastpage: []',
             '      booktabs: []',
@@ -1012,125 +1398,214 @@ class CourseSystem:
             '    number_sections: true',
             "---",
         ]
-
         yaml_str = "\n".join(yaml_lines)
 
-        # 正文模板
+        # ── R setup chunks ──
+        setup1 = """```{r include=FALSE}
+# Windows中文路径支持
+if (.Platform$OS.type == "windows") {
+  options(encoding = "UTF-8")
+  Sys.setlocale("LC_ALL", "Chinese (Simplified)_China.UTF-8")
+}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 8,
+  fig.height = 6,
+  fig.dpi    = 300,
+  fig.align  = "center",
+  cache      = TRUE,
+  autodep    = TRUE
+)
+options(knitr.table.format = "latex")
+set.seed(42)
+```
+
+```{r include=FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(gridExtra)
+
+theme_set(theme_bw(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom"))
+```"""
+
         if lesson:
-            lnum = lesson.get("lesson_number", 0)
-            ltitle = lesson.get("lesson_title", "")
             central_q = lesson.get("central_question", "")
             body_lines = [
                 "",
-                "```{r setup, include=FALSE}",
-                "# Windows中文路径支持",
-                "if (.Platform$OS.type == \"windows\") {",
-                "  # 设置正确的编码选项",
-                "  options(encoding = \"UTF-8\")",
-                "  Sys.setlocale(\"LC_ALL\", \"Chinese (Simplified)_China.UTF-8\")",
-                "  # 或者尝试更通用的：",
-                "  # Sys.setlocale(\"LC_ALL\", \"\")",
-                "}",
-                "knitr::opts_chunk$set(",
-                "  echo       = TRUE,",
-                "  message    = FALSE,",
-                "  warning    = FALSE,",
-                "  fig.width  = 8,",
-                "  fig.height = 6,",
-                "  fig.dpi    = 300,",
-                '  fig.align  = "center",',
-                "  cache      = TRUE,",
-                "  autodep    = TRUE",
-                ")",
-                'options(knitr.table.format = "latex")',
-                "set.seed(42)",
-                "```",
-                "",
-                "```{r packages, include=FALSE}",
-                "library(tidyverse)",
-                "library(knitr)",
-                "library(kableExtra)",
-                "library(ggplot2)",
-                "library(gridExtra)",
-                "",
-                "theme_set(theme_bw(base_size = 12) +",
-                '  theme(plot.title = element_text(hjust = 0.5, face = "bold"),',
-                '        legend.position = "bottom"))',
-                "```",
-                "",
-                f"\\newpage",
-                "",
-                f"# 课时 {lnum}：{ltitle}",
-                "",
-            ]
-            if central_q:
-                body_lines += [
-                    f"## 中心问题",
-                    "",
-                    f"> {central_q}",
-                    "",
-                ]
-            body_lines += [
-                "## 笔记",
-                "",
-                "",
-                "",
-            ]
-        else:
-            # 课程级笔记模板
-            sections = course.get("sections", [])
-            body_lines = [
-                "",
-                "```{r setup, include=FALSE}",
-                "# Windows中文路径支持",
-                "if (.Platform$OS.type == \"windows\") {",
-                "  # 设置正确的编码选项",
-                "  options(encoding = \"UTF-8\")",
-                "  Sys.setlocale(\"LC_ALL\", \"Chinese (Simplified)_China.UTF-8\")",
-                "  # 或者尝试更通用的：",
-                "  # Sys.setlocale(\"LC_ALL\", \"\")",
-                "}",
-                "knitr::opts_chunk$set(",
-                "  echo       = TRUE,",
-                "  message    = FALSE,",
-                "  warning    = FALSE,",
-                "  fig.width  = 8,",
-                "  fig.height = 6,",
-                "  fig.dpi    = 300,",
-                '  fig.align  = "center",',
-                "  cache      = TRUE,",
-                "  autodep    = TRUE",
-                ")",
-                'options(knitr.table.format = "latex")',
-                "set.seed(42)",
-                "```",
-                "",
-                "```{r packages, include=FALSE}",
-                "library(tidyverse)",
-                "library(knitr)",
-                "library(kableExtra)",
-                "library(ggplot2)",
-                "library(gridExtra)",
-                "",
-                "theme_set(theme_bw(base_size = 12) +",
-                '  theme(plot.title = element_text(hjust = 0.5, face = "bold"),',
-                '        legend.position = "bottom"))',
-                "```",
+                setup1,
                 "",
                 "\\newpage",
                 "",
-                f"# {course_title}",
+                f"# 课时 {lnum}：{ltitle}",
                 "",
+                "## 中心问题",
+                "",
+                f"> {central_q or '（待补充）'}",
+                "",
+                "**所属章节：**",
+                "",
+                "**课时简介：**",
+                "",
+                "\\newpage",
+                "",
+                "## 复习回顾",
+                "",
+                "> 学习本节课内容需要了解的预习知识：",
+                "",
+                "---",
+                "",
+                "## 课程内容",
+                "",
+                "### 现实问题导引",
+                "",
+                "### 基本概念",
+                "",
+                "::: definition",
+                "**概念名称**",
+                "",
+                "> 概念的严格表述...",
+                "",
+                "*注：此定义的适用范围是...*",
+                ":::",
+                "",
+                "::: theorem",
+                "**定理名称**",
+                "",
+                "> 定理的完整表述...",
+                "",
+                "*证明思路：*",
+                ":::",
+                "",
+                "### 公式与推导",
+                "",
+                "::: theorem",
+                "",
+                "**基本公式：**",
+                "",
+                "$$$$",
+                "",
+                ":::",
+                "",
+                "**参数说明：**",
+                "",
+                "| 符号  | 含义 | 单位 |",
+                "| :---- | :--- | :--- |",
+                "| $x$ | 变量 | -    |",
+                "| $y$ | 结果 | -    |",
+                "",
+                "**推导过程：**",
+                "",
+                "$$",
+                "\\begin{aligned}",
+                "结果 &= \\text{起始式} \\\\",
+                "&= \\text{化简} \\\\",
+                "&= \\text{结论}",
+                "\\end{aligned}",
+                "$$",
+                "",
+                "::: example",
+                "**R 演绎**",
+                "",
+                "```{r}",
+                "# 示例代码",
+                "```",
+                "",
+                "**Python 演绎（可选）**",
+                "",
+                "```python",
+                "# 示例代码",
+                "```",
+                "",
+                ":::",
+                "",
+                "::: corollary",
+                "",
+                "> 由上述定理直接推出的结论...",
+                ":::",
+                "",
+                "::: lemma",
+                "",
+                "> 辅助性命题，通常用于证明主要定理...",
+                ":::",
+                "",
+                "::: remark",
+                "",
+                "> 对上述内容的补充说明、注意事项或直观理解...",
+                ":::",
+                "",
+                "---",
+                "",
+                "## 典型例题",
+                "",
+                "::: problem",
+                "**题目：** 描述例题内容...",
+                "",
+                ":::",
+                "",
+                ":::solution",
+                "",
+                "**解答：**",
+                "",
+                "1. 理解题意：",
+                "2. 确定方法：",
+                "3. 详细计算：",
+                "",
+                "   $$",
+                "   \\text{关键步骤}",
+                "   $$",
+                "",
+                "4. 验证结果：",
+                "",
+                "**答案：**",
+                ":::",
+                "",
+                "---",
+                "",
+                "## 深入练习题",
+                "",
+                "::: exercise",
+                "**练习 1：**",
+                "",
+                "> 题干描述...",
+                "",
+                "*提示：*",
+                "",
+                "**练习 2：**",
+                "",
+                "> 题干描述...",
+                "",
+                ":::",
+                "",
+                "---",
+                "",
+                "---",
+                "",
+                "## 参考文献",
+                "",
+                "1. [教材名称](URL)，作者，年份",
+                "2. [论文/视频标题](URL)，作者，年份",
+                "3. [在线资源](URL)",
             ]
-            if sections:
-                for sec in sections:
-                    snum = sec.get("section_number", 0)
-                    stitle = sec.get("section_title", f"Section {snum}")
-                    body_lines += [
-                        f"## Section {snum}：{stitle}",
-                        "",
-                        "",
-                    ]
+        else:
+            desc = course.get("description", "")
+            lessons = course.get("lessons", [])
+            parts = ["", setup1, "", f"# {course_title}", "", "## 课程概述", "", desc, "", "## 课时列表", ""]
+            for l in lessons:
+                ln = l.get("lesson_number", 0)
+                lt = l.get("lesson_title", "")
+                lq = l.get("central_question", "")
+                if lq:
+                    parts.append(f"- **课时 {ln}**: {lt} — {lq}")
+                else:
+                    parts.append(f"- **课时 {ln}**: {lt}")
+            parts += ["", "## 综合笔记", "", "", "", "## 参考文献", ""]
+            body_lines = parts
 
         return yaml_str, "\n".join(body_lines)
 
@@ -1217,7 +1692,7 @@ class CourseSystem:
                     lesson_obj = l
                     break
 
-        yaml_str, body_str = self.generate_note_yaml(course, lesson_obj)
+        yaml_str, body_str = self.generate_note_yaml(course, lesson_obj, note_dir=note_path.parent)
         note_path.write_text(yaml_str + body_str, encoding="utf-8")
         return note_path, True
 
@@ -1235,7 +1710,7 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
 # MD 解析器
-from md_builder import parse_md_file, parse_md_directory
+from md_builder import parse_md_file, parse_md_directory, CourseResourceScanner, MarkdownContentExtractor, DocumentClassifier, DocumentQualityChecker
 
 _URL_PATTERN = re.compile(
     r'https?://[^\s<>"\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+',
@@ -1287,9 +1762,10 @@ plt.rcParams['axes.unicode_minus'] = False
 class WorkflowLogger:
     """执行模式工作流日志：计时、动作捕捉、笔记"""
 
-    LOG_FILE = BASE / "workflow_log.json"
-
     def __init__(self):
+        ts2_dir = Path.home() / ".ts2"
+        ts2_dir.mkdir(parents=True, exist_ok=True)
+        self.LOG_FILE = _resolve_data_file("workflow_log.json")
         self.entries = self._load()
         # 计时状态
         self._timer_start = None       # datetime
@@ -1314,6 +1790,8 @@ class WorkflowLogger:
     def save(self):
         # 保存前确保按时间排序
         self.entries.sort(key=lambda x: x.get("timestamp", ""))
+        # 确保父目录存在
+        self.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         self.LOG_FILE.write_text(json.dumps(self.entries, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def start_timer(self, course_id, lesson_number):
@@ -1847,11 +2325,22 @@ class CourseTrackerApp:
         self.wflogger = WorkflowLogger()
         self._exec_timer_running = False  # 当前是否在执行模式计时中
         self._exec_current_lnum = None    # 当前计时的课时号
+        self._exec_snapshot = None         # 执行模式快照（tab 切换恢复用）
+        self._exec_current_lesson_data = None
+
+        # 任务清单（贯穿生命周期始终运行）
+        self.task_checklist_mgr = TaskChecklistManager()
+        self._checklist_window = None      # 任务清单独立窗口
+        self._checklist_pinned = False     # 是否钉在最上层
         
         # 任务看板管理器
         self.task_board_mgr = TaskBoardManager()
         # 项目管理器
         self.project_mgr = ProjectManager()
+        
+        # 跨项目剪贴板（支持跨项目复制/剪切/粘贴）
+        self._global_clipboard = {"mode": None, "paths": []}  # mode: "copy" or "cut"
+        self._global_cut_markers = []  # (tree_widget, item_id) 元组列表
         
         # 可视化分析器
         self._visualizer = None
@@ -1863,7 +2352,7 @@ class CourseTrackerApp:
         except ImportError:
             pass
         
-        # 网络爬虫管理器
+        # 网络搜索管理器
         self._web_crawler = None
         self._web_crawler_ui = None
 
@@ -1886,8 +2375,55 @@ class CourseTrackerApp:
 
         self._build_ui()
         self._refresh_overview()
+        self._restore_tab_state()
+
+        # === 任务2: 全局快捷键 ===
+        self._bind_global_shortcuts()
+
+        # === 任务8: 执行模式记忆恢复 ===
+        self._restore_execution_memory()
+
+        # === 程序关闭快照 ===
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+        # === 程序快照恢复（同步执行，初始化即恢复） ===
+        self._restore_app_snapshot()
+        # === 任务清单自动恢复 ===
+        self._restore_saved_checklist_tasks()
 
     # ============ UI 构建 ============
+
+    def get_learning_state(self) -> dict:
+        """获取当前学习状态，用于注入到 Agent 上下文
+
+        Returns:
+            dict 包含: exec_mode, course, lesson, timer, progress 等信息
+        """
+        state = {
+            "exec_mode_active": getattr(self, 'exec_mode_active', False),
+            "course_id": getattr(self, 'current_execution_course', None),
+            "timer_running": getattr(self, '_exec_timer_running', False),
+            "current_lesson_number": getattr(self, '_exec_current_lnum', None),
+            "current_lesson_data": getattr(self, '_exec_current_lesson_data', None),
+        }
+
+        # 补充课程名称
+        if state["course_id"]:
+            course = self.system.get_course_by_id(state["course_id"])
+            if course:
+                state["course_title"] = course.get("course_title", state["course_id"])
+                state["domain"] = course.get("domain", "")
+
+        # 计算进度
+        if state["course_id"]:
+            progress = self.system.get_course_progress(state["course_id"])
+            completed = progress.get("completed_lessons", [])
+            total = len(self.system.get_course_by_id(state["course_id"]).get("lessons", [])) if course else 0
+            state["completed_count"] = len(completed)
+            state["total_lessons"] = total
+            state["completion_pct"] = round(len(completed) / total * 100, 1) if total > 0 else 0
+
+        return state
 
     def _build_ui(self):
         """构建主界面"""
@@ -1948,13 +2484,14 @@ class CourseTrackerApp:
         # 助手按钮（最左侧）
         def open_assistant_window():
             try:
-                from mcp.agent_assistant import AgentAssistantWindow
-                assistant_window = AgentAssistantWindow(
+                from mcp.agent_assistant import get_or_create_agent_window
+                assistant_window = get_or_create_agent_window(
                     self.root,
                     BASE,
                     self.system,
                     self.project_mgr,
-                    self.task_board_mgr
+                    self.task_board_mgr,
+                    course_tracker=self
                 )
                 assistant_window.show()
             except Exception as e:
@@ -1966,19 +2503,20 @@ class CourseTrackerApp:
         self.nav_buttons = {}
         for key, text, cmd in [
             ("overview", "总览", self._show_overview),
-            ("exec", "执行模式", self._show_execution_mode),
-            ("taskboard", "任务看板", self._show_task_board),
-            ("coursesim", "🎓 课程系统", self._show_course_simulation_page),
-            ("search", "网络研探", self._show_search_page),
-            ("projects", "项目管理", self._show_projects_page),
-            ("analyze", "科研文本分析", self._show_research_analysis),
-            ("crawler", "网络爬虫", self._show_web_crawler),
-            ("synergy", "数据枢纽", self._show_synergy_hub),
-            ("domain", "域分布", self._show_domain_chart),
-            ("resource", "课程资源", self._show_resource_page),
-            ("manage", "导入与管理", self._show_management_page),
-            ("notes", "笔记", self._show_notes_page),
-            ("wflog", "工作日志", self._show_workflow_log),
+            ("exec", "执行模式", self._on_exec_nav_click),
+            ("taskboard", "任务看板", lambda k="taskboard": self._switch_to_tab(k, self._show_task_board)),
+            ("checklist", "📋 任务", self._toggle_checklist_window),
+            ("coursesim", "🎓 课程系统", lambda k="coursesim": self._switch_to_tab(k, self._show_course_simulation_page)),
+            ("search", "网络研探", lambda k="search": self._switch_to_tab(k, self._show_search_page)),
+            ("projects", "项目管理", lambda k="projects": self._switch_to_tab(k, self._show_projects_page)),
+            ("analyze", "科研文本分析", lambda k="analyze": self._switch_to_tab(k, self._show_research_analysis)),
+            ("crawler", "网络搜索", lambda k="crawler": self._switch_to_tab(k, self._show_web_crawler)),
+            ("synergy", "数据枢纽", lambda k="synergy": self._switch_to_tab(k, self._show_synergy_hub)),
+            ("domain", "域分布", lambda k="domain": self._switch_to_tab(k, self._show_domain_chart)),
+            ("resource", "课程资源", lambda k="resource": self._switch_to_tab(k, self._show_resource_page)),
+            ("manage", "导入与管理", lambda k="manage": self._switch_to_tab(k, self._show_management_page)),
+            ("notes", "笔记", lambda k="notes": self._switch_to_tab(k, self._show_notes_page)),
+            ("wflog", "工作日志", lambda k="wflog": self._switch_to_tab(k, self._show_workflow_log)),
         ]:
             btn = ttk.Button(self.nav_frame, text=text, command=cmd, style="Nav.TButton")
             btn.pack(side=tk.LEFT, padx=3)
@@ -1992,6 +2530,20 @@ class CourseTrackerApp:
             width=3
         )
         self.assistant_btn.pack(side=tk.LEFT, padx=1)
+
+        # 同步服务器按钮
+        self._server_running = False
+        self._server = None
+        self._server_thread = None
+        self._server_btn_text = tk.StringVar(value="🌐")
+        self._server_quick_text = tk.StringVar(value="🌐 唤醒服务器")
+        self.server_btn = ttk.Button(
+            self.nav_frame,
+            textvariable=self._server_btn_text,
+            command=self._toggle_sync_server,
+            width=3
+        )
+        self.server_btn.pack(side=tk.LEFT, padx=1)
         
         self.nav_title = ttk.Label(self.nav_frame, text="", style="Title.TLabel")
         self.nav_title.pack(side=tk.LEFT, padx=20)
@@ -2008,19 +2560,212 @@ class CourseTrackerApp:
         self.content_frame = ttk.Frame(self.root)
         self.content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
+        # 标签页状态缓存：key → (frame, show_func)
+        self._tab_cache = {}
+        self._active_tab_key = None
+
         self._init_automation_system()
 
     def _clear_content(self):
+        """隐藏当前标签页内容，为切换到新标签页做准备"""
+        # 保存执行模式快照（如果正在执行模式中）
+        if getattr(self, 'exec_mode_active', False) and getattr(self, 'current_execution_course', None):
+            self._save_exec_mode_snapshot()
         self._stop_log_refresh()
-        self.root.unbind_all("<MouseWheel>")
-        for widget in self.content_frame.winfo_children():
-            widget.destroy()
-        self.exec_mode_active = False
+
+        # 隐藏当前活跃的标签页（缓存和非缓存统一处理）
+        if self._active_tab_key:
+            if self._active_tab_key in self._tab_cache:
+                cached_frame = self._tab_cache[self._active_tab_key]
+                try:
+                    cached_frame.pack_forget()
+                except Exception:
+                    pass
+            else:
+                for widget in self.content_frame.winfo_children():
+                    widget.destroy()
+
         self._current_detail_course = None
+
+    def _get_or_create_tab(self, key: str, create_func):
+        """获取缓存的标签页 Frame，如果不存在则创建"""
+        if key in self._tab_cache:
+            return self._tab_cache[key], False
+
+        # 创建新 Frame 作为标签页容器，放在 content_frame 内部
+        tab_frame = ttk.Frame(self.content_frame)
+        self._tab_cache[key] = tab_frame
+
+        # 临时替换 self.content_frame 为 tab_frame，让各 _show_xxx 方法
+        # 的 pack 调用作用在 tab_frame 上
+        original_content_frame = self.content_frame
+        self.content_frame = tab_frame
+        self._building_tab = True
+        try:
+            create_func()
+        finally:
+            self.content_frame = original_content_frame
+            self._building_tab = False
+
+        return tab_frame, True
+
+    def _switch_to_tab(self, key: str, create_func):
+        """切换到指定标签页，带缓存（防重入）"""
+        if getattr(self, '_switching_tab', False):
+            return
+        self._switching_tab = True
+        try:
+            self._clear_content()
+            self._highlight_nav(key)
+            self._active_tab_key = key
+
+            tab_frame, is_new = self._get_or_create_tab(key, create_func)
+
+            tab_frame.pack(fill=tk.BOTH, expand=True, in_=self.content_frame)
+
+            if not is_new:
+                self._refresh_tab(key)
+            self._save_tab_state()
+        finally:
+            self._switching_tab = False
+
+    def _refresh_tab(self, key: str):
+        """切换回缓存的标签页时刷新动态数据"""
+        if key == "overview":
+            # 总览页：刷新统计标签和整体进度
+            self._update_overall_label()
+        elif key == "exec_select":
+            # 执行模式选择课程页：刷新卡片
+            self._refresh_exec_cards()
+        elif key.startswith("exec_"):
+            # 单课程执行模式：刷新课时列表和当前课时
+            cid = key[5:]  # 去掉 "exec_" 前缀
+            self._refresh_exec_lesson_list(cid)
+            self._update_overall_label()
+        elif key == "wflog":
+            # 工作日志：刷新日志
+            self._load_exec_log()
+
+    def _invalidate_and_switch(self, key: str, create_func):
+        """强制销毁缓存并重新创建标签页（用于刷新场景）"""
+        if key in self._tab_cache:
+            try:
+                self._tab_cache[key].destroy()
+            except Exception:
+                pass
+            del self._tab_cache[key]
+        self._switch_to_tab(key, create_func)
+
+    _TAB_CACHE_FILE = Path.home() / ".ts2" / "tab_cache.json"
+
+    def _save_tab_state(self):
+        """持久化当前标签页状态到磁盘"""
+        try:
+            data = {
+                "active_tab": self._active_tab_key,
+                "cached_tabs": list(self._tab_cache.keys()),
+                "timestamp": datetime.now().isoformat(),
+            }
+            self._TAB_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._TAB_CACHE_FILE.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def _restore_tab_state(self):
+        """从磁盘恢复上次的标签页状态"""
+        try:
+            if not self._TAB_CACHE_FILE.exists():
+                return
+            data = json.loads(self._TAB_CACHE_FILE.read_text("utf-8"))
+            last_tab = data.get("active_tab", "")
+            if last_tab and last_tab in ("overview", "exec_select", "taskboard", "coursesim",
+                                          "search", "projects", "analyze", "crawler",
+                                          "synergy", "domain", "resource", "manage",
+                                          "notes", "wflog"):
+                restore_map = {
+                    "overview": self._build_overview_tab,
+                    "exec_select": self._build_exec_select_tab,
+                    "taskboard": self._show_task_board,
+                    "coursesim": self._show_course_simulation_page,
+                    "search": self._show_search_page,
+                    "projects": self._show_projects_page,
+                    "analyze": self._show_research_analysis,
+                    "crawler": self._show_web_crawler,
+                    "synergy": self._show_synergy_hub,
+                    "domain": self._show_domain_chart,
+                    "resource": self._show_resource_page,
+                    "manage": self._show_management_page,
+                    "notes": self._show_notes_page,
+                    "wflog": self._show_workflow_log,
+                }
+                if last_tab in restore_map:
+                    self._switch_to_tab(last_tab, restore_map[last_tab])
+        except Exception:
+            pass
 
     def _adaptive_wraplength(self, ratio=0.6):
         w = self.content_frame.winfo_width() or 800
         return max(120, int(w * ratio))
+
+    def _add_specialist_button(self, parent, specialist_type, side=tk.RIGHT, padx=(0, 10), style="Accent.TButton"):
+        """添加专家Agent按钮到面板"""
+        try:
+            from mcp.specialist_agents import (
+                SpecialistAgentFactory,
+                COURSE_SPECIALIST,
+                PROJECT_SPECIALIST,
+                TASK_SPECIALIST,
+                NOTE_SPECIALIST,
+                BOOKMARK_SPECIALIST,
+            )
+            from mcp.automation.specialist_popup import SpecialistPopupButton
+
+            config_map = {
+                "course": COURSE_SPECIALIST,
+                "project": PROJECT_SPECIALIST,
+                "task": TASK_SPECIALIST,
+                "note": NOTE_SPECIALIST,
+                "bookmark": BOOKMARK_SPECIALIST,
+            }
+
+            config = config_map.get(specialist_type)
+            if not config:
+                return None
+
+            # 从 popup_manager 获取 agent 和 llm
+            pm = getattr(self, '_popup_manager', None)
+            agent = None
+            llm = None
+            if pm:
+                agent = getattr(pm, '_agent', None)
+                llm = getattr(pm, '_llm', None)
+
+            # 获取或创建专家Agent
+            specialist_agent = SpecialistAgentFactory.get_specialist(
+                config,
+                llm=llm,
+                base_dir=getattr(self, 'base_dir', None) if hasattr(self, 'base_dir') else None,
+                ws2_system=getattr(self, 'system', None),
+                project_manager=getattr(self, 'project_mgr', None),
+                task_manager=getattr(self, 'task_board_mgr', None),
+            )
+
+            # 创建弹窗按钮
+            btn = SpecialistPopupButton(
+                parent=parent,
+                specialist_config=config,
+                agent=specialist_agent,
+                llm=llm,
+                ws2_system=getattr(self, 'system', None),
+                course_tracker=self,
+            )
+            return btn.create_nav_button(parent, style=style)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"添加专家按钮失败: {e}")
+            return None
 
     def _update_overall_label(self):
         done, total = self.system.get_overall_progress()
@@ -2031,6 +2776,8 @@ class CourseTrackerApp:
         """高亮当前导航按钮"""
         for key, btn in self.nav_buttons.items():
             btn.config(style="NavActive.TButton" if key == active_key else "Nav.TButton")
+        # 记录当前界面，用于关闭快照
+        self._current_nav_key = active_key
 
     # ─── 窗口焦点追踪 ───
 
@@ -2074,10 +2821,588 @@ class CourseTrackerApp:
             detail
         )
 
+    # ─── 任务2: 全局快捷键唤醒助手 ───
+
+    def _bind_global_shortcuts(self):
+        """绑定全局快捷键唤醒 Agent/Popup 助手
+        兼容 macOS（Option/Alt 冲突问题）
+        Windows/Linux: Ctrl+Shift+A → Agent, Ctrl+Shift+P → Popup, Ctrl+Shift+S → 服务器
+        macOS: Command+Shift+A → Agent, Command+Shift+P → Popup, Command+Shift+S → 服务器
+        """
+        # 打开 Agent 助手
+        def _open_agent_shortcut(event=None):
+            try:
+                from mcp.agent_assistant import get_or_create_agent_window
+                assistant = get_or_create_agent_window(
+                    self.root, BASE, self.system,
+                    self.project_mgr, self.task_board_mgr,
+                    course_tracker=self
+                )
+                assistant.show()
+            except Exception as e:
+                messagebox.showerror("错误", f"启动助手失败: {e}")
+
+        # 打开 Popup 学习助手
+        def _open_popup_shortcut(event=None):
+            try:
+                self._open_learning_assistant()
+            except Exception as e:
+                messagebox.showerror("错误", f"启动学习助手失败: {e}")
+
+        # 切换同步服务器
+        def _toggle_server_shortcut(event=None):
+            self._wake_server()
+
+        # 绑定快捷键（跨平台兼容）
+        if IS_MAC:
+            # macOS: 使用 Command 键，避免与 Option/Alt 字符输入冲突
+            self.root.bind("<Command-A>", _open_agent_shortcut)
+            self.root.bind("<Command-P>", _open_popup_shortcut)
+            self.root.bind("<Command-Shift-S>", _toggle_server_shortcut)
+        else:
+            # Windows/Linux: 使用 Ctrl+Shift
+            self.root.bind("<Control-Shift-A>", _open_agent_shortcut)
+            self.root.bind("<Control-Shift-P>", _open_popup_shortcut)
+            self.root.bind("<Control-Shift-S>", _toggle_server_shortcut)
+
+    # ─── 任务8: 执行模式记忆 ───
+
+    _EXEC_MEMORY_FILE = "exec_mode_memory.json"
+
+    def _restore_execution_memory(self):
+        """延迟恢复执行模式记忆：记录有记忆数据，但不弹窗，等用户切换到执行模式标签页时再提示"""
+        try:
+            mem_file = _resolve_data_file(self._EXEC_MEMORY_FILE)
+            if not mem_file.exists():
+                return
+            data = json.loads(mem_file.read_text(encoding="utf-8"))
+            course_id = data.get("course_id")
+            if not course_id:
+                return
+            course = self.system.get_course_by_id(course_id)
+            if not course:
+                return
+            # 记忆数据存在，标记为待恢复（等用户切换到执行模式标签页时再弹窗）
+            self._exec_memory_pending = {
+                "course_id": course_id,
+                "lesson_number": data.get("lesson_number"),
+            }
+        except Exception:
+            pass
+
+    def _prompt_execution_memory(self):
+        """当用户切换到执行模式标签页时，弹窗询问是否恢复"""
+        pending = getattr(self, '_exec_memory_pending', None)
+        if not pending:
+            return
+        # 清除 pending 标记，避免重复弹窗
+        self._exec_memory_pending = None
+
+        try:
+            course_id = pending["course_id"]
+            lesson_number = pending["lesson_number"]
+            course = self.system.get_course_by_id(course_id)
+            if not course:
+                return
+            lesson = self.system.get_lesson(course_id, lesson_number) if lesson_number else None
+            title = course.get("course_title", course_id)
+            lesson_info = f"，上次在课时 {lesson_number}: {lesson.get('lesson_title', '')}" if lesson else ""
+            result = messagebox.askyesno(
+                "执行模式记忆",
+                f"检测到上次在执行模式中使用《{title}》{lesson_info}\n\n"
+                f"是否继续上次的进度？"
+            )
+            if result:
+                self._show_execution_mode(course_id)
+                if lesson_number and self.exec_mode_active:
+                    self._switch_to_lesson(lesson_number)
+        except Exception:
+            pass
+
+    def _on_exec_nav_click(self):
+        """执行模式导航按钮点击：先检查 pending 记忆，再进入"""
+        pending = getattr(self, '_exec_memory_pending', None)
+        if pending:
+            self._prompt_execution_memory()
+        else:
+            self._show_execution_mode()
+
+    def _save_execution_memory(self):
+        """保存执行模式记忆：当前课程和课时"""
+        try:
+            mem_file = _resolve_data_file(self._EXEC_MEMORY_FILE)
+            data = {
+                "course_id": getattr(self, 'current_execution_course', None),
+                "lesson_number": getattr(self, '_exec_current_lnum', None),
+                "timestamp": datetime.now().isoformat(),
+            }
+            mem_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _save_exec_mode_snapshot(self):
+        """保存执行模式快照：含完整状态，用于 tab 切换恢复"""
+        self._exec_snapshot = {
+            "course_id": self.current_execution_course,
+            "lesson_number": self._exec_current_lnum,
+            "lesson_data": self._exec_current_lesson_data,
+            "timer_running": self._exec_timer_running,
+            "timestamp": datetime.now().isoformat(),
+        }
+        self._save_execution_memory()
+
+    def _clear_exec_snapshot(self):
+        self._exec_snapshot = None
+
+    # ============ 程序关闭快照 ============
+
+    _APP_SNAPSHOT_FILE = "app_snapshot.json"
+
+    # ─── 任务清单面板 ─────────────────────────────────────
+
+    def _toggle_checklist_window(self):
+        """切换任务清单窗口显示/隐藏"""
+        if self._checklist_window is not None and self._checklist_window.winfo_exists():
+            self._checklist_window.destroy()
+            self._checklist_window = None
+            self._checklist_pinned = False
+        else:
+            self._show_checklist_window()
+
+    def _show_checklist_window(self):
+        """打开任务清单独立窗口"""
+        if self._checklist_window is not None and self._checklist_window.winfo_exists():
+            self._checklist_window.lift()
+            return
+
+        # 根据任务数自适应窗口高度
+        self.task_checklist_mgr.load()
+        task_count = len(self.task_checklist_mgr.items)
+        auto_h = min(420, max(150, 70 + task_count * 32))
+
+        win = tk.Toplevel(self.root)
+        win.title("📋 任务清单")
+        win.geometry(f"360x{auto_h}")
+        win.minsize(260, 120)
+        win.transient(self.root)
+
+        # 恢复钉住状态
+        if self._checklist_pinned:
+            win.attributes("-topmost", True)
+
+        frame = ttk.Frame(win, padding=8)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # 标题栏 + 操作按钮
+        header = ttk.Frame(frame)
+        header.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(header, text="📋 任务清单", font=("", 12, "bold")).pack(side=tk.LEFT)
+
+        # 钉在最上层按钮
+        self._pin_btn = ttk.Button(header, text="📌", width=3,
+                                   command=self._toggle_checklist_pin)
+        self._pin_btn.pack(side=tk.RIGHT, padx=2)
+
+        # 编辑按钮
+        ttk.Button(header, text="✏️", width=3,
+                   command=lambda: self._edit_checklist_tasks(win)).pack(side=tk.RIGHT, padx=2)
+
+        # 刷新按钮
+        ttk.Button(header, text="🔄", width=3,
+                   command=lambda: self._refresh_checklist_ui(win._checklist_frame)).pack(side=tk.RIGHT, padx=2)
+
+        # 滚动区域
+        canvas_container = ttk.Frame(frame)
+        canvas_container.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(canvas_container, highlightthickness=0, bg=win.cget("bg"))
+        scrollbar = ttk.Scrollbar(canvas_container, orient=tk.VERTICAL, command=canvas.yview)
+        canvas_frame = ttk.Frame(canvas)
+        win._checklist_frame = canvas_frame
+
+        canvas_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas_window = canvas.create_window((0, 0), window=canvas_frame, anchor=tk.NW)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._refresh_checklist_ui(canvas_frame)
+
+        def _on_mwheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind("<MouseWheel>", _on_mwheel)
+        canvas_frame.bind("<MouseWheel>", _on_mwheel)
+
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_checklist_window(win))
+        self._checklist_window = win
+
+    def _refresh_checklist_ui(self, container):
+        """刷新任务清单 UI — 按时间分区显示"""
+        for w in container.winfo_children():
+            w.destroy()
+
+        self.task_checklist_mgr.load()
+        groups = self.task_checklist_mgr.get_grouped()
+
+        if not groups:
+            ttk.Label(container, text="暂无任务", foreground="gray",
+                      font=("", 10)).pack(pady=20)
+            ttk.Button(container, text="✏️ 编辑任务",
+                       command=lambda: self._edit_checklist_tasks(self._checklist_window)
+                       ).pack()
+            return
+
+        style = ttk.Style()
+        style.configure("Checked.TLabel", foreground="gray", font=("", 10, "overstrike"))
+        style.configure("Unchecked.TLabel", foreground="black", font=("", 10))
+
+        for section_title, items in groups:
+            # 分区标题
+            header = ttk.Label(container, text=section_title,
+                               font=("", 11, "bold"), foreground="#555")
+            header.pack(anchor=tk.W, pady=(6, 1))
+
+            for i, checked, text, date_str in items:
+                row = ttk.Frame(container)
+                row.pack(fill=tk.X, pady=0)
+
+                cb_var = tk.BooleanVar(value=checked)
+                cb = ttk.Checkbutton(row, variable=cb_var,
+                                     command=lambda idx=i, v=cb_var: self._on_checklist_toggle(idx, v))
+                cb.pack(side=tk.LEFT, padx=1)
+
+                label_style = "Checked.TLabel" if checked else "Unchecked.TLabel"
+                label_text = text
+                if date_str:
+                    label_text = f"{date_str}  {text}"
+                lbl = ttk.Label(row, text=label_text, style=label_style, wraplength=240)
+                lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1)
+
+                del_btn = ttk.Button(row, text="✕", width=2,
+                                     command=lambda idx=i, c=container: self._on_checklist_remove(idx, c))
+                del_btn.pack(side=tk.RIGHT, padx=1)
+
+    def _on_checklist_toggle(self, index, var):
+        """切换任务完成状态"""
+        self.task_checklist_mgr.toggle(index)
+        win = self._checklist_window
+        if win and win.winfo_exists() and hasattr(win, '_checklist_frame'):
+            self._refresh_checklist_ui(win._checklist_frame)
+
+    def _on_checklist_remove(self, index, container):
+        """删除任务"""
+        self.task_checklist_mgr.remove(index)
+        self._refresh_checklist_ui(container)
+
+    def _toggle_checklist_pin(self):
+        """切换任务清单窗口置顶"""
+        self._checklist_pinned = not self._checklist_pinned
+        if self._checklist_window and self._checklist_window.winfo_exists():
+            self._checklist_window.attributes("-topmost", self._checklist_pinned)
+            if hasattr(self, '_pin_btn') and self._pin_btn:
+                self._pin_btn.configure(text="📌" if self._checklist_pinned else "📍")
+
+    def _edit_checklist_tasks(self, parent_win):
+        """重新打开编辑对话框修改任务"""
+        tasks = show_task_checklist_dialog(parent_win, allow_cancel=True)
+        if tasks is not None:
+            win = self._checklist_window
+            if win and win.winfo_exists() and hasattr(win, '_checklist_frame'):
+                self._refresh_checklist_ui(win._checklist_frame)
+
+    def _close_checklist_window(self, win):
+        """关闭任务清单窗口 → 退出整个程序"""
+        self.task_checklist_mgr.save()
+        if win == self._checklist_window:
+            self._checklist_window = None
+            self._checklist_pinned = False
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        self.root.quit()
+        _exit_program()
+
+    def _restore_saved_checklist_tasks(self):
+        """恢复之前打开的任务清单（如果有未完成的任务）"""
+        self.task_checklist_mgr.load()
+        unfinished = sum(1 for c, t, _ in self.task_checklist_mgr.items if not c)
+        if unfinished > 0:
+            self._show_checklist_window()
+
+    def _on_closing(self):
+        """窗口关闭事件：保存程序状态快照"""
+        # 停止同步服务器
+        if getattr(self, '_server_running', False):
+            self._stop_sync_server()
+        try:
+            self._save_app_snapshot()
+        except Exception:
+            pass
+        self.root.destroy()
+
+    # ─── 同步服务器管理 ──────────────────────────────────
+
+    def _toggle_sync_server(self):
+        """切换同步服务器启停"""
+        if self._server_running:
+            self._stop_sync_server()
+        else:
+            self._start_sync_server()
+
+    def _start_sync_server(self):
+        """启动本地文件同步分发服务器（自动端口检测，支持多实例）"""
+        try:
+            import socket
+
+            start_port = 6906
+            workspace = str(BASE)
+
+            # 获取局域网 IP
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+            except Exception:
+                local_ip = "127.0.0.1"
+
+            # 自动查找可用端口
+            port = start_port
+            for candidate in range(start_port, start_port + 100):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        sock.bind(("0.0.0.0", candidate))
+                        port = candidate
+                        break
+                except OSError:
+                    continue
+            else:
+                messagebox.showerror("启动失败", f"端口 {start_port}-{start_port+99} 均被占用")
+                return
+
+            # 记录实际使用的端口
+            self._server_port = port
+
+            if port != start_port:
+                print(f"[TS2] 端口 {start_port} 已被占用，自动使用 {port}")
+
+            # 自动配置防火墙规则（允许局域网和公用网络访问）
+            try:
+                from mcp.server.network import configure_firewall
+                ok, msg = configure_firewall(port, allow=True)
+                print(f"[TS2] 防火墙配置结果: ok={ok}, msg={msg}")
+                if not ok:
+                    print(f"[TS2] 提示: {msg}")
+            except Exception as e:
+                import traceback
+                print(f"[TS2] 防火墙配置异常: {e}")
+                print(f"[TS2] 详细: {traceback.format_exc()}")
+
+            # 同进程线程启动服务器（替代 subprocess，避免 PyInstaller 打包后 sys.executable 不可用）
+            from mcp.server.app import run_server_in_thread
+            server, thread, actual_port = run_server_in_thread(
+                workspace_dir=workspace,
+                host="0.0.0.0",
+                port=port,
+                open_browser=True,
+                auto_port=False,
+            )
+            self._server = server
+            self._server_thread = thread
+            self._server_running = True
+            self._server_btn_text.set("🌐🟢")
+            self._server_quick_text.set("🌐 关闭服务器")
+
+            self._try_open_browser(port)
+
+            messagebox.showinfo(
+                "同步服务器已启动",
+                f"端口: {port}\n"
+                f"本机访问: http://127.0.0.1:{port}\n"
+                f"手机访问: http://{local_ip}:{port}\n"
+                f"工作区: {workspace}\n\n"
+                f"支持：文件浏览/编辑/上传/下载/同步\n"
+                f"手机扫码或输入地址即可传输文件\n\n"
+                f"再次点击 🌐 按钮可停止服务器"
+            )
+
+        except ImportError as e:
+            messagebox.showerror("启动失败", f"缺少依赖: {e}\n\n请安装: pip install fastapi uvicorn")
+        except Exception as e:
+            messagebox.showerror("启动失败", str(e))
+
+    def _try_open_browser(self, port: int):
+        """尝试在浏览器中打开服务器地址"""
+        try:
+            import webbrowser
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        except Exception:
+            pass
+
+    def _wake_server(self):
+        """切换服务器启停：运行则停止，停止则启动"""
+        # 检测线程是否已退出（zombie 状态）
+        if self._server_running and self._server_thread:
+            if not self._server_thread.is_alive():
+                self._server_running = False
+                self._server = None
+                self._server_thread = None
+                self._server_btn_text.set("🌐")
+                self._server_quick_text.set("🌐 唤醒服务器")
+        if self._server_running and not self._server_thread:
+            self._server_running = False
+            self._server_btn_text.set("🌐")
+            self._server_quick_text.set("🌐 唤醒服务器")
+        if self._server_running:
+            self._stop_sync_server()
+            self._server_quick_text.set("🌐 唤醒服务器")
+        else:
+            self._start_sync_server()
+            self._server_quick_text.set("🌐 关闭服务器")
+
+    def _stop_sync_server(self):
+        """停止同步服务器（使用 uvicorn.Server.should_exit 优雅关闭）"""
+        if self._server:
+            try:
+                self._server.should_exit = True
+            except Exception:
+                pass
+            self._server = None
+            self._server_thread = None
+
+        # 清理残留端口占用（兜底，防止端口未释放）
+        try:
+            _port = getattr(self, '_server_port', 6906)
+            if sys.platform == "win32":
+                result = subprocess.run(
+                    ["netstat", "-ano", "-p", "TCP"],
+                    capture_output=True, text=True, timeout=5
+                )
+                for line in result.stdout.splitlines():
+                    if f":{_port}" in line and "LISTENING" in line:
+                        parts = line.strip().split()
+                        if parts:
+                            pid = parts[-1]
+                            if pid.isdigit() and int(pid) != os.getpid():
+                                subprocess.run(["taskkill", "/F", "/PID", pid],
+                                               capture_output=True, timeout=5)
+            elif sys.platform != "win32":
+                result = subprocess.run(
+                    ["lsof", "-ti", f":{_port}"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.stdout.strip():
+                    for pid_str in result.stdout.strip().split('\n'):
+                        pid = pid_str.strip()
+                        if pid and pid.isdigit() and int(pid) != os.getpid():
+                            import signal
+                            try:
+                                os.kill(int(pid), signal.SIGKILL)
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        self._server_running = False
+        self._server_btn_text.set("🌐")
+        self._server_quick_text.set("🌐 唤醒服务器")
+        messagebox.showinfo("服务器已停止", "同步服务器已完全停止")
+
+    def _save_app_snapshot(self):
+        """保存程序轻量快照：只记录当前界面、项目和窗口大小"""
+        try:
+            snap_file = _resolve_data_file(self._APP_SNAPSHOT_FILE)
+
+            # 当前界面/标签页
+            current_page = getattr(self, '_current_nav_key', 'overview')
+
+            # 当前项目（如果有）
+            current_project = None
+            if hasattr(self, '_current_project_id'):
+                current_project = self._current_project_id
+
+            snapshot = {
+                "current_page": current_page,
+                "current_project": current_project,
+                "window_geometry": self.root.geometry(),
+                "timestamp": datetime.now().isoformat(),
+            }
+
+            snap_file.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(f"保存程序快照失败: {e}")
+
+    def _restore_app_snapshot(self):
+        """启动时静默恢复上次退出时的状态（不弹窗、不阻塞）"""
+        try:
+            snap_file = _resolve_data_file(self._APP_SNAPSHOT_FILE)
+            if not snap_file.exists():
+                return
+
+            data = json.loads(snap_file.read_text(encoding="utf-8"))
+            timestamp = data.get("timestamp", "")
+
+            # 只恢复 24 小时内的快照
+            if timestamp:
+                try:
+                    saved_time = datetime.fromisoformat(timestamp)
+                    if (datetime.now() - saved_time).total_seconds() > 86400:
+                        return
+                except Exception:
+                    pass
+
+            current_page = data.get("current_page", "overview")
+            current_project = data.get("current_project")
+
+            # 恢复窗口大小（静默）
+            window_geometry = data.get("window_geometry")
+            if window_geometry:
+                try:
+                    self.root.geometry(window_geometry)
+                except Exception:
+                    pass
+
+            # 恢复当前界面（静默，不影响执行模式记忆）
+            page_commands = {
+                "overview": self._show_overview,
+                "course_system": self._show_course_system,
+                "taskboard": self._show_task_board,
+                "projects": self._show_projects_page,
+                "resources": self._show_resources_page,
+                "notes": self._show_notes_page,
+                "wflog": self._show_workflow_log,
+            }
+            if current_page in page_commands:
+                page_commands[current_page]()
+
+            # 恢复当前项目（静默）
+            if current_project:
+                projects = self.project_mgr.get_all_projects()
+                for p in projects:
+                    if p.get("id") == current_project:
+                        self._show_project_detail(current_project)
+                        break
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(f"恢复程序快照失败: {e}")
+
     # ============ 总览页 ============
 
     def _show_overview(self):
-        self._clear_content()
+        self._switch_to_tab("overview", self._build_overview_tab)
+
+    def _build_overview_tab(self):
+        """构建总览页内容（缓存标签页）"""
         self._highlight_nav("overview")
         self.nav_title.config(text="课程总览")
         self._update_overall_label()
@@ -2190,7 +3515,8 @@ class CourseTrackerApp:
             else:
                 status_text = f"⏳ 剩余 {remaining} 课时"
                 if next_l:
-                    status_text += f" | 下一节: 课时{next_l['lesson_number']}"
+                    lesson_num = next_l.get('lesson_number', '未知')
+                    status_text += f" | 下一节: 课时{lesson_num}"
             card = ttk.Frame(self._exec_cards_container, relief="groove", borderwidth=1)
             card.pack(fill=tk.X, padx=8, pady=6)
             tk.Canvas(card, width=8, bg=color, highlightthickness=0).pack(side=tk.LEFT, fill=tk.Y)
@@ -2205,7 +3531,7 @@ class CourseTrackerApp:
                 meta_line.append(f"⏱️ {total_hours:.1f}h")
             ttk.Label(info, text="  |  ".join(meta_line), style="Sub.TLabel").pack(anchor="w")
             ttk.Label(info, text=status_text, style="Sub.TLabel").pack(anchor="w")
-            pbar = ttk.Progressbar(info, length=400, mode="determinate", maximum=100)
+            pbar = ttk.Progressbar(info, mode="determinate", maximum=100)
             pbar["value"] = pct
             pbar.pack(fill=tk.X, pady=2)
             ttk.Label(info, text=f"完成 {pct}%", style="Sub.TLabel").pack(anchor="w")
@@ -2216,6 +3542,25 @@ class CourseTrackerApp:
                 ttk.Label(btn_frame, text="进行中").pack(pady=2)
             elif remaining == 0:
                 ttk.Label(btn_frame, text="已完成").pack(pady=2)
+
+            # 右键菜单
+            self._bind_course_card_right_click(card, cid, title, domain)
+
+    def _refresh_exec_lesson_list(self, course_id: str):
+        """刷新单课程执行模式的课时列表（切换回缓存标签页时调用）"""
+        if not hasattr(self, 'exec_tree') or not self.exec_tree.winfo_exists():
+            return
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+        completed_set = set(self.system.get_course_progress(course_id).get("completed_lessons", []))
+        # 清空并重建课时列表
+        self.exec_tree.delete(*self.exec_tree.get_children())
+        for lesson in course.get("lessons", []):
+            lnum = lesson.get("lesson_number", 0)
+            if lnum not in completed_set:
+                self.exec_tree.insert("", "end", values=(lnum, lesson.get("lesson_title", "")),
+                                      tags=(str(lnum),))
 
     def _build_course_cards(self, parent):
         """构建可滚动的课程卡片列表"""
@@ -2290,7 +3635,7 @@ class CourseTrackerApp:
             row2.pack(fill=tk.X, pady=2)
             ttk.Label(row2, text=f"{hours}τ | {n_lessons}课时 | 剩余{remaining}", style="Sub.TLabel").pack(side=tk.LEFT)
 
-            progress_bar = ttk.Progressbar(info, length=300, mode="determinate", maximum=100)
+            progress_bar = ttk.Progressbar(info, mode="determinate", maximum=100)
             progress_bar["value"] = pct
             progress_bar.pack(fill=tk.X, pady=2)
 
@@ -2310,9 +3655,77 @@ class CourseTrackerApp:
             ttk.Button(btn_frame, text="🗑️ 删除",
                        command=lambda cid=cid: self._confirm_delete_course(cid)).pack(pady=1)
 
+            # 右键菜单
+            self._bind_course_card_right_click(card, cid, title, domain)
+
     def _on_overview_canvas_configure(self, event):
         """总览Canvas宽度变化时，内部Frame自适应"""
         self._overview_canvas.itemconfig("scroll_win", width=event.width)
+
+    def _bind_course_card_right_click(self, card, course_id, course_title, domain):
+        """为课程卡片绑定右键菜单"""
+        menu = tk.Menu(self.root, tearoff=0, font=("", 9))
+        menu.add_command(label="📖 查看课程详情", command=lambda: self._show_course_detail(course_id))
+        menu.add_command(label="▶ 进入执行模式", command=lambda: self._show_execution_mode(course_id))
+        menu.add_separator()
+        menu.add_command(label="📓 打开课程笔记", command=lambda: self._open_note(course_id))
+        menu.add_command(label="📂 打开资源", command=lambda: self._open_course_resources(course_id))
+        menu.add_separator()
+        menu.add_command(label="🔄 重置进度", command=lambda: self._confirm_reset(course_id))
+        menu.add_command(label="📋 导出课程", command=lambda: self._export_course(course_id))
+        menu.add_separator()
+        menu.add_command(label="🗑️ 删除课程", command=lambda: self._confirm_delete_course(course_id))
+
+        def _show_menu(event):
+            # 防止菜单被覆盖
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+        # 卡片和所有子组件都绑定右键
+        def _bind_all_right_click(widget):
+            widget.bind("<Button-3>", _show_menu)
+            for child in widget.winfo_children():
+                _bind_all_right_click(child)
+
+        _bind_all_right_click(card)
+        # 保存菜单引用，防止被GC
+        card._right_click_menu = menu
+
+    def _open_course_resources(self, course_id):
+        """打开课程资源（默认文件管理器）"""
+        course = self.system.get_course_by_id(course_id)
+        if course:
+            base_path = self.BASE / "courses" / course_id
+            if base_path.exists():
+                from mcp.tools_utils import open_file
+                open_file(str(base_path))
+            else:
+                from tkinter import messagebox
+                messagebox.showwarning("提示", f"课程目录不存在：\n{base_path}")
+        else:
+            from tkinter import messagebox
+            messagebox.showwarning("提示", "找不到该课程")
+
+    def _export_course(self, course_id):
+        """导出课程为JSON"""
+        from tkinter import filedialog, messagebox
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            messagebox.showwarning("提示", "找不到该课程")
+            return
+        filepath = filedialog.asksaveasfilename(
+            title="导出课程",
+            defaultextension=".json",
+            filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")],
+            initialfile=f"{course.get('course_title', course_id)}.json"
+        )
+        if filepath:
+            import json
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(course, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("完成", f"课程已导出到：\n{filepath}")
 
     def _build_overview_stats(self, parent):
         """总览右侧：统计图 + 日志流"""
@@ -2471,6 +3884,37 @@ class CourseTrackerApp:
                 label += f" {action[:30]}"
             self._overview_log_tree.insert("", 0, values=(ts, label), tags=(etype,))
 
+    def _load_exec_log(self):
+        """加载日志流到执行模式选择页"""
+        if not hasattr(self, '_exec_log_tree') or self._exec_log_tree is None:
+            return
+        for item in self._exec_log_tree.get_children():
+            self._exec_log_tree.delete(item)
+
+        entries = self.wflogger.get_entries()[-50:]
+        type_labels = {
+            "timer_start": "▶ 开始计时",
+            "timer_stop": "⏹ 停止计时",
+            "action": "⚡ 动作",
+            "note": "📝 笔记",
+            "blur": "👋 离开",
+            "focus_return": "✅ 返回",
+            "lesson_complete": "🎯 完成课时",
+            "open_note": "📓 打开笔记",
+            "open_resource": "📂 打开资源",
+        }
+        for entry in reversed(entries):
+            ts = entry.get("timestamp", "")[11:19]
+            etype = entry.get("type", "")
+            detail = entry.get("detail", "")
+            action = entry.get("action", "")
+            label = type_labels.get(etype, etype)
+            if detail:
+                label += f" {detail[:30]}"
+            elif action:
+                label += f" {action[:30]}"
+            self._exec_log_tree.insert("", 0, values=(ts, label), tags=(etype,))
+
     # ============ 域分布图 ============
 
     def _show_domain_chart(self):
@@ -2528,7 +3972,12 @@ class CourseTrackerApp:
     # ============ 课程详情页 ============
 
     def _show_course_detail(self, course_id: str):
-        self._clear_content()
+        # 课程详情页使用缓存标签页
+        tab_key = f"course_detail_{course_id}"
+        self._switch_to_tab(tab_key, lambda: self._build_course_detail_tab(course_id))
+
+    def _build_course_detail_tab(self, course_id: str):
+        """构建课程详情页（缓存标签页）"""
         self._highlight_nav("overview")
         self._current_detail_course = course_id
         course = self.system.get_course_by_id(course_id)
@@ -2556,6 +4005,9 @@ class CourseTrackerApp:
         ttk.Label(info_frame, text=course.get("course_title", ""), style="Title.TLabel").pack(anchor="w")
         sub = f"[{domain_name}]  |  {course.get('total_hours', '?')}τ  |  {len(course.get('lessons', []))}课时  |  完成 {pct}%"
         ttk.Label(info_frame, text=sub, style="Sub.TLabel").pack(anchor="w")
+
+        # 专家Agent按钮 - 课程专家（放在标题旁更醒目）
+        self._add_specialist_button(info_frame, "course", style="Accent.TButton")
 
         # 进度条
         pbar = ttk.Progressbar(top, length=300, mode="determinate", maximum=100)
@@ -2870,6 +4322,7 @@ class CourseTrackerApp:
     def _add_file_resource(self, course_id):
         fp = filedialog.askopenfilename(title="选择文件", filetypes=[("PDF", "*.pdf"), ("所有文件", "*.*")])
         if fp and self.system.rmgr.add_pdf(course_id, fp, BASE):
+            self._wf_log_action("add_file_resource", detail=f"添加文件 {Path(fp).name[:30]}")
             messagebox.showinfo("成功", "文件已添加")
             self._show_course_detail(course_id)
         elif fp:
@@ -2908,7 +4361,7 @@ class CourseTrackerApp:
 
         # 底部确认（先pack，确保可见）
         bottom = ttk.Frame(dlg)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(10, 15))
 
         # 中间内容区
         mid = ttk.Frame(dlg)
@@ -3150,6 +4603,7 @@ class CourseTrackerApp:
             if skipped:
                 msg += f"，跳过 {skipped} 个（已存在）"
             messagebox.showinfo("导入完成", msg, parent=self.root)
+            self._wf_log_action("manual_batch_import", detail=f"手动分配导入 {added} 个文件")
             self._log(f"manual batch import: {added} added, {skipped} skipped")
             dlg.destroy()
             if preselect_course_id:
@@ -3157,8 +4611,8 @@ class CourseTrackerApp:
             else:
                 self._refresh_all()
 
-        ttk.Button(bottom, text="✅ 确认导入", command=_confirm).pack(side=tk.LEFT, padx=10)
-        ttk.Button(bottom, text="❌ 取消", command=dlg.destroy).pack(side=tk.LEFT, padx=10)
+        ttk.Button(bottom, text="✅ 确认导入", command=_confirm).pack(side=tk.LEFT, padx=10, ipadx=8, ipady=4)
+        ttk.Button(bottom, text="❌ 取消", command=dlg.destroy).pack(side=tk.LEFT, padx=10, ipadx=8, ipady=4)
 
     # ─── 多选删除资源 ──────────────────────────────────────────────────
 
@@ -3236,6 +4690,7 @@ class CourseTrackerApp:
                 if rmgr.remove(course_id, res):
                     deleted += 1
             messagebox.showinfo("删除完成", f"已删除 {deleted} 个资源", parent=self.root)
+            self._wf_log_action("batch_delete_resources", detail=f"批量删除 {deleted} 个资源")
             dlg.destroy()
             self._show_course_detail(course_id)
 
@@ -3879,6 +5334,7 @@ class CourseTrackerApp:
         if skipped:
             msg += f"，跳过 {skipped} 个（已存在）"
         messagebox.showinfo("批量导入完成", msg)
+        self._wf_log_action("batch_import", detail=f"批量导入 {added} 个文件到 {course_id[:20]}")
         self._log(f"batch import: {added} added, {skipped} skipped -> {course_id[:30]}")
         self._show_course_detail(course_id)
 
@@ -3939,17 +5395,57 @@ class CourseTrackerApp:
         self._do_batch_import(files)
 
     def _do_batch_import(self, file_paths):
-        """执行批量导入：自动匹配 + 多对多分配对话框"""
+        """执行批量导入：使用 CourseResourceScanner 智能匹配 + 多对多分配对话框"""
         courses = self.system.courses
         
-        # 预计算所有文件的多对多匹配
+        # 使用 CourseResourceScanner 进行智能资源扫描和匹配
+        scanner = CourseResourceScanner()
+        resources = scanner.scan_directory(dirpath=str(Path.cwd()), recursive=False)
+        
+        # 将 file_paths 转为 Dict 格式用于匹配
+        resource_list = []
+        for fp in file_paths:
+            ext = Path(fp).suffix.lower()
+            res = {
+                "filepath": fp,
+                "relative_path": str(Path(fp).name),
+                "filename": Path(fp).name,
+                "stem": Path(fp).stem,
+                "extension": ext,
+                "resource_type": scanner.FILE_TYPE_MAP.get(ext, "other"),
+                "size_bytes": Path(fp).stat().st_size if Path(fp).exists() else 0,
+                "matched_courses": [],
+                "matched_lessons": [],
+                "extracted_metadata": {},
+                "tags": scanner._generate_tags(Path(fp).stem, ext),
+            }
+            lesson_info = scanner._extract_lesson_info(Path(fp).stem)
+            if lesson_info:
+                res["extracted_metadata"]["lesson"] = lesson_info
+            keywords = scanner._extract_keywords(Path(fp).stem)
+            if keywords:
+                res["extracted_metadata"]["keywords"] = keywords
+            resource_list.append(res)
+        
+        # 智能匹配到课程（超弱阈值 + 中英文双语词典）
+        course_mapping = scanner.match_to_courses(resource_list, courses, threshold=0.05)
+        
+        # 转换为旧格式用于对话框兼容
         all_matches = {}  # {filepath: [(cid, title, score), ...]}
         unmatched = []
         
         for fp in file_paths:
-            matches = self._match_file_to_courses(Path(fp).name, courses, threshold=0.25)
-            if matches:
-                all_matches[fp] = matches
+            matches_for_fp = []
+            for cid, resources_for_course in course_mapping.items():
+                for r in resources_for_course:
+                    if r["filepath"] == fp:
+                        score = r.get("match_score", 0)
+                        title = r["matched_courses"][0].get("course_title", "") if r.get("matched_courses") else ""
+                        matches_for_fp.append((cid, title, score))
+            
+            matches_for_fp.sort(key=lambda x: x[2], reverse=True)
+            if matches_for_fp:
+                all_matches[fp] = matches_for_fp
             else:
                 unmatched.append(fp)
         
@@ -4499,6 +5995,7 @@ class CourseTrackerApp:
             if len(unmatched) > 0:
                 msg += f"\n{len(unmatched)} 个文件未分配"
             messagebox.showinfo("批量导入完成", msg, parent=self.root)
+            self._wf_log_action("batch_import", detail=f"智能批量导入 {added} 个文件，跳过 {skipped} 个")
             self._log(f"batch import: {total_assignments} assigned, {added} added, {skipped} skipped")
             dlg.destroy()
             self._refresh_all()
@@ -4786,6 +6283,7 @@ class CourseTrackerApp:
             else:
                 ok_ = self.system.rmgr.add_url(course_id, n, u)
             if ok_:
+                self._wf_log_action("add_url_resource", detail=f"添加{'视频' if rtype == 'video' else '链接'} {n[:25]}")
                 messagebox.showinfo("成功", f"{'视频' if rtype == 'video' else '资源'}已添加", parent=self.root)
                 dlg.destroy()
                 self._show_course_detail(course_id)
@@ -4827,6 +6325,11 @@ class CourseTrackerApp:
         """打开资源文件，支持绝对路径和相对于BASE的相对路径"""
         fp = self._resolve_resource_path(path_str)
         if fp.exists():
+            # 记录 PDF 阅读状态，用于关闭快照恢复
+            self._pdf_viewer_state = {
+                "path": str(fp),
+                "opened_at": datetime.now().isoformat(),
+            }
             self._wf_log_action("open_pdf", detail=str(fp))
             open_file(str(fp))
         else:
@@ -4996,6 +6499,7 @@ class CourseTrackerApp:
         if not messagebox.askyesno("确认删除", f"确定要删除资源吗？\n{label}"):
             return
         self.system.rmgr.remove(course_id, res)
+        self._wf_log_action("delete_resource", detail=f"删除资源 {label[:30]}")
         if on_done:
             on_done()
 
@@ -5007,6 +6511,7 @@ class CourseTrackerApp:
         if not fp:
             return
         if self.system.rmgr.add_pdf(course_id, fp, BASE):
+            self._wf_log_action("add_course_file", detail=f"添加课程级文件 {Path(fp).name[:30]}")
             self._refresh_exec_panel(course_id, lesson_number)
         else:
             messagebox.showinfo("提示", "该文件已存在")
@@ -5469,11 +6974,25 @@ class CourseTrackerApp:
         
         bf = ttk.Frame(tb)
         bf.pack(side=tk.RIGHT)
-        ttk.Button(bf, text="📝 生成全部课时笔记",
+        ttk.Button(bf, text="📝 生成全部",
                    command=lambda: self._generate_course_notes(course_id)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bf, text="📂 打开笔记目录",
+        ttk.Button(bf, text="📂 打开目录",
                    command=lambda: (notes_dir.mkdir(parents=True, exist_ok=True),
                                     open_file(str(notes_dir)))).pack(side=tk.LEFT, padx=2)
+
+        batch_bar = ttk.Frame(left_frame)
+        batch_bar.pack(fill=tk.X, padx=8, pady=(2, 2))
+        self._notes_check_vars = {}
+        ttk.Button(batch_bar, text="☑️ 全选",
+                   command=lambda: self._notes_select_all(course_id)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(batch_bar, text="☐ 全不选",
+                   command=lambda: self._notes_deselect_all(course_id)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(batch_bar, text="🗑️ 删除选中笔记",
+                   command=lambda: self._notes_batch_delete(course_id)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(batch_bar, text="📂 批量打开",
+                   command=lambda: self._notes_batch_open(course_id)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(batch_bar, text="🔄 刷新",
+                   command=lambda: self._refresh_notes_list(course_id)).pack(side=tk.LEFT, padx=2)
 
         lf = ttk.LabelFrame(left_frame, text="笔记文件", padding=6)
         lf.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
@@ -5488,9 +7007,35 @@ class CourseTrackerApp:
         self._notes_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         n_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        self._notes_check_vars = {}
+        self._build_notes_list_content(course_id, notes_dir)
+
+        right_frame = ttk.Frame(paned)
+        paned.add(right_frame, weight=2)
+        self._build_course_note_preview(right_frame, course_id)
+
+    def _build_notes_list_content(self, course_id, notes_dir=None):
+        """构建笔记列表内容（支持复选框批量操作）"""
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+
+        if notes_dir is None:
+            title = course.get("course_title", "")
+            safe_title = re.sub(r'[\\/:*?"<>|]', '_', title)[:40]
+            notes_dir = BASE / "Notes" / safe_title
+
+        for w in self._notes_list_inner.winfo_children():
+            w.destroy()
+        self._notes_check_vars = {}
+
         course_note_path, _ = self.system.get_or_create_note(course_id, None)
+        course_var = tk.BooleanVar(value=False)
+        self._notes_check_vars["__course__"] = course_var
+
         row = ttk.Frame(self._notes_list_inner)
         row.pack(fill=tk.X, pady=4, padx=4)
+        ttk.Checkbutton(row, variable=course_var).pack(side=tk.LEFT, padx=2)
         ttk.Label(row, text="📓", font=("Segoe UI Emoji", 16)).pack(side=tk.LEFT, padx=4)
         ttk.Label(row, text="课程总笔记", font=("", 11, "bold")).pack(side=tk.LEFT, padx=4)
         ttk.Label(row, text=str(course_note_path.relative_to(BASE)) if course_note_path else "",
@@ -5514,8 +7059,12 @@ class CourseTrackerApp:
                 fn = f"L{lnum:02d}_{safe_ltitle}.Rmd" if ltitle else f"L{lnum:02d}.Rmd"
                 exists = fn in existing_files
 
+                lvar = tk.BooleanVar(value=False)
+                self._notes_check_vars[lnum] = lvar
+
                 row = ttk.Frame(self._notes_list_inner)
                 row.pack(fill=tk.X, pady=3, padx=4)
+                ttk.Checkbutton(row, variable=lvar).pack(side=tk.LEFT, padx=2)
                 icon = "✅" if exists else "⬜"
                 ttk.Label(row, text=icon, font=("", 12)).pack(side=tk.LEFT, padx=4)
                 ttk.Label(row, text=f"课时 {lnum}: {ltitle}", font=("", 10)).pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -5523,9 +7072,91 @@ class CourseTrackerApp:
                            command=lambda lnum=lnum: self._open_note(course_id, lnum)).pack(side=tk.RIGHT, padx=2)
                 ttk.Separator(self._notes_list_inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=1)
 
-        right_frame = ttk.Frame(paned)
-        paned.add(right_frame, weight=2)
-        self._build_course_note_preview(right_frame, course_id)
+    def _notes_select_all(self, course_id):
+        for var in self._notes_check_vars.values():
+            var.set(True)
+
+    def _notes_deselect_all(self, course_id):
+        for var in self._notes_check_vars.values():
+            var.set(False)
+
+    def _notes_batch_delete(self, course_id):
+        selected = [k for k, v in self._notes_check_vars.items() if v.get()]
+        if not selected:
+            messagebox.showinfo("提示", "请先勾选要删除的笔记")
+            return
+
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+        title = course.get("course_title", "")
+        safe_title = re.sub(r'[\\/:*?"<>|]', '_', title)[:40]
+        notes_dir = BASE / "Notes" / safe_title
+
+        names = []
+        paths_to_delete = []
+        for key in selected:
+            if key == "__course__":
+                fn = "course_notes.Rmd"
+                names.append(f"课程总笔记")
+            else:
+                lnum = key
+                lesson = next((l for l in course.get("lessons", []) if l.get("lesson_number") == lnum), None)
+                ltitle = lesson.get("lesson_title", "") if lesson else ""
+                safe_ltitle = re.sub(r'[\\/:*?"<>|]', '_', ltitle)[:30]
+                fn = f"L{lnum:02d}_{safe_ltitle}.Rmd" if ltitle else f"L{lnum:02d}.Rmd"
+                names.append(f"课时{lnum}: {ltitle}")
+            fp = notes_dir / fn
+            if fp.exists():
+                paths_to_delete.append(fp)
+
+        if not paths_to_delete:
+            messagebox.showinfo("提示", "选中的笔记文件不存在")
+            return
+
+        detail = "\n".join(f"  • {n}" for n in names[:15])
+        if len(names) > 15:
+            detail += f"\n  ... 等 {len(names)} 个"
+
+        if not messagebox.askyesno("⚠️ 确认删除笔记",
+                f"将删除以下 {len(paths_to_delete)} 个笔记文件：\n{detail}\n\n此操作不可撤销！继续？"):
+            return
+
+        deleted = 0
+        for fp in paths_to_delete:
+            try:
+                fp.unlink()
+                deleted += 1
+            except Exception:
+                pass
+
+        self._build_notes_list_content(course_id, notes_dir)
+        self._log(f"🗑️ 批量删除笔记: {deleted} 个文件")
+
+    def _notes_batch_open(self, course_id):
+        selected = [k for k, v in self._notes_check_vars.items() if v.get()]
+        if not selected:
+            messagebox.showinfo("提示", "请先勾选要打开的笔记")
+            return
+
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+
+        opened = 0
+        for key in selected:
+            if key == "__course__":
+                path, _ = self.system.get_or_create_note(course_id, None)
+            else:
+                path, _ = self.system.get_or_create_note(course_id, key)
+            if path and path.exists():
+                open_file(str(path))
+                opened += 1
+
+        self._log(f"📂 批量打开笔记: {opened} 个文件")
+
+    def _refresh_notes_list(self, course_id):
+        self._build_notes_list_content(course_id)
 
     def _perform_detail_notes_search(self, course_id):
         """课程详情页笔记内容搜索"""
@@ -5599,49 +7230,7 @@ class CourseTrackerApp:
     
     def _rebuild_notes_list(self, course_id):
         """重新构建笔记列表"""
-        course = self.system.get_course_by_id(course_id)
-        if not course:
-            return
-        
-        title = course.get("course_title", "")
-        safe_title = re.sub(r'[\\/:*?"<>|]', '_', title)[:40]
-        notes_dir = BASE / "Notes" / safe_title
-        
-        course_note_path, _ = self.system.get_or_create_note(course_id, None)
-        row = ttk.Frame(self._notes_list_inner)
-        row.pack(fill=tk.X, pady=4, padx=4)
-        ttk.Label(row, text="📓", font=("Segoe UI Emoji", 16)).pack(side=tk.LEFT, padx=4)
-        ttk.Label(row, text="课程总笔记", font=("", 11, "bold")).pack(side=tk.LEFT, padx=4)
-        ttk.Label(row, text=str(course_note_path.relative_to(BASE)) if course_note_path else "",
-                  font=("", 8), foreground="#95a5a6").pack(side=tk.LEFT, padx=4)
-        ttk.Button(row, text="📝 打开",
-                   command=lambda: self._open_note(course_id, None)).pack(side=tk.RIGHT, padx=2)
-        ttk.Separator(self._notes_list_inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
-        
-        lessons = course.get("lessons", [])
-        if not lessons:
-            ttk.Label(self._notes_list_inner, text="暂无课时", font=("", 11), foreground="#95a5a6").pack(pady=20)
-            return
-        
-        existing_files = set()
-        if notes_dir.exists():
-            existing_files = {f.name for f in notes_dir.glob("*.Rmd")}
-        
-        for lesson in lessons:
-            lnum = lesson.get("lesson_number", 0)
-            ltitle = lesson.get("lesson_title", "")
-            safe_ltitle = re.sub(r'[\\/:*?"<>|]', '_', ltitle)[:30]
-            fn = f"L{lnum:02d}_{safe_ltitle}.Rmd" if ltitle else f"L{lnum:02d}.Rmd"
-            exists = fn in existing_files
-            
-            row = ttk.Frame(self._notes_list_inner)
-            row.pack(fill=tk.X, pady=3, padx=4)
-            icon = "✅" if exists else "⬜"
-            ttk.Label(row, text=icon, font=("", 12)).pack(side=tk.LEFT, padx=4)
-            ttk.Label(row, text=f"课时 {lnum}: {ltitle}", font=("", 10)).pack(side=tk.LEFT, fill=tk.X, expand=True)
-            ttk.Button(row, text="📝 打开/新建",
-                       command=lambda lnum=lnum: self._open_note(course_id, lnum)).pack(side=tk.RIGHT, padx=2)
-            ttk.Separator(self._notes_list_inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=1)
+        self._build_notes_list_content(course_id)
 
     def _build_course_note_preview(self, parent, course_id):
         """构建课程级笔记预览编辑器"""
@@ -5666,6 +7255,62 @@ class CourseTrackerApp:
                                                     command=self._toggle_course_note_mode)
         self._course_note_toggle_btn.pack(side=tk.LEFT, padx=2)
 
+        # Rmd三格式编译按钮
+        self._add_rmd_compile_buttons(
+            toolbar,
+            save_callback=self._save_course_note_preview,
+            get_file_path_callback=lambda: getattr(self, '_course_note_path', None)
+        )
+
+        # 第二行：工具栏（环境+公式）
+        env_toolbar = ttk.Frame(parent)
+        env_toolbar.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        # 环境下拉菜单
+        course_env_menu = tk.Menubutton(env_toolbar, text="📦 定理环境", relief=tk.RAISED)
+        course_env_menu.pack(side=tk.LEFT, padx=2)
+        course_env_menu.menu = tk.Menu(course_env_menu, tearoff=0)
+        course_env_menu["menu"] = course_env_menu.menu
+        course_env_menu.menu.add_command(label="📌 定义", command=lambda: self._insert_course_note_env("definition"))
+        course_env_menu.menu.add_command(label="📜 定理", command=lambda: self._insert_course_note_env("theorem"))
+        course_env_menu.menu.add_command(label="🎯 引理", command=lambda: self._insert_course_note_env("lemma"))
+        course_env_menu.menu.add_command(label="💡 推论", command=lambda: self._insert_course_note_env("corollary"))
+        course_env_menu.menu.add_command(label="📋 命题", command=lambda: self._insert_course_note_env("proposition"))
+        course_env_menu.menu.add_command(label="🏛️ 公理", command=lambda: self._insert_course_note_env("axiom"))
+        course_env_menu.menu.add_separator()
+        course_env_menu.menu.add_command(label="📝 例题", command=lambda: self._insert_course_note_env("example"))
+        course_env_menu.menu.add_command(label="❓ 问题", command=lambda: self._insert_course_note_env("problem"))
+        course_env_menu.menu.add_command(label="✅ 解答", command=lambda: self._insert_course_note_env("solution"))
+        course_env_menu.menu.add_command(label="📝 注解", command=lambda: self._insert_course_note_env("remark"))
+        course_env_menu.menu.add_command(label="🏋️ 练习", command=lambda: self._insert_course_note_env("exercise"))
+        course_env_menu.menu.add_command(label="📚 作业", command=lambda: self._insert_course_note_env("homework"))
+        course_env_menu.menu.add_separator()
+        course_env_menu.menu.add_command(label="📐 证明", command=lambda: self._insert_course_note_env("proof"))
+        course_env_menu.menu.add_command(label="📊 小结", command=lambda: self._insert_course_note_env("summary"))
+
+        # 公式下拉菜单
+        course_math_menu = tk.Menubutton(env_toolbar, text="📐 公式", relief=tk.RAISED)
+        course_math_menu.pack(side=tk.LEFT, padx=2)
+        course_math_menu.menu = tk.Menu(course_math_menu, tearoff=0)
+        course_math_menu["menu"] = course_math_menu.menu
+        course_math_menu.menu.add_command(label="$ 行内公式",
+            command=lambda: self._course_note_preview_editor.insert(tk.INSERT, "$ $") or self._course_note_preview_editor.mark_set("insert", f"{self._course_note_preview_editor.index(tk.INSERT)}-2c"))
+        course_math_menu.menu.add_command(label="$$ 行间公式",
+            command=lambda: self._course_note_preview_editor.insert(tk.INSERT, "\n$$\n\n$$\n") or self._course_note_preview_editor.mark_set("insert", f"{self._course_note_preview_editor.index(tk.INSERT)}-3c"))
+        course_math_menu.menu.add_separator()
+        course_math_menu.menu.add_command(label="分式",
+            command=lambda: self._course_note_preview_editor.insert(tk.INSERT, "\\frac{分子}{分母}"))
+        course_math_menu.menu.add_command(label="根号",
+            command=lambda: self._course_note_preview_editor.insert(tk.INSERT, "\\sqrt{x}"))
+        course_math_menu.menu.add_command(label="求和",
+            command=lambda: self._course_note_preview_editor.insert(tk.INSERT, "\\sum_{i=1}^{n}"))
+        course_math_menu.menu.add_command(label="积分",
+            command=lambda: self._course_note_preview_editor.insert(tk.INSERT, "\\int_{a}^{b} f(x) \\, dx"))
+        course_math_menu.menu.add_command(label="极限",
+            command=lambda: self._course_note_preview_editor.insert(tk.INSERT, "\\lim_{x \\to \\infty}"))
+        course_math_menu.menu.add_command(label="矩阵",
+            command=lambda: self._course_note_preview_editor.insert(tk.INSERT, "\\begin{pmatrix}\na & b \\\\\nc & d\n\\end{pmatrix}"))
+
         editor_frame = ttk.Frame(parent)
         editor_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
@@ -5679,6 +7324,9 @@ class CourseTrackerApp:
         self._course_note_preview_editor.configure(yscrollcommand=preview_scroll.set)
         self._course_note_preview_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 添加搜索/替换工具栏
+        self._add_search_replace_bar(parent, self._course_note_preview_editor)
 
         for tag, fg, bold in [
             ("yaml_delim", "#7f8c8d", True), ("heading", "#2c3e50", True),
@@ -5694,6 +7342,22 @@ class CourseTrackerApp:
         self._course_note_auto_save_timer = None
         self._course_note_preview_editor.bind("<<Modified>>", self._on_course_note_modified)
         self._course_note_preview_editor.bind("<FocusOut>", lambda e: self._do_course_note_auto_save_immediate())
+        
+        def _course_note_h1():
+            self._course_note_preview_editor.insert(tk.INSERT, "\n# 标题\n\n")
+            self._course_note_preview_editor.mark_set("insert", f"{self._course_note_preview_editor.index(tk.INSERT)}-5c")
+        def _course_note_h2():
+            self._course_note_preview_editor.insert(tk.INSERT, "\n## 标题\n\n")
+            self._course_note_preview_editor.mark_set("insert", f"{self._course_note_preview_editor.index(tk.INSERT)}-5c")
+        def _course_note_h3():
+            self._course_note_preview_editor.insert(tk.INSERT, "\n### 标题\n\n")
+            self._course_note_preview_editor.mark_set("insert", f"{self._course_note_preview_editor.index(tk.INSERT)}-5c")
+
+        self._course_note_preview_editor.bind("<Control-1>", lambda e: _course_note_h1())
+        self._course_note_preview_editor.bind("<Control-2>", lambda e: _course_note_h2())
+        self._course_note_preview_editor.bind("<Control-3>", lambda e: _course_note_h3())
+        # Ctrl+S 保存（与其他编辑器对齐）
+        self._course_note_preview_editor.bind("<Control-s>", lambda e: self._do_course_note_auto_save_immediate())
         
         self._course_note_status_var = tk.StringVar(value=f"📄 {course_note_path.name if course_note_path else '课程笔记'}")
         status_label = ttk.Label(parent, textvariable=self._course_note_status_var,
@@ -5743,6 +7407,31 @@ class CourseTrackerApp:
             self._course_note_status_var.set(f"✅ 自动保存 {datetime.now().strftime('%H:%M:%S')}")
         except Exception as e:
             self._course_note_status_var.set(f"❌ 保存失败")
+
+    def _insert_course_note_env(self, env_type):
+        """为课程详情笔记预览编辑器插入环境模板"""
+        if not hasattr(self, '_course_note_preview_editor'):
+            return
+        env_templates = {
+            "definition": '\n::: definition\n\n:::\n',
+            "theorem": '\n::: theorem\n\n:::\n',
+            "corollary": '\n::: corollary\n\n:::\n',
+            "lemma": '\n::: lemma\n\n:::\n',
+            "proposition": '\n::: proposition\n\n:::\n',
+            "axiom": '\n::: axiom\n\n:::\n',
+            "example": '\n::: example\n\n:::\n',
+            "problem": '\n::: problem\n\n:::\n',
+            "solution": '\n::: solution\n\n:::\n',
+            "remark": '\n::: remark\n\n:::\n',
+            "exercise": '\n::: exercise\n\n:::\n',
+            "homework": '\n::: homework\n\n:::\n',
+            "proof": '\n::: proof\n\n:::\n',
+            "summary": '\n::: summary\n\n:::\n',
+        }
+        tpl = env_templates.get(env_type, "")
+        if tpl:
+            self._course_note_preview_editor.insert(tk.INSERT, tpl)
+            self._course_note_preview_editor.see(tk.INSERT)
 
     def _extract_note_headers(self, content):
         """提取笔记中的YAML头和R配置块（返回 (yaml_header, r_blocks, cleaned_content)"""
@@ -5937,26 +7626,19 @@ class CourseTrackerApp:
         import re
         sections = re.split(r'(\n\n## 📌 课时 \d+:.+)', content)
         
-        course_content = sections[0].strip() if sections else ""
-        
-        # 检查并移除重复的yaml头（如果sections[0]包含多个---块）
-        import re as re2
-        yaml_matches = list(re2.finditer(r'---[\s\S]*?---', course_content))
-        if len(yaml_matches) > 1:
-            # 有多个yaml头，只保留第一个
-            first_yaml_end = yaml_matches[0].end()
-            course_content = course_content[first_yaml_end:]
-        
         course_note_path = self._course_note_path
         try:
             if course_note_path:
                 course_note_path.parent.mkdir(parents=True, exist_ok=True)
                 
-                # 检查course_content是否已经有完整头信息
-                course_yaml, course_r_blocks, _ = self._extract_note_headers(course_content)
+                # 使用完整的 content（课程笔记 + 所有课时内容）保存到课程文件
+                full_course_content = content
+                
+                # 检查是否已经有完整头信息
+                course_yaml, course_r_blocks, _ = self._extract_note_headers(full_course_content)
                 if course_yaml or course_r_blocks:
-                    # 已经有头，直接保存
-                    course_note_path.write_text(course_content, encoding="utf-8")
+                    # 已经有头，直接保存完整内容
+                    course_note_path.write_text(full_course_content, encoding="utf-8")
                 else:
                     # 没有头，需要添加
                     yaml_header = ""
@@ -5969,15 +7651,15 @@ class CourseTrackerApp:
                     
                     # 如果没有头信息，生成新的
                     if not yaml_header:
-                        yaml_str, _ = self.system.generate_note_yaml(course, None)
+                        yaml_str, _ = self.system.generate_note_yaml(course, None, note_dir=course_note_path.parent)
                         yaml_end = yaml_str.find('\n---\n', 4)
                         if yaml_end != -1:
                             yaml_header = yaml_str[:yaml_end + 5]
                     
-                    # 使用中间件恢复完整内容
-                    course_content = self._restore_note_headers(course_content, yaml_header, r_blocks)
+                    # 使用中间件恢复完整内容（含YAML头和R配置块）
+                    full_course_content = self._restore_note_headers(full_course_content, yaml_header, r_blocks)
                     
-                    course_note_path.write_text(course_content, encoding="utf-8")
+                    course_note_path.write_text(full_course_content, encoding="utf-8")
         except Exception as e:
             messagebox.showerror("保存失败", f"保存课程笔记失败: {str(e)}")
             return
@@ -5996,24 +7678,23 @@ class CourseTrackerApp:
                     try:
                         lesson_note_path.parent.mkdir(parents=True, exist_ok=True)
                         
-                        lesson_content = body.strip()
+                        # 将课时标题与正文合并，作为完整课时内容
+                        lesson_content = title.rstrip('\n') + body
                         
-                        # 检查并移除重复的yaml头（如果body包含多个---块）
-                        import re as re2
-                        yaml_matches = list(re2.finditer(r'^---\n[\s\S]*?\n---\n', lesson_content, re2.MULTILINE))
+                        # 检查并移除重复的yaml头
+                        yaml_matches = list(re.finditer(r'^---\n[\s\S]*?\n---\n', lesson_content, re.MULTILINE))
                         if len(yaml_matches) > 1:
                             first_yaml_end = yaml_matches[0].end()
                             lesson_content = lesson_content[first_yaml_end:]
                         
-                        # 检查body是否已经有完整头信息
+                        # 检查是否已经有完整头信息
                         body_yaml, body_r_blocks, body_cleaned = self._extract_note_headers(lesson_content)
                         if body_yaml or body_r_blocks:
-                            # body已经有头，使用它自己的内容（不再添加额外的头）
                             lesson_note_path.write_text(lesson_content, encoding="utf-8")
                             saved_count += 1
                             continue
                         
-                        # body没有头，需要添加
+                        # 没有头，需要添加
                         yaml_header = ""
                         r_blocks = []
                         
@@ -6022,7 +7703,6 @@ class CourseTrackerApp:
                             headers = self._lesson_note_headers[lnum]
                             yaml_header = headers['yaml_header']
                             r_blocks = headers['r_blocks']
-                        # 备用方案：从原文件读取
                         elif lesson_note_path.exists():
                             existing_content = lesson_note_path.read_text(encoding="utf-8")
                             yaml_header, r_blocks, _ = self._extract_note_headers(existing_content)
@@ -6031,14 +7711,14 @@ class CourseTrackerApp:
                         if not yaml_header:
                             lesson = self.system.get_lesson(self._course_note_cid, lnum)
                             if lesson:
-                                yaml_str, _ = self.system.generate_note_yaml(course, lesson)
+                                yaml_str, _ = self.system.generate_note_yaml(course, lesson, note_dir=lesson_note_path.parent)
                                 yaml_end = yaml_str.find('\n---\n', 4)
                                 if yaml_end != -1:
                                     yaml_header = yaml_str[:yaml_end + 5]
                             else:
                                 print(f"警告：未找到课时信息，lnum={lnum}")
                         
-                        # 使用中间件恢复完整内容
+                        # 使用中间件恢复完整内容（含YAML头和R配置块）
                         lesson_content = self._restore_note_headers(lesson_content, yaml_header, r_blocks)
                         
                         lesson_note_path.write_text(lesson_content, encoding="utf-8")
@@ -6122,12 +7802,17 @@ class CourseTrackerApp:
 
     def _show_notes_page(self):
         """笔记管理页面"""
-        self._clear_content()
-        self._highlight_nav("notes")
+        if not getattr(self, '_building_tab', False):
+            self._clear_content()
+            self._highlight_nav("notes")
         self.nav_title.config(text="笔记管理")
 
-        ttk.Label(self.content_frame, text="📝 课程笔记 (Rmd)",
-                  font=("", 14, "bold"), foreground="#2C3E50").pack(anchor="w", padx=10, pady=(10, 2))
+        # 顶部工具栏
+        notes_top = ttk.Frame(self.content_frame)
+        notes_top.pack(fill=tk.X, padx=10, pady=(10, 2))
+        ttk.Label(notes_top, text="📝 课程笔记 (Rmd)",
+                  font=("", 14, "bold"), foreground="#2C3E50").pack(side=tk.LEFT)
+        self._add_specialist_button(notes_top, "note", style="Accent.TButton")
         ttk.Label(self.content_frame, text="为课时生成 R Markdown 笔记文件，含 YAML front-matter 适配 RStudio 渲染",
                   font=("", 9), foreground="#7F8C8D").pack(anchor="w", padx=10, pady=(0, 6))
 
@@ -6218,8 +7903,65 @@ class CourseTrackerApp:
         self._notes_page_toggle_btn = ttk.Button(notes_toolbar, text="👁️ 预览模式",
                                                     command=self._toggle_notes_page_mode)
         self._notes_page_toggle_btn.pack(side=tk.LEFT, padx=2)
+
+        # Rmd三格式编译按钮
+        self._add_rmd_compile_buttons(
+            notes_toolbar,
+            save_callback=self._save_notes_page_preview,
+            get_file_path_callback=lambda: getattr(self, '_notes_page_path', None)
+        )
+
         self._notes_page_preview_mode = True  # 默认预览模式
         self._notes_page_full_content = ""  # 保存完整内容
+
+        # 第二行：工具栏（环境+公式）
+        notes_env_toolbar = ttk.Frame(right_frame)
+        notes_env_toolbar.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        # 环境下拉菜单
+        notes_env_menu = tk.Menubutton(notes_env_toolbar, text="📦 定理环境", relief=tk.RAISED)
+        notes_env_menu.pack(side=tk.LEFT, padx=2)
+        notes_env_menu.menu = tk.Menu(notes_env_menu, tearoff=0)
+        notes_env_menu["menu"] = notes_env_menu.menu
+        notes_env_menu.menu.add_command(label="📌 定义", command=lambda: self._insert_notes_page_env("definition"))
+        notes_env_menu.menu.add_command(label="📜 定理", command=lambda: self._insert_notes_page_env("theorem"))
+        notes_env_menu.menu.add_command(label="🎯 引理", command=lambda: self._insert_notes_page_env("lemma"))
+        notes_env_menu.menu.add_command(label="💡 推论", command=lambda: self._insert_notes_page_env("corollary"))
+        notes_env_menu.menu.add_command(label="📋 命题", command=lambda: self._insert_notes_page_env("proposition"))
+        notes_env_menu.menu.add_command(label="🏛️ 公理", command=lambda: self._insert_notes_page_env("axiom"))
+        notes_env_menu.menu.add_separator()
+        notes_env_menu.menu.add_command(label="📝 例题", command=lambda: self._insert_notes_page_env("example"))
+        notes_env_menu.menu.add_command(label="❓ 问题", command=lambda: self._insert_notes_page_env("problem"))
+        notes_env_menu.menu.add_command(label="✅ 解答", command=lambda: self._insert_notes_page_env("solution"))
+        notes_env_menu.menu.add_command(label="📝 注解", command=lambda: self._insert_notes_page_env("remark"))
+        notes_env_menu.menu.add_command(label="🏋️ 练习", command=lambda: self._insert_notes_page_env("exercise"))
+        notes_env_menu.menu.add_command(label="📚 作业", command=lambda: self._insert_notes_page_env("homework"))
+        notes_env_menu.menu.add_separator()
+        notes_env_menu.menu.add_command(label="📐 证明", command=lambda: self._insert_notes_page_env("proof"))
+        notes_env_menu.menu.add_command(label="📊 小结", command=lambda: self._insert_notes_page_env("summary"))
+
+        # 公式下拉菜单
+        notes_math_menu = tk.Menubutton(notes_env_toolbar, text="📐 公式", relief=tk.RAISED)
+        notes_math_menu.pack(side=tk.LEFT, padx=2)
+        notes_math_menu.menu = tk.Menu(notes_math_menu, tearoff=0)
+        notes_math_menu["menu"] = notes_math_menu.menu
+        notes_math_menu.menu.add_command(label="$ 行内公式",
+            command=lambda: self._notes_page_editor.insert(tk.INSERT, "$ $") or self._notes_page_editor.mark_set("insert", f"{self._notes_page_editor.index(tk.INSERT)}-2c"))
+        notes_math_menu.menu.add_command(label="$$ 行间公式",
+            command=lambda: self._notes_page_editor.insert(tk.INSERT, "\n$$\n\n$$\n") or self._notes_page_editor.mark_set("insert", f"{self._notes_page_editor.index(tk.INSERT)}-3c"))
+        notes_math_menu.menu.add_separator()
+        notes_math_menu.menu.add_command(label="分式",
+            command=lambda: self._notes_page_editor.insert(tk.INSERT, "\\frac{分子}{分母}"))
+        notes_math_menu.menu.add_command(label="根号",
+            command=lambda: self._notes_page_editor.insert(tk.INSERT, "\\sqrt{x}"))
+        notes_math_menu.menu.add_command(label="求和",
+            command=lambda: self._notes_page_editor.insert(tk.INSERT, "\\sum_{i=1}^{n}"))
+        notes_math_menu.menu.add_command(label="积分",
+            command=lambda: self._notes_page_editor.insert(tk.INSERT, "\\int_{a}^{b} f(x) \\, dx"))
+        notes_math_menu.menu.add_command(label="极限",
+            command=lambda: self._notes_page_editor.insert(tk.INSERT, "\\lim_{x \\to \\infty}"))
+        notes_math_menu.menu.add_command(label="矩阵",
+            command=lambda: self._notes_page_editor.insert(tk.INSERT, "\\begin{pmatrix}\na & b \\\\\nc & d\n\\end{pmatrix}"))
 
         notes_editor_frame = ttk.Frame(right_frame)
         notes_editor_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -6235,6 +7977,9 @@ class CourseTrackerApp:
         self._notes_page_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         notes_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # 添加搜索/替换工具栏
+        self._add_search_replace_bar(right_frame, self._notes_page_editor)
+
         for tag, fg, bold in [
             ("yaml_delim", "#7f8c8d", True), ("heading", "#2c3e50", True),
             ("heading2", "#34495e", True), ("code_block", "#27ae60", False),
@@ -6249,6 +7994,22 @@ class CourseTrackerApp:
         self._notes_page_auto_save_timer = None
         self._notes_page_editor.bind("<<Modified>>", self._on_notes_page_modified)
         self._notes_page_editor.bind("<FocusOut>", lambda e: self._do_notes_page_auto_save_immediate())
+        
+        def _notes_page_h1():
+            self._notes_page_editor.insert(tk.INSERT, "\n# 标题\n\n")
+            self._notes_page_editor.mark_set("insert", f"{self._notes_page_editor.index(tk.INSERT)}-5c")
+        def _notes_page_h2():
+            self._notes_page_editor.insert(tk.INSERT, "\n## 标题\n\n")
+            self._notes_page_editor.mark_set("insert", f"{self._notes_page_editor.index(tk.INSERT)}-5c")
+        def _notes_page_h3():
+            self._notes_page_editor.insert(tk.INSERT, "\n### 标题\n\n")
+            self._notes_page_editor.mark_set("insert", f"{self._notes_page_editor.index(tk.INSERT)}-5c")
+
+        self._notes_page_editor.bind("<Control-1>", lambda e: _notes_page_h1())
+        self._notes_page_editor.bind("<Control-2>", lambda e: _notes_page_h2())
+        self._notes_page_editor.bind("<Control-3>", lambda e: _notes_page_h3())
+        # Ctrl+S 保存（与其他编辑器对齐）
+        self._notes_page_editor.bind("<Control-s>", lambda e: self._do_notes_page_auto_save_immediate())
         
         self._notes_page_status_var = tk.StringVar(value="📄 选择课程查看笔记")
         status_label = ttk.Label(right_frame, textvariable=self._notes_page_status_var,
@@ -6300,6 +8061,31 @@ class CourseTrackerApp:
             self._notes_page_status_var.set(f"✅ 自动保存 {datetime.now().strftime('%H:%M:%S')}")
         except Exception as e:
             self._notes_page_status_var.set(f"❌ 保存失败")
+
+    def _insert_notes_page_env(self, env_type):
+        """为主页面笔记预览编辑器插入环境模板"""
+        if not hasattr(self, '_notes_page_editor'):
+            return
+        env_templates = {
+            "definition": '\n::: definition\n\n:::\n',
+            "theorem": '\n::: theorem\n\n:::\n',
+            "corollary": '\n::: corollary\n\n:::\n',
+            "lemma": '\n::: lemma\n\n:::\n',
+            "proposition": '\n::: proposition\n\n:::\n',
+            "axiom": '\n::: axiom\n\n:::\n',
+            "example": '\n::: example\n\n:::\n',
+            "problem": '\n::: problem\n\n:::\n',
+            "solution": '\n::: solution\n\n:::\n',
+            "remark": '\n::: remark\n\n:::\n',
+            "exercise": '\n::: exercise\n\n:::\n',
+            "homework": '\n::: homework\n\n:::\n',
+            "proof": '\n::: proof\n\n:::\n',
+            "summary": '\n::: summary\n\n:::\n',
+        }
+        tpl = env_templates.get(env_type, "")
+        if tpl:
+            self._notes_page_editor.insert(tk.INSERT, tpl)
+            self._notes_page_editor.see(tk.INSERT)
 
     def _perform_notes_content_search(self):
         """执行笔记内容搜索"""
@@ -6447,6 +8233,7 @@ class CourseTrackerApp:
         self._lesson_note_headers = {}
         
         course_note_path, _ = self.system.get_or_create_note(course_id, None)
+        self._notes_page_path = course_note_path
         if course_note_path and course_note_path.exists():
             try:
                 content = course_note_path.read_text(encoding="utf-8")
@@ -6606,7 +8393,7 @@ class CourseTrackerApp:
                         yaml_header, r_blocks, _ = self._extract_note_headers(existing_content)
                     
                     if not yaml_header:
-                        yaml_str, _ = self.system.generate_note_yaml(course, None)
+                        yaml_str, _ = self.system.generate_note_yaml(course, None, note_dir=course_note_path.parent)
                         yaml_end = yaml_str.find('\n---\n', 4)
                         if yaml_end != -1:
                             yaml_header = yaml_str[:yaml_end + 5]
@@ -6655,7 +8442,7 @@ class CourseTrackerApp:
                         if not yaml_header:
                             lesson = self.system.get_lesson(self._notes_page_cid, lnum)
                             if lesson:
-                                yaml_str, _ = self.system.generate_note_yaml(course, lesson)
+                                yaml_str, _ = self.system.generate_note_yaml(course, lesson, note_dir=lesson_note_path.parent)
                                 yaml_end = yaml_str.find('\n---\n', 4)
                                 if yaml_end != -1:
                                     yaml_header = yaml_str[:yaml_end + 5]
@@ -6751,57 +8538,107 @@ class CourseTrackerApp:
     # ============ 课程资源页 (全局) ============
 
     def _show_resource_page(self):
-        """全局资源管理页面"""
+        """全局资源管理页面 — 左栏课程卡片 + 右栏全量资源列表"""
         self._clear_content()
         self._highlight_nav("resource")
         self.nav_title.config(text="课程资源")
 
-        ttk.Label(self.content_frame, text="🔗 选择课程查看和管理资源",
-                  style="Heading.TLabel").pack(pady=10)
+        # 主区域：左右分栏
+        main_paned = tk.PanedWindow(self.content_frame, orient=tk.HORIZONTAL,
+                                     sashrelief=tk.RAISED, sashwidth=4)
+        main_paned.pack(fill=tk.BOTH, expand=True)
+
+        # ===== 左栏：原有课程卡片 + 操作栏 =====
+        left_frame = ttk.Frame(main_paned, padding=6)
+        main_paned.add(left_frame, width=500)
+
+        ttk.Label(left_frame, text="📚 课程", font=("", 11, "bold")).pack(anchor="w", pady=(0, 4))
 
         # 全局批量操作栏
-        batch_bar = ttk.Frame(self.content_frame)
-        batch_bar.pack(fill=tk.X, padx=10, pady=(0, 5))
-        ttk.Button(batch_bar, text="📁 批量导入文件到课程",
-                   command=self._batch_import_files_global).pack(side=tk.LEFT, padx=3)
-        ttk.Button(batch_bar, text="📂 从目录批量导入",
-                   command=self._batch_import_dir_global).pack(side=tk.LEFT, padx=3)
-        ttk.Button(batch_bar, text="📋 手动分配导入",
-                   command=lambda: self._manual_batch_import()).pack(side=tk.LEFT, padx=3)
+        batch_bar = ttk.Frame(left_frame)
+        batch_bar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(batch_bar, text="📁 批量导入文件",
+                   command=self._batch_import_files_global).pack(side=tk.LEFT, padx=2)
+        ttk.Button(batch_bar, text="📂 从目录导入",
+                   command=self._batch_import_dir_global).pack(side=tk.LEFT, padx=2)
+        ttk.Button(batch_bar, text="📋 手动分配",
+                   command=lambda: self._manual_batch_import()).pack(side=tk.LEFT, padx=2)
 
-        # ── 搜索栏 ──
-        search_bar = ttk.Frame(self.content_frame)
-        search_bar.pack(fill=tk.X, padx=10, pady=(0, 5))
-        ttk.Label(search_bar, text="🔍 搜索：", font=("", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        # 搜索栏
+        search_bar = ttk.Frame(left_frame)
+        search_bar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(search_bar, text="🔍", font=("", 9)).pack(side=tk.LEFT)
         self._resource_search_var = tk.StringVar()
         self._resource_search_var.trace_add("write", lambda *args: self._refresh_resource_cards())
         resource_search_entry = ttk.Entry(search_bar, textvariable=self._resource_search_var)
-        resource_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        resource_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2))
         ttk.Button(search_bar, text="✕", width=3,
                    command=lambda: (self._resource_search_var.set(""), resource_search_entry.focus())).pack(side=tk.RIGHT)
 
-        # ── 域过滤栏 ──
-        filter_bar = ttk.Frame(self.content_frame)
-        filter_bar.pack(fill=tk.X, padx=10, pady=(0, 5))
-        ttk.Label(filter_bar, text="按域过滤：", font=("", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
-
+        # 域过滤
+        filter_bar = ttk.Frame(left_frame)
+        filter_bar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(filter_bar, text="域过滤：", font=("", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
         existing_domains = sorted(set(c.get("domain", "UNKNOWN") for c in self.system.courses))
         self._resource_filter_vars = {}
         all_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(filter_bar, text="全部", variable=all_var,
-                        command=lambda: self._toggle_resource_filter_all(all_var)).pack(side=tk.LEFT, padx=3)
-
+                        command=lambda: self._toggle_resource_filter_all(all_var)).pack(side=tk.LEFT, padx=2)
         for domain in existing_domains:
             dn = DOMAIN_NAMES.get(domain, domain)
             var = tk.BooleanVar(value=True)
             self._resource_filter_vars[domain] = var
             ttk.Checkbutton(filter_bar, text=f"{dn}", variable=var,
-                            command=lambda: self._refresh_resource_cards()).pack(side=tk.LEFT, padx=3)
+                            command=lambda: self._refresh_resource_cards()).pack(side=tk.LEFT, padx=2)
 
-        # 课程列表 — 独立容器以便刷新
-        self._resource_cards_container = ttk.Frame(self.content_frame)
+        # 课程卡片容器
+        self._resource_cards_container = ttk.Frame(left_frame)
         self._resource_cards_container.pack(fill=tk.BOTH, expand=True)
         self._build_resource_cards(self._resource_cards_container)
+
+        # ===== 右栏：全量资源列表 =====
+        right_frame = ttk.Frame(main_paned, padding=6)
+        main_paned.add(right_frame, width=600)
+
+        ttk.Label(right_frame, text="🔗 全部资源", font=("", 11, "bold")).pack(anchor="w", pady=(0, 4))
+
+        # 资源搜索过滤
+        res_search_bar = ttk.Frame(right_frame)
+        res_search_bar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(res_search_bar, text="🔍 过滤：", font=("", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        self._resource_detail_search_var = tk.StringVar()
+        self._resource_detail_search_var.trace_add("write", lambda *args: self._refresh_resource_detail_list())
+        res_search_entry = ttk.Entry(res_search_bar, textvariable=self._resource_detail_search_var)
+        res_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(res_search_bar, text="✕", width=3,
+                   command=lambda: (self._resource_detail_search_var.set(""), res_search_entry.focus())).pack(side=tk.RIGHT)
+
+        # 资源 Treeview（全量呈现，忠实显示）
+        tree_frame = ttk.Frame(right_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("course", "lesson", "type", "label", "path")
+        self._resource_detail_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=30)
+        self._resource_detail_tree.heading("course", text="课程")
+        self._resource_detail_tree.heading("lesson", text="课时")
+        self._resource_detail_tree.heading("type", text="类型")
+        self._resource_detail_tree.heading("label", text="名称")
+        self._resource_detail_tree.heading("path", text="路径/链接")
+        self._resource_detail_tree.column("course", width=100)
+        self._resource_detail_tree.column("lesson", width=50, anchor="center")
+        self._resource_detail_tree.column("type", width=50, anchor="center")
+        self._resource_detail_tree.column("label", width=200)
+        self._resource_detail_tree.column("path", width=300)
+
+        tree_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self._resource_detail_tree.yview)
+        self._resource_detail_tree.configure(yscrollcommand=tree_scroll.set)
+        self._resource_detail_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 双击默认打开
+        self._resource_detail_tree.bind("<Double-1>", self._on_resource_detail_open)
+
+        self._refresh_resource_detail_list()
 
     def _toggle_resource_filter_all(self, all_var):
         """全选/取消全选资源页域过滤"""
@@ -6867,6 +8704,63 @@ class CourseTrackerApp:
             ttk.Button(card, text="📖 查看资源",
                        command=lambda cid=cid: self._show_course_detail(cid)).pack(side=tk.RIGHT, padx=10, pady=5)
 
+            # 右键菜单
+            self._bind_course_card_right_click(card, cid, title, domain)
+
+    def _refresh_resource_detail_list(self):
+        """刷新右栏全量资源列表（搜索过滤 + 忠实呈现）"""
+        tree = getattr(self, '_resource_detail_tree', None)
+        if tree is None:
+            return
+
+        # 清空
+        for item in tree.get_children():
+            tree.delete(item)
+
+        # 搜索过滤
+        search_query = getattr(self, '_resource_detail_search_var', tk.StringVar(value="")).get().strip().lower()
+
+        # 遍历所有课程的所有资源
+        for c in self.system.courses:
+            cid = c.get("note_id", c.get("course_title", ""))
+            course_title = c.get("course_title", "")
+            for res in self.system.rmgr.get(cid):
+                label = res.get("label", "")
+                rtype = res.get("type", "")
+                ln = res.get("lesson_number", "")
+                path = res.get("path", res.get("url", ""))
+
+                # 搜索过滤
+                if search_query:
+                    match_text = f"{course_title} {label} {rtype} {ln} {path}".lower()
+                    if search_query not in match_text:
+                        continue
+
+                tree.insert("", "end", values=(
+                    course_title,
+                    f"L{ln}" if ln else "—",
+                    rtype,
+                    label,
+                    path,
+                ))
+
+    def _on_resource_detail_open(self, event):
+        """双击资源行，按默认方式打开"""
+        sel = self._resource_detail_tree.selection()
+        if not sel:
+            return
+        item = self._resource_detail_tree.item(sel[0])
+        path = item["values"][4]  # 最后一列是路径/链接
+        rtype = item["values"][2]
+
+        if rtype == "url":
+            self._open_url(path)
+        elif path and Path(path).exists():
+            if rtype == "pdf":
+                self._open_resource_pdf(path)
+            else:
+                open_file(path)
+
     # ============ 导入与管理页 ============
 
     def _show_management_page(self):
@@ -6904,6 +8798,8 @@ class CourseTrackerApp:
         ttk.Button(bf2, text="🔍 检测重复", command=self._show_duplicates).pack(side=tk.LEFT, padx=3)
         ttk.Button(bf2, text="🗑️ 批量删除", command=self._show_batch_delete).pack(side=tk.LEFT, padx=3)
         ttk.Button(bf2, text="📋 表格视图", command=self._show_tree_editor).pack(side=tk.LEFT, padx=3)
+        ttk.Button(bf2, text="🔄 批量改域", command=self._show_batch_edit_domain).pack(side=tk.LEFT, padx=3)
+        ttk.Button(bf2, text="📤 导出选中", command=self._show_export_selected).pack(side=tk.LEFT, padx=3)
         # 当前数据库文件
         ttk.Label(self.content_frame, text="\n当前数据库文件：",
                   font=("", 11, "bold")).pack(anchor="w", padx=10)
@@ -7300,10 +9196,13 @@ class CourseTrackerApp:
             domain = "UNKNOWN"
 
         course = self.system.create_course(title, domain)
-        target = simpledialog.askstring("保存到", "目标JSON文件名：", initialvalue="courses_structured.json")
+        # 默认保存到系统目录
+        ts2_dir = Path.home() / ".ts2"
+        ts2_dir.mkdir(exist_ok=True)
+        target = simpledialog.askstring("保存到", "目标JSON文件名：", initialvalue=str(ts2_dir / "courses_structured.json"))
         if not target:
             return
-        tp = BASE / target
+        tp = Path(target)
         existing = load_json_safe(tp) or {"metadata": {}, "courses": []}
         if "courses" not in existing:
             existing["courses"] = []
@@ -7323,41 +9222,99 @@ class CourseTrackerApp:
         course = self.system.get_course_by_id(cid)
         if not course:
             return
-        title = course.get("course_title", "")
+        old_title = course.get("course_title", "")
 
-        # 导出到临时文件编辑
-        tmp = BASE / f"__edit_{title[:15].replace('/', '_')}.json"
-        tmp.write_text(json.dumps(course, ensure_ascii=False, indent=2), encoding="utf-8")
-        open_file(str(tmp))
+        dlg = tk.Toplevel(self.root)
+        dlg.title("✏️ 编辑课程信息")
+        dlg.geometry("550x520")
+        dlg.transient(self.root)
+        dlg.grab_set()
 
-        if messagebox.askyesno("确认", "编辑完成点击「是」导入修改？"):
-            edited = load_json_safe(tmp)
-            if edited and validate_course_json({"courses": [edited]})[0]:
-                # 更新到源文件
-                for p in self.system.db_paths:
-                    data = load_json_safe(p)
-                    if not data:
-                        continue
-                    for ci, c in enumerate(data.get("courses", [])):
-                        if c.get("note_id") == cid or c.get("course_title") == title:
-                            data["courses"][ci] = edited
-                            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-                            self.system.reload_all_sources()
-                            messagebox.showinfo("成功", f"《{title}》已更新")
-                            self._log(f"✅ 编辑完成: 《{title}》")
-                            self._refresh_all()
-                            tmp.unlink(missing_ok=True)
-                            return
-                messagebox.showerror("错误", "未找到该课程在数据库中的记录")
-            else:
-                messagebox.showerror("错误", "JSON 格式错误，未保存")
-            tmp.unlink(missing_ok=True)
+        ttk.Label(dlg, text=f"编辑：{old_title}",
+                  font=("", 13, "bold")).pack(pady=10)
+
+        form_frame = ttk.Frame(dlg, padding=15)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+
+        fields = {}
+        row = 0
+        for label, key, value in [
+            ("课程名称", "title", course.get("course_title", "")),
+            ("学科域", "domain", course.get("domain", "UNKNOWN")),
+            ("总课时", "hours", str(course.get("total_hours", "") or "")),
+            ("授课对象", "audience", course.get("target_audience", "")),
+            ("考核方式", "assessment", course.get("assessment", "")),
+            ("课程定位", "positioning", course.get("positioning", "")),
+        ]:
+            ttk.Label(form_frame, text=f"{label}：").grid(row=row, column=0, sticky="e", pady=5)
+            var = tk.StringVar(value=str(value))
+            entry = ttk.Entry(form_frame, textvariable=var, width=35)
+            entry.grid(row=row, column=1, sticky="w", pady=5, padx=5)
+            fields[key] = var
+            row += 1
+
+        ttk.Label(form_frame, text="先修课程：").grid(row=row, column=0, sticky="ne", pady=5)
+        prereq_frame = ttk.Frame(form_frame)
+        prereq_frame.grid(row=row, column=1, sticky="w", pady=5, padx=5)
+        prereq_var = tk.StringVar(value=", ".join(course.get("prerequisites", [])))
+        ttk.Entry(prereq_frame, textvariable=prereq_var, width=35).pack()
+        ttk.Label(prereq_frame, text="多个用逗号分隔", font=("", 8), foreground="#888").pack()
+        row += 1
+
+        ttk.Label(form_frame, text="课程描述：").grid(row=row, column=0, sticky="ne", pady=5)
+        desc_text = tk.Text(form_frame, width=35, height=4, font=("", 10))
+        desc_text.insert("1.0", course.get("description", ""))
+        desc_text.grid(row=row, column=1, sticky="w", pady=5, padx=5)
+        row += 1
+
+        btn_frame = ttk.Frame(dlg, padding=10)
+        btn_frame.pack(fill=tk.X)
+
+        def _save():
+            title = fields["title"].get().strip()
+            if not title:
+                messagebox.showwarning("警告", "课程名称不能为空", parent=dlg)
+                return
+
+            course["course_title"] = title
+            course["domain"] = fields["domain"].get().strip() or "UNKNOWN"
+            hours_str = fields["hours"].get().strip()
+            course["total_hours"] = int(hours_str) if hours_str.isdigit() else None
+            course["target_audience"] = fields["audience"].get().strip()
+            course["assessment"] = fields["assessment"].get().strip()
+            course["positioning"] = fields["positioning"].get().strip()
+            course["prerequisites"] = [p.strip() for p in prereq_var.get().split(",") if p.strip()]
+            course["description"] = desc_text.get("1.0", tk.END).strip()
+
+            for p in self.system.db_paths:
+                data = load_json_safe(p)
+                if not data:
+                    continue
+                for ci, c in enumerate(data.get("courses", [])):
+                    if c.get("note_id") == cid:
+                        data["courses"][ci] = course
+                        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                        break
+                    elif c.get("course_title") == old_title and not c.get("note_id"):
+                        data["courses"][ci] = course
+                        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                        break
+
+            self.system.reload_all_sources()
+            self._rename_note_on_title_change(course, old_title)
+            dlg.destroy()
+            messagebox.showinfo("成功", f"《{title}》已更新")
+            self._log(f"✅ 编辑完成: 《{title}》")
+            self._refresh_all()
+
+        ttk.Button(btn_frame, text="💾 保存", command=_save).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="❌ 取消", command=dlg.destroy).pack(side=tk.LEFT)
 
     def _refresh_all(self):
         """全局刷新"""
         self.system.reload_all_sources()
         self._update_overall_label()
-        self._show_overview()
+        self._invalidate_and_switch("overview", self._build_overview_tab)
         try:
             self._update_db_ui()
         except (tk.TclError, AttributeError):
@@ -7367,88 +9324,149 @@ class CourseTrackerApp:
 
     def _show_execution_mode(self, course_id: str = None):
         """执行模式：按顺序完成课时，完成一个消除一个，弹出下一步"""
-        self._clear_content()
+        # 检查是否有执行模式快照可恢复
+        snap = getattr(self, '_exec_snapshot', None)
+        if course_id is None and snap:
+            saved_cid = snap.get("course_id")
+            if saved_cid:
+                self._clear_exec_snapshot()
+                course_id = saved_cid
+
+        if course_id:
+            # 单课程执行模式 — 使用缓存标签页（key 包含课程ID）
+            tab_key = f"exec_{course_id}"
+            self._current_exec_course_id = course_id
+            self._switch_to_tab(tab_key, lambda: self._build_execution_tab(course_id))
+        else:
+            # 选择课程页面 — 使用缓存标签页
+            self._switch_to_tab("exec_select", self._build_exec_select_tab)
+
+    def _build_exec_select_tab(self):
+        """构建执行模式-选择课程页面（缓存标签页）"""
         self._highlight_nav("exec")
+        self.nav_title.config(text="执行模式 - 选择课程")
 
-        if course_id is None:
-            # 选择课程
-            self.nav_title.config(text="执行模式 - 选择课程")
+        # 顶部统计汇总
+        summary_frame = ttk.Frame(self.content_frame)
+        summary_frame.pack(fill=tk.X, pady=(10, 5))
 
-            # 顶部统计汇总
-            summary_frame = ttk.Frame(self.content_frame)
-            summary_frame.pack(fill=tk.X, pady=(10, 15))
+        total_courses = len(self.system.courses)
+        completed_courses = 0
+        in_progress_courses = 0
+        total_lessons_all = 0
+        completed_lessons_all = 0
+        total_hours_all = 0
 
-            total_courses = len(self.system.courses)
-            completed_courses = 0
-            in_progress_courses = 0
-            total_lessons_all = 0
-            completed_lessons_all = 0
-            total_hours_all = 0
+        for c in self.system.courses:
+            cid = c.get("note_id", c.get("course_title", ""))
+            lessons = c.get("lessons", [])
+            total_lessons = len(lessons)
+            completed = set(self.system.get_course_progress(cid).get("completed_lessons", []))
+            completed_count = len(completed)
+            total_lessons_all += total_lessons
+            completed_lessons_all += completed_count
+            total_hours_all += sum(l.get("estimated_hours", 0) for l in lessons)
+            if completed_count == total_lessons and total_lessons > 0:
+                completed_courses += 1
+            elif completed_count > 0:
+                in_progress_courses += 1
 
-            for c in self.system.courses:
-                cid = c.get("note_id", c.get("course_title", ""))
-                lessons = c.get("lessons", [])
-                total_lessons = len(lessons)
-                completed = set(self.system.get_course_progress(cid).get("completed_lessons", []))
-                completed_count = len(completed)
-                total_lessons_all += total_lessons
-                completed_lessons_all += completed_count
-                total_hours_all += sum(l.get("estimated_hours", 0) for l in lessons)
-                if completed_count == total_lessons and total_lessons > 0:
-                    completed_courses += 1
-                elif completed_count > 0:
-                    in_progress_courses += 1
+        summary_cards = [
+            ("📚 总课程", f"{total_courses} 门"),
+            ("✅ 已完成", f"{completed_courses} 门"),
+            ("⏳ 进行中", f"{in_progress_courses} 门"),
+            ("📝 总课时", f"{total_lessons_all} 节"),
+            ("📖 已学课时", f"{completed_lessons_all} 节"),
+            ("⏱️ 总时长", f"{total_hours_all:.1f} 小时"),
+        ]
+        for label_text, value_text in summary_cards:
+            card = ttk.LabelFrame(summary_frame, text=label_text, padding=(10, 5))
+            card.pack(side=tk.LEFT, padx=5, pady=2)
+            ttk.Label(card, text=value_text, font=("", 11, "bold")).pack()
 
-            summary_cards = [
-                ("📚 总课程", f"{total_courses} 门"),
-                ("✅ 已完成", f"{completed_courses} 门"),
-                ("⏳ 进行中", f"{in_progress_courses} 门"),
-                ("📝 总课时", f"{total_lessons_all} 节"),
-                ("📖 已学课时", f"{completed_lessons_all} 节"),
-                ("⏱️ 总时长", f"{total_hours_all:.1f} 小时"),
-            ]
-            for label_text, value_text in summary_cards:
-                card = ttk.LabelFrame(summary_frame, text=label_text, padding=(10, 5))
-                card.pack(side=tk.LEFT, padx=5, pady=2)
-                ttk.Label(card, text=value_text, font=("", 11, "bold")).pack()
+        # 主区域：左卡片 + 右日志
+        main_paned = tk.PanedWindow(self.content_frame, orient=tk.HORIZONTAL,
+                                     sashrelief=tk.RAISED, sashwidth=4)
+        main_paned.pack(fill=tk.BOTH, expand=True, pady=5)
 
-            # 搜索栏
-            search_frame = ttk.Frame(self.content_frame)
-            search_frame.pack(fill=tk.X, padx=5, pady=(5, 10))
-            ttk.Label(search_frame, text="🔍 搜索：", font=("", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
-            if not hasattr(self, '_exec_search_var'):
-                self._exec_search_var = tk.StringVar(self.root)
-            self._exec_search_var.trace_add("write", lambda *args: self._refresh_exec_cards())
-            search_entry = ttk.Entry(search_frame, textvariable=self._exec_search_var)
-            search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-            ttk.Button(search_frame, text="清除", width=8,
-                       command=lambda: (self._exec_search_var.set(""), search_entry.focus())).pack(side=tk.RIGHT)
+        # 左侧：课程卡片 + 搜索
+        left_frame = ttk.Frame(main_paned, padding=2)
+        main_paned.add(left_frame, width=700)
 
-            ttk.Label(self.content_frame, text="选择要继续的课程：", style="Heading.TLabel").pack(anchor="w", padx=10, pady=(5, 5))
+        # 搜索栏
+        search_frame = ttk.Frame(left_frame)
+        search_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Label(search_frame, text="🔍 搜索：", font=("", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        if not hasattr(self, '_exec_search_var'):
+            self._exec_search_var = tk.StringVar(self.root)
+        self._exec_search_var.trace_add("write", lambda *args: self._refresh_exec_cards())
+        search_entry = ttk.Entry(search_frame, textvariable=self._exec_search_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(search_frame, text="清除", width=8,
+                   command=lambda: (self._exec_search_var.set(""), search_entry.focus())).pack(side=tk.RIGHT)
 
-            cards = ttk.Frame(self.content_frame)
-            cards.pack(fill=tk.BOTH, expand=True, padx=5)
+        # 标题和专家按钮
+        title_top = ttk.Frame(left_frame)
+        title_top.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Label(title_top, text="选择要继续的课程：", style="Heading.TLabel").pack(side=tk.LEFT)
+        self._add_specialist_button(title_top, "course", style="Accent.TButton")
 
-            self._exec_canvas = tk.Canvas(cards, highlightthickness=0)
-            scrollbar = ttk.Scrollbar(cards, orient="vertical", command=self._exec_canvas.yview)
-            self._exec_scroll_frame = ttk.Frame(self._exec_canvas)
-            self._exec_scroll_frame.bind("<Configure>", lambda e: self._exec_canvas.configure(scrollregion=self._exec_canvas.bbox("all")))
-            self._exec_canvas.create_window((0, 0), window=self._exec_scroll_frame, anchor="nw")
-            self._exec_canvas.configure(yscrollcommand=scrollbar.set)
-            self._exec_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        cards = ttk.Frame(left_frame)
+        cards.pack(fill=tk.BOTH, expand=True, padx=5)
 
-            def _on_mousewheel(event):
-                if self._exec_canvas.winfo_exists():
-                    self._exec_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            self._exec_canvas.bind("<Enter>", lambda e: self._exec_canvas.bind_all("<MouseWheel>", _on_mousewheel))
-            self._exec_canvas.bind("<Leave>", lambda e: self._exec_canvas.unbind_all("<MouseWheel>"))
+        self._exec_canvas = tk.Canvas(cards, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(cards, orient="vertical", command=self._exec_canvas.yview)
+        self._exec_scroll_frame = ttk.Frame(self._exec_canvas)
+        self._exec_scroll_frame.bind("<Configure>", lambda e: self._exec_canvas.configure(scrollregion=self._exec_canvas.bbox("all")))
+        self._exec_canvas.create_window((0, 0), window=self._exec_scroll_frame, anchor="nw")
+        self._exec_canvas.configure(yscrollcommand=scrollbar.set)
+        self._exec_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-            self._exec_cards_container = self._exec_scroll_frame
-            self._refresh_exec_cards()
-            return
+        def _on_mousewheel(event):
+            if self._exec_canvas.winfo_exists():
+                self._exec_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._exec_canvas.bind("<Enter>", lambda e: self._exec_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        self._exec_canvas.bind("<Leave>", lambda e: self._exec_canvas.unbind_all("<MouseWheel>"))
 
-        # ===== 单课程执行模式 =====
+        self._exec_cards_container = self._exec_scroll_frame
+        self._refresh_exec_cards()
+
+        # 右侧：日志流
+        right_frame = ttk.Frame(main_paned, padding=2)
+        main_paned.add(right_frame, width=280)
+
+        log_frame = ttk.LabelFrame(right_frame, text="日志流", padding=3)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("time", "event")
+        self._exec_log_tree = ttk.Treeview(log_frame, columns=columns, show="headings",
+                                            height=20, selectmode="browse", style="Log.Treeview")
+        self._exec_log_tree.heading("time", text="时间")
+        self._exec_log_tree.heading("event", text="事件")
+        self._exec_log_tree.column("time", width=70, anchor="center", stretch=False)
+        self._exec_log_tree.column("event", width=180, stretch=True)
+
+        self._exec_log_tree.tag_configure("timer_start", foreground="#2e7d32", font=("", 11, "bold"))
+        self._exec_log_tree.tag_configure("timer_stop", foreground="#1565c0", font=("", 11, "bold"))
+        self._exec_log_tree.tag_configure("action", foreground="#6a1b9a", font=("", 12))
+        self._exec_log_tree.tag_configure("note", foreground="#e65100", font=("", 14))
+        self._exec_log_tree.tag_configure("blur", foreground="#9e9e9e", font=("", 11, "bold"))
+        self._exec_log_tree.tag_configure("focus_return", foreground="#00838f", font=("", 11, "bold"))
+        self._exec_log_tree.tag_configure("lesson_complete", foreground="#c62828", font=("", 16, "bold"))
+        self._exec_log_tree.tag_configure("open_note", foreground="#00695c", font=("", 16))
+        self._exec_log_tree.tag_configure("open_resource", foreground="#4e342e", font=("", 16))
+
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self._exec_log_tree.yview)
+        self._exec_log_tree.configure(yscrollcommand=log_scroll.set)
+        self._exec_log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._load_exec_log()
+
+    def _build_execution_tab(self, course_id: str):
+        """构建单课程执行模式页面（缓存标签页）"""
+        self._highlight_nav("exec")
         course = self.system.get_course_by_id(course_id)
         if not course:
             return
@@ -7468,7 +9486,10 @@ class CourseTrackerApp:
         nav_btns.pack(side=tk.LEFT, padx=5)
         ttk.Button(nav_btns, text="← 返回", command=self._show_overview).pack(side=tk.LEFT, padx=2)
         ttk.Button(nav_btns, text="📋 换课程",
-                   command=lambda: self._show_execution_mode(None)).pack(side=tk.LEFT, padx=2)
+                   command=lambda: self._invalidate_and_switch("exec_select", self._build_exec_select_tab)).pack(side=tk.LEFT, padx=2)
+
+        # 课程专家按钮
+        self._add_specialist_button(nav_btns, "course", style="Accent.TButton")
 
         stats_frame = ttk.Frame(top)
         stats_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
@@ -7512,7 +9533,16 @@ class CourseTrackerApp:
 
         lessons = course.get("lessons", [])
 
-        self.exec_tree = ttk.Treeview(left_frame, columns=("num", "title"), show="headings", height=30)
+        # 左栏管理按钮（置于treeview上方，竖直排列）
+        btn_frame = ttk.Frame(left_frame)
+        btn_frame.pack(side=tk.TOP, fill=tk.X, pady=5, padx=5)
+        ttk.Button(btn_frame, text="➕ 添加课时", command=lambda: self._exec_add_lesson(cid)).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        ttk.Button(btn_frame, text="✏️ 编辑课时", command=lambda: self._exec_edit_lesson(cid)).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        ttk.Button(btn_frame, text="🗑 删除课时", command=lambda: self._exec_delete_lesson(cid)).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        ttk.Button(btn_frame, text="🗑️✖ 批量删", command=lambda: self._exec_batch_delete_lessons(cid)).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        ttk.Button(btn_frame, text="🏷️ 改域/课时", command=lambda: self._exec_edit_course(cid)).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+
+        self.exec_tree = ttk.Treeview(left_frame, columns=("num", "title"), show="headings", height=28, selectmode="extended")
         self.exec_tree.heading("num", text="#")
         self.exec_tree.heading("title", text="课时标题")
         self.exec_tree.column("num", width=50, anchor="center")
@@ -7553,6 +9583,7 @@ class CourseTrackerApp:
         self.current_lesson_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         next_lesson = self.system.get_next_lesson(cid)
+        self._exec_current_lesson_data = None
         self._render_current_lesson(self.current_lesson_frame, cid, next_lesson)
 
     def _render_current_lesson(self, parent, course_id, lesson):
@@ -7568,6 +9599,10 @@ class CourseTrackerApp:
                       font=("", 16, "bold"), foreground="#27ae60").pack(pady=10)
             ttk.Button(parent, text="返回总览", command=self._show_overview).pack(pady=10)
             return
+
+        # 保存当前课时数据
+        self._exec_current_lesson_data = dict(lesson)
+        self._exec_current_course_id = course_id
 
         lnum = lesson.get("lesson_number", 0)
         title = lesson.get("lesson_title", "")
@@ -7604,51 +9639,63 @@ class CourseTrackerApp:
         self._left_canvas.bind("<Leave>", lambda e: self._left_canvas.unbind_all("<MouseWheel>"))
 
         sl = self._scrollable_left
+        self._render_lesson_view_mode(sl, lesson, course, cid)
 
-        # ── 1. 课时标题 ──
-        ttk.Label(sl, text=f"课时 {lnum}", font=("", 14), foreground="#2980b9").pack(anchor="w", padx=15, pady=(10, 0))
-        ttk.Label(sl, text=title, font=("", 18, "bold")).pack(anchor="w", padx=15, pady=5)
-
-        # ── 2. Section 归属 ──
+    def _render_lesson_view_mode(self, sl, lesson, course, cid):
+        """只读模式显示课时 - 支持单字段编辑"""
+        lnum = lesson.get("lesson_number", 0)
+        
+        # 初始化字段编辑状态
+        if not hasattr(self, '_lesson_field_edit_state'):
+            self._lesson_field_edit_state = {}
+        self._lesson_field_edit_state = {}
+        
+        # 课时标题
+        self._render_editable_field(sl, "lesson_title", lesson.get("lesson_title", ""), 
+                                   "课时标题", lesson, course, cid, is_text=False,
+                                   header_func=lambda: ttk.Label(sl, text=f"课时 {lnum}", font=("", 14), foreground="#2980b9").pack(anchor="w", padx=15, pady=(10, 0)))
+        
+        # Section
         sec = self.system.get_lesson_section(cid, lnum)
-        if sec:
-            sec_info = f"📂 Section {sec.get('section_number', '?')}: {sec.get('section_title', '')}"
-            ttk.Label(sl, text=sec_info, font=("", 10), foreground="#8e44ad").pack(anchor="w", padx=15, pady=2)
-
-        # ── 3. 描述 ──
-        if description:
-            ttk.Separator(sl, orient="horizontal").pack(fill=tk.X, padx=15, pady=5)
-            df = ttk.LabelFrame(sl, text="📝 描述", padding=8)
-            df.pack(fill=tk.X, padx=15, pady=5)
-            ttk.Label(df, text=description, font=("", 10), wraplength=self._adaptive_wraplength(0.6),
-                      foreground="#2c3e50").pack(anchor="w")
-
-        # ── 4. 中心问题 ──
-        if question:
-            ttk.Separator(sl, orient="horizontal").pack(fill=tk.X, padx=15, pady=5)
-            qf = ttk.LabelFrame(sl, text="❓ 中心问题", padding=8)
-            qf.pack(fill=tk.X, padx=15, pady=5)
-            ttk.Label(qf, text=question, font=("", 11), wraplength=self._adaptive_wraplength(0.6),
-                      foreground="#c0392b").pack(anchor="w")
-
-        # ── 5. 参考书 ──
+        section_display = f"📂 Section {sec.get('section_number', '?')}: {sec.get('section_title', '')}" if sec else ""
+        self._render_editable_field(sl, "section", lesson.get("section", ""), 
+                                   "所属Section", lesson, course, cid, is_text=False,
+                                   display_value=section_display)
+        
+        # 预计课时
+        self._render_editable_field(sl, "estimated_hours", str(lesson.get("estimated_hours", 1)), 
+                                   "预计课时", lesson, course, cid, is_text=False)
+        
+        # 描述
+        self._render_editable_field(sl, "description", lesson.get("description", ""), 
+                                   "描述", lesson, course, cid, is_text=True,
+                                   icon="📝")
+        
+        # 中心问题
+        self._render_editable_field(sl, "central_question", lesson.get("central_question", ""), 
+                                   "中心问题", lesson, course, cid, is_text=True,
+                                   icon="❓", color="#c0392b")
+        
+        # 参考资料
+        refs = lesson.get("references", [])
+        refs_text = "\n".join(refs) if refs else ""
+        self._render_editable_field(sl, "references", refs_text, 
+                                   "参考资料", lesson, course, cid, is_text=True,
+                                   icon="📚")
+        
+        # 课程参考资料
         course_refs = course.get("references", []) if course else []
-        lesson_refs = lesson.get("references", []) if lesson else []
-        if course_refs or lesson_refs:
-            ref_frame = ttk.LabelFrame(sl, text="📚 参考书", padding=6)
+        if course_refs:
+            ttk.Separator(sl, orient="horizontal").pack(fill=tk.X, padx=15, pady=5)
+            ref_frame = ttk.LabelFrame(sl, text="📚 课程参考资料", padding=6)
             ref_frame.pack(fill=tk.X, padx=15, pady=5)
-            if lesson_refs:
-                for ref in lesson_refs[:8]:
-                    ref_text = ref if isinstance(ref, str) else ref.get("title", str(ref))
-                    ttk.Label(ref_frame, text=f"  • {ref_text}", style="Sub.TLabel", wraplength=self._adaptive_wraplength(0.55)).pack(anchor="w")
-            if course_refs:
-                for ref in course_refs[:8]:
-                    if isinstance(ref, dict):
-                        ref_text = ref.get("title", str(ref))
-                    else:
-                        ref_text = str(ref)
-                    ttk.Label(ref_frame, text=f"  • {ref_text}", style="Sub.TLabel", wraplength=self._adaptive_wraplength(0.55)).pack(anchor="w")
-
+            for ref in course_refs[:8]:
+                if isinstance(ref, dict):
+                    ref_text = ref.get("title", str(ref))
+                else:
+                    ref_text = str(ref)
+                ttk.Label(ref_frame, text=f"  • {ref_text}", style="Sub.TLabel", wraplength=self._adaptive_wraplength(0.55)).pack(anchor="w")
+        
         # ── 6. 资源区域 ──
         self._build_resource_section(sl, cid, lnum)
 
@@ -7669,15 +9716,16 @@ class CourseTrackerApp:
                   command=lambda: self._show_course_detail(cid)).pack(side=tk.LEFT, padx=4)
         ttk.Button(action_frame_util, text="📝 打开笔记",
                   command=lambda: self._open_note(cid, lnum)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(action_frame_util, text="📂 笔记文件夹",
-                  command=lambda: self._open_notes_folder(cid, lnum)).pack(side=tk.LEFT, padx=4)
         ttk.Button(action_frame_util, text="📋 辅助工具",
                   command=lambda: self._show_execution_popup(cid, lnum)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(action_frame_util, text="📂 笔记文件夹",
+                  command=lambda: self._open_notes_folder(cid, lnum)).pack(side=tk.LEFT, padx=4)
         ttk.Button(action_frame_util, text="🔄 复习",
                   command=lambda: self._show_review_reminder(cid)).pack(side=tk.LEFT, padx=4)
 
-
         course_name = course.get("name", "") if course else ""
+        title = lesson.get("lesson_title", "")
+        question = lesson.get("central_question", "")
         ai_query = f"{course_name} {title}".strip()
         if question:
             ai_query += f" {question}"
@@ -7690,6 +9738,9 @@ class CourseTrackerApp:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(q)
             webbrowser.open("https://chat.deepseek.com/")
+            webbrowser.open("https://chatglm.cn/main/alltoolsdetail?redirect=/main/alltoolsdetail&lang=zh")
+            webbrowser.open("https://www.kimi.com/")
+            webbrowser.open("https://aistudio.xiaomimimo.com/")
        
         def _lib_search(s=l_search1):
             if s:
@@ -7748,6 +9799,497 @@ class CourseTrackerApp:
         btn_frame.pack(pady=10)
         ttk.Button(btn_frame, text="✅ 完成此课时 → 进入下一步",
                   command=lambda: self._complete_and_next(cid, lnum)).pack(side=tk.LEFT, padx=10, ipady=5, ipadx=15)
+
+    def _render_editable_field(self, parent, field_key, value, label_text, lesson, course, cid, is_text=False, icon="", color="", display_value=None, header_func=None):
+        """渲染可编辑字段 - 可以在只读和编辑模式之间切换"""
+        if header_func:
+            header_func()
+        
+        field_frame = ttk.Frame(parent)
+        field_frame.pack(fill=tk.X, padx=15, pady=5)
+        
+        # 保存字段上下文
+        self._lesson_field_edit_state[field_key] = {
+            "frame": field_frame,
+            "value": value,
+            "lesson": lesson,
+            "course": course,
+            "cid": cid,
+            "is_text": is_text,
+            "label_text": label_text,
+            "icon": icon,
+            "color": color,
+            "display_value": display_value,
+            "editing": False
+        }
+        
+        # 默认渲染只读模式
+        self._render_field_read_only(field_key)
+
+    def _render_field_read_only(self, field_key):
+        """渲染字段的只读模式"""
+        state = self._lesson_field_edit_state.get(field_key)
+        if not state:
+            return
+        
+        frame = state["frame"]
+        for widget in frame.winfo_children():
+            widget.destroy()
+        
+        value = state["display_value"] if state["display_value"] is not None else state["value"]
+        icon = state["icon"]
+        color = state["color"]
+        label_text = state["label_text"]
+        
+        # 创建主容器，用于并列布局
+        main_container = ttk.Frame(frame)
+        main_container.pack(fill=tk.X, expand=True)
+        
+        # 编辑按钮 - 先放右侧，确保不会被挤
+        edit_btn = ttk.Button(main_container, text="✏️ 编辑", width=6,
+                             command=lambda: self._toggle_field_edit(field_key))
+        edit_btn.pack(side=tk.RIGHT)
+        
+        # LabelFrame - 左侧，显示字段名称和值
+        lf = ttk.LabelFrame(main_container, text=f"{icon} {label_text}" if icon else label_text, padding=8)
+        lf.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        
+        # 显示值
+        if value:
+            if state["is_text"]:
+                # 多行文本
+                ttk.Label(lf, text=value, font=("", 10), wraplength=self._adaptive_wraplength(0.5),
+                         foreground=color if color else "#2c3e50").pack(anchor="w")
+            else:
+                # 单行文本
+                font_size = 18 if field_key == "lesson_title" else 10
+                font_weight = "bold" if field_key == "lesson_title" else ""
+                ttk.Label(lf, text=value, font=("", font_size, font_weight),
+                         foreground=color if color else "#2c3e50").pack(anchor="w")
+        else:
+            # 空值提示
+            ttk.Label(lf, text="(空)", font=("", 10), foreground="#999").pack(anchor="w")
+
+    def _toggle_field_edit(self, field_key):
+        """切换字段的编辑状态"""
+        state = self._lesson_field_edit_state.get(field_key)
+        if not state:
+            return
+        
+        state["editing"] = not state["editing"]
+        if state["editing"]:
+            self._render_field_edit_mode(field_key)
+        else:
+            self._render_field_read_only(field_key)
+
+    def _render_field_edit_mode(self, field_key):
+        """渲染字段的编辑模式"""
+        state = self._lesson_field_edit_state.get(field_key)
+        if not state:
+            return
+        
+        frame = state["frame"]
+        for widget in frame.winfo_children():
+            widget.destroy()
+        
+        value = state["value"]
+        is_text = state["is_text"]
+        label_text = state["label_text"]
+        icon = state["icon"]
+        
+        lf = ttk.LabelFrame(frame, text=f"✏️ {label_text}", padding=8)
+        lf.pack(fill=tk.X)
+        
+        input_container = ttk.Frame(lf)
+        input_container.pack(fill=tk.X, expand=True)
+        
+        if is_text:
+            # 文本框
+            text_widget = tk.Text(input_container, height=4, font=("", 10))
+            text_widget.insert("1.0", value or "")
+            text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            state["widget"] = text_widget
+        else:
+            # 输入框
+            var = tk.StringVar(value=str(value or ""))
+            entry = ttk.Entry(input_container, textvariable=var)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+            state["widget"] = var
+        
+        # 按钮容器
+        btn_container = ttk.Frame(lf)
+        btn_container.pack(fill=tk.X, pady=(5, 0))
+        
+        save_btn = ttk.Button(btn_container, text="💾 保存", width=6,
+                             command=lambda: self._save_field_and_switch(field_key))
+        save_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        cancel_btn = ttk.Button(btn_container, text="❌ 取消", width=6,
+                               command=lambda: self._toggle_field_edit(field_key))
+        cancel_btn.pack(side=tk.LEFT)
+
+    def _save_field_and_switch(self, field_key):
+        """保存字段并切换回只读模式"""
+        state = self._lesson_field_edit_state.get(field_key)
+        if not state:
+            return
+        
+        lesson = state["lesson"]
+        cid = state["cid"]
+        widget = state.get("widget")
+        
+        # 获取值
+        if isinstance(widget, tk.Text):
+            value = widget.get("1.0", tk.END).strip()
+        elif isinstance(widget, tk.StringVar):
+            value = widget.get().strip()
+        else:
+            value = str(widget).strip() if widget else ""
+        
+        # 特殊处理参考资料
+        if field_key == "references":
+            if value:
+                value = [r.strip() for r in value.split('\n') if r.strip()]
+            else:
+                value = []
+        
+        # 特殊处理预计课时
+        if field_key == "estimated_hours":
+            try:
+                value = int(value) if value else 1
+            except ValueError:
+                value = 1
+        
+        # 验证必填字段
+        if field_key == "lesson_title" and not value:
+            messagebox.showwarning("警告", "课时标题不能为空", parent=self.root)
+            return
+        
+        # 保存到数据
+        lesson[field_key] = value
+        
+        # 保存到所有数据库源
+        course = self.system.get_course_by_id(cid)
+        if course:
+            for p in self.system.db_paths:
+                data = load_json_safe(p)
+                if not data:
+                    continue
+                for ci, c in enumerate(data.get("courses", [])):
+                    if c.get("note_id") == course.get("note_id"):
+                        # 找到对应课程后更新
+                        lessons = c.get("lessons", [])
+                        for li, l in enumerate(lessons):
+                            if l.get("lesson_number") == lesson.get("lesson_number"):
+                                lessons[li] = lesson
+                                data["courses"][ci] = c
+                                p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                                break
+        
+        # 更新本地状态
+        state["value"] = value
+        if field_key == "references":
+            state["display_value"] = "\n".join(value) if value else ""
+        
+        # 切换回只读模式
+        state["editing"] = False
+        self._render_field_read_only(field_key)
+        
+        # 记录日志
+        field_names = {
+            "lesson_title": "课时标题",
+            "section": "所属Section",
+            "description": "描述",
+            "central_question": "中心问题",
+            "estimated_hours": "预计课时",
+            "references": "参考资料"
+        }
+        field_name = field_names.get(field_key, field_key)
+        self._log(f"💾 保存字段: {field_name}")
+
+    def _render_lesson_edit_mode(self, sl, lesson):
+        """编辑模式显示课时 - 逐条编辑"""
+        lnum = lesson.get("lesson_number", 0)
+        title = lesson.get("lesson_title", "")
+        section = lesson.get("section", "")
+        question = lesson.get("central_question", "")
+        hours = lesson.get("estimated_hours", 1)
+        description = lesson.get("description", "")
+        refs = lesson.get("references", [])
+
+        self._exec_edit_fields = {}
+
+        # ── 标题区 ──
+        ttk.Label(sl, text=f"编辑课时 #{lnum}", font=("", 14), foreground="#e74c3c").pack(anchor="w", padx=15, pady=(10, 5))
+        ttk.Label(sl, text="💡 在下方逐条修改课时信息，点击每个字段旁的保存按钮保存该字段", 
+                 font=("", 9), foreground="#888").pack(anchor="w", padx=15, pady=(0, 10))
+
+        # 课时标题
+        self._add_edit_field(sl, "课时标题", "title", title, is_text=False)
+
+        # 所属Section
+        self._add_edit_field(sl, "所属Section", "section", section, is_text=False)
+
+        # 中心问题
+        self._add_edit_field(sl, "中心问题", "question", question, is_text=False)
+
+        # 预计课时
+        self._add_edit_field(sl, "预计课时(小时)", "hours", str(hours), is_text=False)
+
+        # 课时描述
+        self._add_edit_field(sl, "课时描述", "description", description, is_text=True)
+
+        # 参考资料
+        refs_text = "\n".join(refs) if refs else ""
+        self._add_edit_field(sl, "参考资料", "references", refs_text, is_text=True)
+
+    def _add_edit_field(self, parent, label_text, field_key, default_value, is_text=False):
+        """添加单个可编辑字段（带保存按钮） - 使用pack布局"""
+        field_frame = ttk.LabelFrame(parent, text=f"📝 {label_text}", padding=8)
+        field_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        input_frame = ttk.Frame(field_frame)
+        input_frame.pack(fill=tk.X, expand=True)
+
+        if is_text:
+            # 文本框
+            text_widget = tk.Text(input_frame, height=4, font=("", 10))
+            text_widget.insert("1.0", default_value or "")
+            text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            self._exec_edit_fields[field_key] = text_widget
+        else:
+            # 输入框
+            var = tk.StringVar(value=str(default_value or ""))
+            entry = ttk.Entry(input_frame, textvariable=var)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+            self._exec_edit_fields[field_key] = var
+
+        # 保存按钮
+        save_btn = ttk.Button(field_frame, text="💾 保存",
+                             command=lambda: self._exec_save_single_field(field_key))
+        save_btn.pack(side=tk.RIGHT, padx=5)
+
+    def _exec_save_single_field(self, field_key):
+        """保存单个字段"""
+        if not hasattr(self, '_exec_edit_fields') or not self._exec_edit_fields:
+            messagebox.showwarning("警告", "没有可保存的编辑")
+            return
+        
+        course = self.system.get_course_by_id(self._exec_current_course_id)
+        if not course:
+            return
+        
+        lnum = self._exec_current_lesson_data.get("lesson_number", 0)
+        lessons = course.get("lessons", [])
+        lesson = next((l for l in lessons if l.get("lesson_number") == lnum), None)
+        
+        if not lesson:
+            return
+        
+        field = self._exec_edit_fields.get(field_key)
+        if not field:
+            return
+        
+        # 获取字段值
+        if isinstance(field, tk.Text):
+            value = field.get("1.0", tk.END).strip()
+        elif isinstance(field, tk.StringVar):
+            value = field.get().strip()
+        else:
+            value = str(field).strip() if field else ""
+        
+        # 特殊处理参考资料（转换为列表）
+        if field_key == "references":
+            if value:
+                value = [r.strip() for r in value.split('\n') if r.strip()]
+            else:
+                value = []
+        
+        # 验证必填字段
+        if field_key == "title" and not value:
+            messagebox.showwarning("警告", "课时标题不能为空", parent=self.root)
+            return
+        
+        # 保存字段
+        # 注意：这里的字段名需要映射到实际的lesson字段名
+        field_mapping = {
+            "title": "lesson_title",
+            "section": "section",
+            "question": "central_question",
+            "hours": "estimated_hours",
+            "description": "description",
+            "references": "references"
+        }
+        actual_field = field_mapping.get(field_key, field_key)
+        
+        # 特殊处理hours字段为数字
+        if actual_field == "estimated_hours":
+            try:
+                value = float(value) if value else 1.0
+            except ValueError:
+                value = 1.0
+        
+        lesson[actual_field] = value
+        
+        # 保存到所有数据库源
+        for p in self.system.db_paths:
+            data = load_json_safe(p)
+            if not data:
+                continue
+            for ci, c in enumerate(data.get("courses", [])):
+                if c.get("note_id") == course.get("note_id"):
+                    # 找到对应课程后更新
+                    lessons = c.get("lessons", [])
+                    for li, l in enumerate(lessons):
+                        if l.get("lesson_number") == lnum:
+                            lessons[li] = lesson
+                            data["courses"][ci] = c
+                            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                            break
+        
+        field_names = {
+            "title": "课时标题",
+            "section": "所属Section", 
+            "question": "中心问题",
+            "hours": "预计课时",
+            "description": "课时描述",
+            "references": "参考资料"
+        }
+        field_name = field_names.get(field_key, field_key)
+        self._log(f"💾 保存字段: {field_name}")
+
+    def _exec_toggle_edit_mode(self):
+        """切换编辑/只读模式"""
+        if not hasattr(self, '_exec_current_lesson_data'):
+            return
+        
+        self._exec_edit_mode = not self._exec_edit_mode
+        
+        if self._exec_edit_mode:
+            self._exec_edit_btn.config(text="👁 只读模式")
+            self._exec_save_btn.config(state=tk.NORMAL)
+            if self.current_lesson_frame:
+                self._render_current_lesson(self.current_lesson_frame, 
+                                          self._exec_current_course_id, 
+                                          self._exec_current_lesson_data)
+        else:
+            self._exec_edit_btn.config(text="✏️ 编辑模式")
+            self._exec_save_btn.config(state=tk.DISABLED)
+            # 恢复只读模式
+            course = self.system.get_course_by_id(self._exec_current_course_id)
+            lnum = self._exec_current_lesson_data.get("lesson_number", 0)
+            lesson = next((l for l in course.get("lessons", []) if l.get("lesson_number") == lnum), None)
+            if lesson and self.current_lesson_frame:
+                self._exec_current_lesson_data = lesson
+                self._render_current_lesson(self.current_lesson_frame, 
+                                          self._exec_current_course_id, 
+                                          lesson)
+
+    def _exec_save_lesson(self, course_id):
+        """保存课时编辑"""
+        if not hasattr(self, '_exec_edit_fields') or not self._exec_edit_fields:
+            messagebox.showwarning("警告", "没有可保存的编辑")
+            return
+        
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+        
+        lnum = self._exec_current_lesson_data.get("lesson_number", 0)
+        lessons = course.get("lessons", [])
+        lesson = next((l for l in lessons if l.get("lesson_number") == lnum), None)
+        
+        if not lesson:
+            return
+        
+        # 获取标题
+        title_field = self._exec_edit_fields.get("title")
+        if isinstance(title_field, tk.Text):
+            title = title_field.get("1.0", tk.END).strip()
+        elif isinstance(title_field, tk.StringVar):
+            title = title_field.get().strip()
+        else:
+            title = str(title_field).strip()
+        
+        if not title:
+            messagebox.showwarning("警告", "课时标题不能为空", parent=self.root)
+            return
+
+        lesson["lesson_title"] = title
+        
+        # 获取其他字段
+        for key, field_key in [("section", "section"), ("question", "question")]:
+            field = self._exec_edit_fields.get(field_key)
+            if isinstance(field, tk.Text):
+                lesson[field_key] = field.get("1.0", tk.END).strip()
+            elif isinstance(field, tk.StringVar):
+                lesson[field_key] = field.get().strip()
+            else:
+                lesson[field_key] = str(field).strip() if field else ""
+        
+        # 获取预计课时
+        hours_field = self._exec_edit_fields.get("hours")
+        if isinstance(hours_field, tk.Text):
+            hours_str = hours_field.get("1.0", tk.END).strip()
+        elif isinstance(hours_field, tk.StringVar):
+            hours_str = hours_field.get().strip()
+        else:
+            hours_str = str(hours_field).strip() if hours_field else "1"
+        
+        try:
+            lesson["estimated_hours"] = float(hours_str or "1")
+        except:
+            lesson["estimated_hours"] = 1.0
+        
+        # 获取描述
+        desc_field = self._exec_edit_fields.get("description")
+        if isinstance(desc_field, tk.Text):
+            lesson["description"] = desc_field.get("1.0", tk.END).strip()
+        elif isinstance(desc_field, tk.StringVar):
+            lesson["description"] = desc_field.get().strip()
+        else:
+            lesson["description"] = str(desc_field).strip() if desc_field else ""
+        
+        # 获取参考资料
+        refs_field = self._exec_edit_fields.get("references")
+        if isinstance(refs_field, tk.Text):
+            refs_text = refs_field.get("1.0", tk.END).strip()
+        elif isinstance(refs_field, tk.StringVar):
+            refs_text = refs_field.get().strip()
+        else:
+            refs_text = str(refs_field).strip() if refs_field else ""
+        
+        if refs_text:
+            lesson["references"] = [r.strip() for r in refs_text.split('\n') if r.strip()]
+        else:
+            lesson["references"] = []
+
+        # 保存到所有数据库源
+        for p in self.system.db_paths:
+            data = load_json_safe(p)
+            if not data:
+                continue
+            for ci, c in enumerate(data.get("courses", [])):
+                if c.get("note_id") == course.get("note_id"):
+                    # 找到对应课程后更新
+                    lessons = c.get("lessons", [])
+                    for li, l in enumerate(lessons):
+                        if l.get("lesson_number") == lnum:
+                            lessons[li] = lesson
+                            data["courses"][ci] = c
+                            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                            break
+        
+        self._log(f"💾 保存课时: {title} (#{lnum})")
+        
+        # 切换回只读模式
+        self._exec_edit_mode = False
+        self._exec_edit_btn.config(text="✏️ 编辑模式")
+        self._exec_save_btn.config(state=tk.DISABLED)
+        
+        # 重新加载
+        if self.current_lesson_frame:
+            self._render_current_lesson(self.current_lesson_frame, course_id, lesson)
 
     def _on_left_canvas_configure(self, event):
         """左栏Canvas宽度变化时，内部Frame自适应"""
@@ -7924,7 +10466,7 @@ class CourseTrackerApp:
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         note_path, _ = self.system.get_or_create_note(course_id, lesson_num)
-        review_data_path = BASE / "spaced_review_data.json"
+        review_data_path = _resolve_data_file("spaced_review_data.json")
         srm = SpacedRepetitionManager(review_data_path)
         
         # === 保存引用，便于以后自动重新分析
@@ -9781,12 +12323,21 @@ class CourseTrackerApp:
 
     @staticmethod
     def _scrollable_button_bar(parent, **kw):
-        bar_canvas = tk.Canvas(parent, height=32, highlightthickness=0)
+        bar_canvas = tk.Canvas(parent, height=38, highlightthickness=0)
         bar_scroll = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=bar_canvas.xview)
         bar_canvas.configure(xscrollcommand=bar_scroll.set, scrollregion=bar_canvas.bbox("all"))
         inner = ttk.Frame(bar_canvas)
         bar_canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda e: bar_canvas.configure(scrollregion=bar_canvas.bbox("all")))
+        
+        def _on_inner_configure(e):
+            bar_canvas.configure(scrollregion=bar_canvas.bbox("all"))
+        inner.bind("<Configure>", _on_inner_configure)
+        
+        # 确保 canvas 随 inner 大小更新 scrollregion
+        def _on_canvas_configure():
+            bar_canvas.configure(scrollregion=bar_canvas.bbox("all"))
+        inner.bind("<Configure>", lambda e: parent.after(10, _on_canvas_configure))
+        
         bar_canvas.pack(fill=tk.X, side=tk.TOP)
         bar_scroll.pack(fill=tk.X, side=tk.BOTTOM)
 
@@ -9850,6 +12401,12 @@ class CourseTrackerApp:
         lnum = self._exec_resource_lnum
         lesson_only_res = self._exec_lesson_resources
         course_only_res = self._exec_course_resources
+
+        # 安全检查：确保 frame 仍然存在
+        if not hasattr(self, '_lr_frame') or not self._lr_frame.winfo_exists():
+            return
+        if not hasattr(self, '_cr_frame') or not self._cr_frame.winfo_exists():
+            return
         
         search_query = getattr(self, '_exec_resource_search_var', tk.StringVar(value="")).get().strip().lower()
         
@@ -10415,8 +12972,30 @@ class CourseTrackerApp:
                    command=self._insert_image_to_dev_doc).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="💻 代码块",
                    command=lambda: self._insert_template_to_dev_doc("code")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="📐 公式",
-                   command=lambda: self._insert_template_to_dev_doc("math")).pack(side=tk.LEFT, padx=2)
+        
+        # 公式下拉菜单
+        dev_math_menu = tk.Menubutton(toolbar, text="📐 公式", relief=tk.RAISED)
+        dev_math_menu.pack(side=tk.LEFT, padx=2)
+        dev_math_menu.menu = tk.Menu(dev_math_menu, tearoff=0)
+        dev_math_menu["menu"] = dev_math_menu.menu
+        dev_math_menu.menu.add_command(label="$ 行内公式", 
+            command=lambda: self._dev_doc_editor.insert(tk.INSERT, "$ $") or self._dev_doc_editor.mark_set("insert", f"{self._dev_doc_editor.index(tk.INSERT)}-2c"))
+        dev_math_menu.menu.add_command(label="$$ 行间公式", 
+            command=lambda: self._dev_doc_editor.insert(tk.INSERT, "\n$$\n\n$$\n") or self._dev_doc_editor.mark_set("insert", f"{self._dev_doc_editor.index(tk.INSERT)}-3c"))
+        dev_math_menu.menu.add_separator()
+        dev_math_menu.menu.add_command(label="分式", 
+            command=lambda: self._dev_doc_editor.insert(tk.INSERT, "\\frac{分子}{分母}"))
+        dev_math_menu.menu.add_command(label="根号", 
+            command=lambda: self._dev_doc_editor.insert(tk.INSERT, "\\sqrt{x}"))
+        dev_math_menu.menu.add_command(label="求和", 
+            command=lambda: self._dev_doc_editor.insert(tk.INSERT, "\\sum_{i=1}^{n}"))
+        dev_math_menu.menu.add_command(label="积分", 
+            command=lambda: self._dev_doc_editor.insert(tk.INSERT, "\\int_{a}^{b} f(x) \\, dx"))
+        dev_math_menu.menu.add_command(label="极限", 
+            command=lambda: self._dev_doc_editor.insert(tk.INSERT, "\\lim_{x \\to \\infty}"))
+        dev_math_menu.menu.add_command(label="矩阵", 
+            command=lambda: self._dev_doc_editor.insert(tk.INSERT, "\\begin{pmatrix}\na & b \\\\\nc & d\n\\end{pmatrix}"))
+        
         ttk.Button(toolbar, text="📋 链接",
                    command=lambda: self._insert_template_to_dev_doc("link")).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="📊 表格",
@@ -10428,10 +13007,6 @@ class CourseTrackerApp:
                    command=lambda: self._wrap_selection_with("# ")).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="💡 列表",
                    command=lambda: self._wrap_selection_with("- ")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="✅ 粗体",
-                   command=lambda: self._wrap_selection_with("**", "**")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="✳️ 斜体",
-                   command=lambda: self._wrap_selection_with("*", "*")).pack(side=tk.LEFT, padx=2)
         
         # 编辑区
         text_frame = ttk.Frame(editor_frame)
@@ -10447,6 +13022,9 @@ class CourseTrackerApp:
         self._dev_doc_editor.configure(yscrollcommand=dev_doc_scroll.set)
         self._dev_doc_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         dev_doc_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 添加搜索/替换工具栏
+        self._add_search_replace_bar(editor_frame, self._dev_doc_editor)
         
         # 语法高亮标签
         self._dev_doc_editor.tag_configure("heading", foreground="#2c3e50", 
@@ -10480,6 +13058,32 @@ class CourseTrackerApp:
                                   lambda e: self._wrap_selection_with("**", "**"))
         self._dev_doc_editor.bind("<Control-i>", 
                                   lambda e: self._wrap_selection_with("*", "*"))
+        self._dev_doc_editor.bind("<Control-m>", 
+                                  lambda e: self._wrap_selection_with("$", "$"))
+        self._dev_doc_editor.bind("<Control-grave>", 
+                                  lambda e: self._wrap_selection_with("`", "`"))
+        self._dev_doc_editor.bind("<Alt-q>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n> "))
+        self._dev_doc_editor.bind("<Control-0>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n$$\n\n$$\n") or self._dev_doc_editor.mark_set("insert", f"{self._dev_doc_editor.index(tk.INSERT)}-3c"))
+        self._dev_doc_editor.bind("<Control-1>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n# 标题\n\n"))
+        self._dev_doc_editor.bind("<Control-2>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n## 标题\n\n"))
+        self._dev_doc_editor.bind("<Control-3>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n### 标题\n\n"))
+        self._dev_doc_editor.bind("<Alt-h>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n---\n\n"))
+        self._dev_doc_editor.bind("<Alt-u>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n- 列表项\n"))
+        self._dev_doc_editor.bind("<Alt-o>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n1. 列表项\n"))
+        self._dev_doc_editor.bind("<Alt-x>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n- [ ] 待办事项\n"))
+        self._dev_doc_editor.bind("<Alt-t>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "\n| 列1 | 列2 | 列3 |\n|------|------|------|\n|  |  |  |\n"))
+        self._dev_doc_editor.bind("<Alt-i>", 
+                                  lambda e: self._dev_doc_editor.insert(tk.INSERT, "![](image.png)"))
         self._dev_doc_editor.bind("<KeyRelease>", 
                                   lambda e: self._schedule_dev_doc_highlight())
         
@@ -10743,6 +13347,446 @@ class CourseTrackerApp:
         if tpl_type in templates:
             self._dev_doc_editor.insert(tk.INSERT, templates[tpl_type])
     
+    # ── Markdown 预览面板 ──
+
+    def _open_markdown_preview(self, editor_text, title="Markdown 预览"):
+        """打开 Markdown 预览窗口"""
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title(title)
+        preview_window.geometry("800x600")
+        preview_window.configure(bg="#ffffff")
+        
+        # 工具栏
+        toolbar = ttk.Frame(preview_window)
+        toolbar.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Label(toolbar, text="📄 实时预览", font=("", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="🔄 刷新", command=lambda: self._refresh_preview(editor_text, preview_text)).pack(side=tk.RIGHT)
+        
+        # 预览区域
+        preview_frame = ttk.Frame(preview_window)
+        preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        preview_text = tk.Text(preview_frame, wrap=tk.WORD, font=("Consolas", 10),
+                               bg="#ffffff", fg="#24292e", padx=10, pady=10)
+        preview_scroll = ttk.Scrollbar(preview_frame, command=preview_text.yview)
+        preview_text.configure(yscrollcommand=preview_scroll.set)
+        preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        preview_text.config(state=tk.DISABLED)
+        
+        # 配置样式标签
+        self._setup_preview_tags(preview_text)
+        
+        # 初始渲染
+        self._render_markdown_preview(editor_text.get("1.0", tk.END), preview_text)
+        
+        # 绑定编辑器变化事件（延迟刷新）
+        self._bind_preview_sync(editor_text, preview_text)
+    
+    def _setup_preview_tags(self, text_widget):
+        """配置预览面板的样式标签"""
+        text_widget.tag_config("h1", font=("Microsoft YaHei UI", 18, "bold"), foreground="#1a1a2e", spacing1=12, spacing3=8)
+        text_widget.tag_config("h2", font=("Microsoft YaHei UI", 15, "bold"), foreground="#16213e", spacing1=10, spacing3=6)
+        text_widget.tag_config("h3", font=("Microsoft YaHei UI", 13, "bold"), foreground="#0f3460", spacing1=8, spacing3=4)
+        text_widget.tag_config("h4", font=("Microsoft YaHei UI", 11, "bold"), foreground="#533483", spacing1=6, spacing3=4)
+        text_widget.tag_config("bold", font=("", 10, "bold"))
+        text_widget.tag_config("italic", font=("", 10, "italic"))
+        text_widget.tag_config("inline_code", font=("Consolas", 10), background="#f6f8fa", foreground="#e83e8c")
+        text_widget.tag_config("code_block", font=("Consolas", 10), background="#1e1e1e", foreground="#f8f8f2", spacing1=6, spacing3=6)
+        text_widget.tag_config("code_lang", font=("Segoe UI", 9, "bold"), background="#1e1e1e", foreground="#6272a4")
+        text_widget.tag_config("link", foreground="#0366d6", font=("", 10, "underline"))
+        text_widget.tag_config("quote", foreground="#6a737d", font=("", 10, "italic"))
+        text_widget.tag_config("list_item", font=("Microsoft YaHei UI", 10), lmargin1=20, lmargin2=30)
+        text_widget.tag_config("table", font=("Consolas", 10), background="#f6f8fa", spacing1=2)
+        text_widget.tag_config("hr", foreground="#e1e4e8", font=("", 6))
+        text_widget.tag_config("math", foreground="#0066cc", font=("Consolas", 12), spacing1=8, spacing3=8)
+    
+    def _render_markdown_preview(self, markdown_text, preview_text):
+        """渲染 Markdown 文本到预览面板 — 正确处理跨行公式和代码块"""
+        import re
+        preview_text.config(state=tk.NORMAL)
+        preview_text.delete("1.0", tk.END)
+        
+        # 第一步：提取所有代码块和 $$ 显示公式（跨行块）
+        # 模式：```...``` 或 $$...$$
+        block_pattern = r'(```[^\n]*\n[\s\S]*?```)|(\$\$[\s\S]*?\$\$)'
+        blocks = []
+        for m in re.finditer(block_pattern, markdown_text):
+            blocks.append((m.start(), m.end(), m.group()))
+        
+        if not blocks:
+            # 没有跨行块，直接逐行处理
+            self._render_md_lines(markdown_text, preview_text)
+            preview_text.config(state=tk.DISABLED)
+            preview_text.see("1.0")
+            return
+        
+        # 第二步：分段渲染 — 块前用行渲染，块直接渲染
+        last_end = 0
+        for start, end, block_text in blocks:
+            # 渲染块之前的内容
+            if start > last_end:
+                self._render_md_lines(markdown_text[last_end:start], preview_text)
+            
+            # 判断是代码块还是公式块
+            if block_text.startswith("```"):
+                # 代码块
+                lines = block_text.split("\n")
+                lang = lines[0][3:].strip().lower()
+                if lang:
+                    preview_text.insert(tk.END, f" [{lang.upper()}] \n", "code_lang")
+                code_content = "\n".join(lines[1:-1])
+                preview_text.insert(tk.END, code_content + "\n", "code_block")
+            elif block_text.startswith("$$"):
+                # 数学公式块
+                formula = block_text.strip()[2:-2].strip()
+                rendered = self._render_tex_formula(formula)
+                preview_text.insert(tk.END, "\n" + rendered + "\n", "math")
+            
+            last_end = end
+        
+        # 渲染最后剩余部分
+        if last_end < len(markdown_text):
+            self._render_md_lines(markdown_text[last_end:], preview_text)
+        
+        preview_text.config(state=tk.DISABLED)
+        preview_text.see("1.0")
+    
+    def _render_md_lines(self, text, preview_text):
+        """逐行渲染 Markdown（不处理跨行块）"""
+        import re
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                preview_text.insert(tk.END, "\n")
+                continue
+            
+            # 水平线
+            if re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', stripped):
+                preview_text.insert(tk.END, "─" * 50 + "\n", "hr")
+                continue
+            
+            # 标题
+            if line.startswith("#### "):
+                preview_text.insert(tk.END, line[5:] + "\n", "h4")
+                continue
+            elif line.startswith("### "):
+                preview_text.insert(tk.END, line[4:] + "\n", "h3")
+                continue
+            elif line.startswith("## "):
+                preview_text.insert(tk.END, line[3:] + "\n", "h2")
+                continue
+            elif line.startswith("# "):
+                preview_text.insert(tk.END, line[2:] + "\n", "h1")
+                continue
+            
+            # 引用
+            if line.startswith("> "):
+                preview_text.insert(tk.END, "▎ " + line[2:] + "\n", "quote")
+                continue
+            
+            # 列表
+            if re.match(r'^[-*+] ', line):
+                preview_text.insert(tk.END, "• " + line[2:] + "\n", "list_item")
+                continue
+            if re.match(r'^\d+\. ', line):
+                preview_text.insert(tk.END, line + "\n", "list_item")
+                continue
+            
+            # 普通行：处理内联元素（含 $单行公式$）
+            self._insert_preview_inline(line + "\n", preview_text)
+    
+    def _render_tex_formula(self, formula):
+        """渲染 LaTeX 公式 — 正确调用 tex_to_utf8"""
+        try:
+            converter = tex_module.TeXToUTF8()
+            rendered = converter.translate(formula)
+            if rendered and rendered.strip():
+                return rendered.strip()
+        except Exception:
+            pass
+        # 回退：显示原始公式
+        return formula
+    
+    def _insert_preview_inline(self, text, preview_text):
+        """在预览面板中插入带内联 Markdown 的文本"""
+        import re
+        # 注意：$$ 公式已在 _render_markdown_preview 中处理，这里只处理单行 $公式$
+        patterns = [
+            (r'`([^`]+)`', 'inline_code'),
+            (r'\$([^$\n]+?)\$', 'math_inline'),  # 单行公式，不允许跨行
+            (r'\*\*(.+?)\*\*', 'bold'),
+            (r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', 'italic'),
+            (r'\[([^\]]+)\]\(([^)]+)\)', 'link'),
+        ]
+        
+        remaining = text
+        while remaining:
+            earliest_match = None
+            earliest_start = len(remaining)
+            earliest_type = None
+            
+            for pattern, tag_name in patterns:
+                match = re.search(pattern, remaining)
+                if match and match.start() < earliest_start:
+                    earliest_match = match
+                    earliest_start = match.start()
+                    earliest_type = tag_name
+            
+            if earliest_match:
+                if earliest_start > 0:
+                    preview_text.insert(tk.END, remaining[:earliest_start])
+                
+                groups = earliest_match.groups()
+                value = groups[0]
+                
+                if earliest_type == 'math_inline':
+                    rendered = self._render_tex_formula(value)
+                    preview_text.insert(tk.END, rendered, "math")
+                else:
+                    preview_text.insert(tk.END, value, (earliest_type,))
+                
+                remaining = remaining[earliest_match.end():]
+            else:
+                preview_text.insert(tk.END, remaining)
+                break
+    
+    def _refresh_preview(self, editor_text, preview_text):
+        """刷新预览内容"""
+        content = editor_text.get("1.0", tk.END)
+        self._render_markdown_preview(content, preview_text)
+    
+    def _bind_preview_sync(self, editor_text, preview_text):
+        """绑定编辑器变化到预览更新（延迟 500ms）"""
+        preview_after_id = [None]
+        
+        def _on_editor_change():
+            if preview_after_id[0]:
+                self.root.after_cancel(preview_after_id[0])
+            preview_after_id[0] = self.root.after(500, lambda: self._refresh_preview(editor_text, preview_text))
+        
+        editor_text.bind("<KeyRelease>", lambda e: _on_editor_change())
+    
+    def _add_search_replace_bar(self, parent, editor, search_var=None, replace_var=None):
+        """为编辑器添加搜索/替换工具栏，返回 (toolbar, search_var, replace_var)"""
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(fill=tk.X, padx=10, pady=(0, 5))
+        
+        if search_var is None:
+            search_var = tk.StringVar()
+        if replace_var is None:
+            replace_var = tk.StringVar()
+        
+        # 搜索框
+        ttk.Label(toolbar, text="🔍").pack(side=tk.LEFT, padx=(0, 2))
+        search_entry = ttk.Entry(toolbar, textvariable=search_var, width=28, font=("", 9))
+        search_entry.pack(side=tk.LEFT, padx=2)
+        
+        # 替换框
+        ttk.Label(toolbar, text="替换为：", font=("", 8)).pack(side=tk.LEFT, padx=(5, 2))
+        replace_entry = ttk.Entry(toolbar, textvariable=replace_var, width=22, font=("", 9))
+        replace_entry.pack(side=tk.LEFT, padx=2)
+        
+        search_label = ttk.Label(toolbar, text="", font=("", 8), foreground="#888")
+        search_label.pack(side=tk.LEFT, padx=2)
+
+        # 配置高亮标签
+        editor.tag_configure("search_hl", background="yellow", foreground="black")
+
+        def _highlight_all(query):
+            editor.tag_remove("search_hl", "1.0", tk.END)
+            if not query:
+                search_label.config(text="")
+                return
+            count = 0
+            start = "1.0"
+            while True:
+                pos = editor.search(query, start, stopindex=tk.END, nocase=True)
+                if not pos:
+                    break
+                end_pos = f"{pos}+{len(query)}c"
+                editor.tag_add("search_hl", pos, end_pos)
+                count += 1
+                start = end_pos
+            search_label.config(text=f"{count} 处匹配", foreground="#27ae60")
+
+        def _search_text(forward=True):
+            query = search_var.get().strip()
+            if not query:
+                return
+            try:
+                if forward:
+                    pos = editor.search(query, "insert", stopindex=tk.END, nocase=True)
+                else:
+                    pos = editor.search(query, "insert", stopindex="1.0", backwards=True, nocase=True)
+                if not pos:
+                    if forward:
+                        pos = editor.search(query, "1.0", stopindex=tk.END, nocase=True)
+                    else:
+                        last_line = editor.index(tk.END)
+                        pos = editor.search(query, last_line, stopindex="1.0", backwards=True, nocase=True)
+                if pos:
+                    end_pos = f"{pos}+{len(query)}c"
+                    editor.tag_remove("sel", "1.0", tk.END)
+                    editor.tag_add("sel", pos, end_pos)
+                    editor.mark_set("insert", pos)
+                    editor.see(pos)
+                else:
+                    search_label.config(text="未找到", foreground="#e74c3c")
+            except Exception:
+                pass
+
+        def _replace_current():
+            query = search_var.get().strip()
+            replacement = replace_var.get()
+            if not query:
+                return
+            sel = editor.tag_ranges("sel")
+            if not sel:
+                _search_text(True)
+                return
+            sel_text = editor.get(sel[0], sel[1])
+            if sel_text.lower() == query.lower():
+                editor.delete(sel[0], sel[1])
+                editor.insert(sel[0], replacement)
+                _highlight_all(query)
+                search_label.config(text="已替换 1 处", foreground="#27ae60")
+
+        def _replace_all():
+            query = search_var.get().strip()
+            replacement = replace_var.get()
+            if not query:
+                return
+            count = 0
+            pos = "1.0"
+            while True:
+                pos = editor.search(query, pos, stopindex=tk.END, nocase=True)
+                if not pos:
+                    break
+                end_pos = f"{pos}+{len(query)}c"
+                editor.delete(pos, end_pos)
+                editor.insert(pos, replacement)
+                count += 1
+                pos = f"{pos}+{len(replacement)}c"
+            editor.tag_remove("search_hl", "1.0", tk.END)
+            search_label.config(text=f"已替换全部 {count} 处", foreground="#27ae60")
+
+        search_entry.bind("<Return>", lambda e: _search_text(True))
+        search_entry.bind("<Shift-Return>", lambda e: _search_text(False))
+        search_var.trace_add("write", lambda *args: _highlight_all(search_var.get().strip()))
+        
+        ttk.Button(toolbar, text="▲", width=2, command=lambda: _search_text(False)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="▼", width=2, command=lambda: _search_text(True)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="替换", width=4, command=_replace_current).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="全部替换", width=6, command=_replace_all).pack(side=tk.LEFT, padx=1)
+
+        # 绑定快捷键到编辑器
+        editor.bind("<Control-f>", lambda e: search_entry.focus_set())
+        editor.bind("<Control-h>", lambda e: replace_entry.focus_set())
+        
+        return toolbar, search_var, replace_var
+
+    def _add_rmd_compile_buttons(self, parent, save_callback, get_file_path_callback):
+        """为 Rmd/Markdown 编辑器添加三格式(Rmd→PDF/HTML/DOCX)编译按钮
+        Args:
+            parent: 父容器 Frame
+            save_callback: 保存编辑器内容的回调函数
+            get_file_path_callback: 返回当前文件路径 Path 的回调函数
+        """
+        ttk.Separator(parent, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
+
+        def _compile_rmd_pdf():
+            save_callback()
+            file_path = get_file_path_callback()
+            ext = file_path.suffix.lower()
+            if ext not in (".rmd", ".md"):
+                open_file(str(file_path))
+                return
+            import subprocess
+            rmd_path_posix = file_path.as_posix()
+            try:
+                result = subprocess.run(
+                    ["Rscript", "-e", f"rmarkdown::render('{rmd_path_posix}', output_format='pdf_document')"],
+                    cwd=str(file_path.parent),
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300
+                )
+                if result.returncode == 0:
+                    pdf_path = file_path.with_suffix(".pdf")
+                    if pdf_path.exists():
+                        open_file(str(pdf_path))
+                    else:
+                        messagebox.showwarning("警告", "编译完成但未找到PDF文件")
+                else:
+                    err_msg = result.stderr.strip()[:500] if result.stderr else "未知错误"
+                    messagebox.showerror("编译失败", f"R Markdown 编译出错：\n\n{err_msg}")
+            except subprocess.TimeoutExpired:
+                messagebox.showerror("超时", "编译超过5分钟，请检查是否有死循环代码")
+            except Exception as e:
+                messagebox.showinfo("提示", f"编译失败: {e}\n\n请确保已安装R、rmarkdown和tinytex包")
+
+        def _compile_html():
+            save_callback()
+            file_path = get_file_path_callback()
+            ext = file_path.suffix.lower()
+            if ext not in (".rmd", ".md"):
+                open_file(str(file_path))
+                return
+            import subprocess
+            rmd_path_posix = file_path.as_posix()
+            try:
+                result = subprocess.run(
+                    ["Rscript", "-e", f"rmarkdown::render('{rmd_path_posix}', output_format='html_document')"],
+                    cwd=str(file_path.parent),
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300
+                )
+                if result.returncode == 0:
+                    html_path = file_path.with_suffix(".html")
+                    if html_path.exists():
+                        open_file(str(html_path))
+                    else:
+                        messagebox.showwarning("警告", "编译完成但未找到HTML文件")
+                else:
+                    err_msg = result.stderr.strip()[:500] if result.stderr else "未知错误"
+                    messagebox.showerror("编译失败", f"R Markdown 编译出错：\n\n{err_msg}")
+            except subprocess.TimeoutExpired:
+                messagebox.showerror("超时", "编译超过5分钟，请检查是否有死循环代码")
+            except Exception as e:
+                messagebox.showinfo("提示", f"编译失败: {e}")
+
+        def _compile_docx():
+            save_callback()
+            file_path = get_file_path_callback()
+            ext = file_path.suffix.lower()
+            if ext not in (".rmd", ".md"):
+                open_file(str(file_path))
+                return
+            import subprocess
+            rmd_path_posix = file_path.as_posix()
+            try:
+                result = subprocess.run(
+                    ["Rscript", "-e", f"rmarkdown::render('{rmd_path_posix}', output_format='word_document')"],
+                    cwd=str(file_path.parent),
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300
+                )
+                if result.returncode == 0:
+                    docx_path = file_path.with_suffix(".docx")
+                    if docx_path.exists():
+                        open_file(str(docx_path))
+                    else:
+                        messagebox.showwarning("警告", "编译完成但未找到DOCX文件")
+                else:
+                    err_msg = result.stderr.strip()[:500] if result.stderr else "未知错误"
+                    messagebox.showerror("编译失败", f"R Markdown 编译出错：\n\n{err_msg}")
+            except subprocess.TimeoutExpired:
+                messagebox.showerror("超时", "编译超过5分钟，请检查是否有死循环代码")
+            except Exception as e:
+                messagebox.showinfo("提示", f"编译失败: {e}")
+
+        ttk.Button(parent, text="📄 PDF", command=_compile_rmd_pdf).pack(side=tk.LEFT, padx=2)
+        ttk.Button(parent, text="🌐 HTML", command=_compile_html).pack(side=tk.LEFT, padx=2)
+        ttk.Button(parent, text="📝 DOCX", command=_compile_docx).pack(side=tk.LEFT, padx=2)
+
     def _wrap_selection_with(self, prefix, suffix=None):
         """在选中文本周围包裹内容"""
         try:
@@ -11365,29 +14409,40 @@ output: html_document
         self._refresh_pdf_resource_list = _refresh_resource_list
         _refresh_resource_list()
 
-        # 预览区域
+        # 预览区域 — 优先使用 tkinterweb 嵌入 Web 阅读器
         preview_frame = ttk.LabelFrame(main_frame, text="👁️ 预览", padding=5)
         preview_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Canvas用于显示图片
-        self._pdf_canvas = tk.Canvas(preview_frame, bg="#E8E8E8", highlightthickness=0)
-        self._pdf_canvas.pack(fill=tk.BOTH, expand=True)
-        
-        scroll_y = ttk.Scrollbar(preview_frame, orient="vertical", command=self._pdf_canvas.yview)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-        scroll_x = ttk.Scrollbar(preview_frame, orient="horizontal", command=self._pdf_canvas.xview)
-        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        self._pdf_canvas.configure(xscrollcommand=scroll_x.set, yscrollcommand=scroll_y.set)
+        self._pdf_webview = None
+        self._pdf_canvas = None
+        self._use_webview = False
 
-        self._pdf_preview_label = ttk.Label(preview_frame, text="选择PDF后点击「渲染」按钮预览",
-                                             foreground="#7f8c8d", anchor="center", justify="center")
-        self._pdf_preview_label.pack_forget()
+        try:
+            from tkinterweb import HtmlFrame
+            self._pdf_webview = HtmlFrame(preview_frame, messages_enabled=False)
+            self._pdf_webview.pack(fill=tk.BOTH, expand=True)
+            self._use_webview = True
+        except ImportError:
+            # fallback: Canvas 图片预览
+            self._pdf_canvas = tk.Canvas(preview_frame, bg="#E8E8E8", highlightthickness=0)
+            self._pdf_canvas.pack(fill=tk.BOTH, expand=True)
+            scroll_y = ttk.Scrollbar(preview_frame, orient="vertical", command=self._pdf_canvas.yview)
+            scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+            scroll_x = ttk.Scrollbar(preview_frame, orient="horizontal", command=self._pdf_canvas.xview)
+            scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+            self._pdf_canvas.configure(xscrollcommand=scroll_x.set, yscrollcommand=scroll_y.set)
+            self._pdf_preview_label = ttk.Label(preview_frame, text="选择PDF后点击「渲染」按钮预览",
+                                                 foreground="#7f8c8d", anchor="center", justify="center")
+            self._pdf_preview_label.pack_forget()
 
         # 按钮区域
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X, pady=(5, 0))
 
-        ttk.Button(btn_frame, text="🎨 渲染当前页", command=self._render_pdf_page).pack(side=tk.LEFT, padx=2)
+        if self._use_webview:
+            ttk.Button(btn_frame, text="🌐 在阅读器中打开", command=self._open_pdf_in_webview).pack(side=tk.LEFT, padx=2)
+        else:
+            ttk.Button(btn_frame, text="🎨 渲染当前页", command=self._render_pdf_page).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="📂 系统打开", command=self._open_pdf_with_system).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="🔄 刷新列表", command=_refresh_resource_list).pack(side=tk.RIGHT, padx=2)
 
@@ -11411,9 +14466,15 @@ output: html_document
         fp = self._resolve_resource_path(path_str)
         if not fp.exists():
             return
-        
+
         self._current_pdf_path = fp
-        # 尝试获取页数
+
+        # webview 模式：自动加载到阅读器
+        if self._use_webview and self._pdf_webview:
+            self._open_pdf_in_webview()
+            return
+
+        # Canvas 模式：获取页数并渲染
         try:
             from pdf2image import convert_from_path
             info = convert_from_path(str(fp), first_page=1, last_page=1, dpi=72, poppler_path=None)
@@ -11424,14 +14485,14 @@ output: html_document
             self._pdf_total_pages_var.set(f"/ {max(1, page_count)} 页")
         except Exception:
             self._pdf_total_pages_var.set("")
-        
+
         # 恢复记忆的页码
         mem_key = str(fp)
         if mem_key in self._pdf_page_mem:
             self._pdf_page_var.set(str(self._pdf_page_mem[mem_key]))
         else:
             self._pdf_page_var.set("1")
-        
+
         # 自动渲染选中的PDF
         self._render_pdf_page()
 
@@ -11519,6 +14580,36 @@ output: html_document
         else:
             messagebox.showerror("文件不存在", str(fp))
 
+    def _open_pdf_in_webview(self):
+        """在 tkinterweb 中打开 Web 版 PDF 阅读器"""
+        if not self._use_webview or not self._pdf_webview:
+            # fallback: 用系统浏览器打开
+            self._open_pdf_with_system()
+            return
+
+        sel_text = self._pdf_resource_var.get()
+        if not sel_text or sel_text == "暂无PDF资源":
+            return
+        res = self._pdf_resource_map.get(sel_text)
+        if not res:
+            return
+        path_str = res.get("path", "")
+
+        # 获取服务器端口
+        port = getattr(self, '_server_port', 6906)
+        encoded_path = __import__('urllib.parse', fromlist=['quote']).quote(path_str, safe='')
+        url = f"http://127.0.0.1:{port}/app/pdf/{encoded_path}"
+
+        try:
+            self._pdf_webview.load_url(url)
+            self.wflogger.log_action("open_pdf",
+                self._current_pdf_cid, self._current_pdf_lnum,
+                detail=f"webview: {path_str}")
+        except Exception:
+            # webview 加载失败，用系统浏览器
+            import webbrowser
+            webbrowser.open(url)
+
     def _open_in_positron(self, target_path):
         """使用Positron编辑器打开文件或目录"""
         import sys
@@ -11565,6 +14656,8 @@ output: html_document
                    command=self._save_inline_note).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="📂 外部",
                    command=lambda: self._open_note(cid, lnum)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="📄 Markdown 预览",
+                   command=lambda: self._open_markdown_preview(self._note_editor, "课程笔记预览")).pack(side=tk.LEFT, padx=2)
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
 
@@ -11572,35 +14665,118 @@ output: html_document
                                                     command=self._toggle_inline_note_mode)
         self._inline_note_toggle_btn.pack(side=tk.LEFT, padx=2)
 
+        # Rmd三格式编译按钮
+        self._add_rmd_compile_buttons(
+            toolbar,
+            save_callback=self._save_inline_note,
+            get_file_path_callback=lambda: getattr(self, '_current_note_path', None)
+        )
+
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
 
         ttk.Button(toolbar, text="🖼️ 插图",
                    command=self._insert_image_to_note).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="💻 代码",
-                   command=lambda: self._insert_template("code")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="📐 公式",
-                   command=lambda: self._insert_template("math")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="📋 链接",
-                   command=lambda: self._insert_template("link")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="📊 表格",
-                   command=lambda: self._insert_template("table")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="💻 R",
+                   command=lambda: self._insert_template("code")).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="🐍 Py",
+                   command=lambda: self._insert_template("code_python")).pack(side=tk.LEFT, padx=1)
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
 
-        ttk.Button(toolbar, text="📌 定义",
-                   command=lambda: self._insert_env("definition")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="📜 定理",
-                   command=lambda: self._insert_env("theorem")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="💡 推论",
-                   command=lambda: self._insert_env("corollary")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="🎯 例子",
-                   command=lambda: self._insert_env("example")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="❓ 问题",
-                   command=lambda: self._insert_env("problem")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="✅ 解答",
-                   command=lambda: self._insert_env("solution")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="📝 注解",
-                   command=lambda: self._insert_env("remark")).pack(side=tk.LEFT, padx=2)
+        # 环境下拉菜单
+        env_menu = tk.Menubutton(toolbar, text="📦 定理环境", relief=tk.RAISED)
+        env_menu.pack(side=tk.LEFT, padx=2)
+        env_menu.menu = tk.Menu(env_menu, tearoff=0)
+        env_menu["menu"] = env_menu.menu
+
+        env_menu.menu.add_command(label="📌 定义", command=lambda: self._insert_env("definition"))
+        env_menu.menu.add_command(label="📜 定理", command=lambda: self._insert_env("theorem"))
+        env_menu.menu.add_command(label="🎯 引理", command=lambda: self._insert_env("lemma"))
+        env_menu.menu.add_command(label="💡 推论", command=lambda: self._insert_env("corollary"))
+        env_menu.menu.add_command(label="📋 命题", command=lambda: self._insert_env("proposition"))
+        env_menu.menu.add_command(label="🏛️ 公理", command=lambda: self._insert_env("axiom"))
+        env_menu.menu.add_separator()
+        env_menu.menu.add_command(label="📝 例题", command=lambda: self._insert_env("example"))
+        env_menu.menu.add_command(label="❓ 问题", command=lambda: self._insert_env("problem"))
+        env_menu.menu.add_command(label="✅ 解答", command=lambda: self._insert_env("solution"))
+        env_menu.menu.add_command(label="📝 注解", command=lambda: self._insert_env("remark"))
+        env_menu.menu.add_command(label="🏋️ 练习", command=lambda: self._insert_env("exercise"))
+        env_menu.menu.add_command(label="📚 作业", command=lambda: self._insert_env("homework"))
+        env_menu.menu.add_separator()
+        env_menu.menu.add_command(label="📐 证明", command=lambda: self._insert_env("proof"))
+        env_menu.menu.add_command(label="📊 小结", command=lambda: self._insert_env("summary"))
+
+
+        # 公式下拉菜单
+        math_menu = tk.Menubutton(toolbar, text="📐 公式", relief=tk.RAISED)
+        math_menu.pack(side=tk.LEFT, padx=2)
+        math_menu.menu = tk.Menu(math_menu, tearoff=0)
+        math_menu["menu"] = math_menu.menu
+
+        def _insert_inline_m():
+            self._note_editor.insert(tk.INSERT, "$ $")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-2c")
+        def _insert_disp_m():
+            self._note_editor.insert(tk.INSERT, "\n$$\n\n$$\n")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-3c")
+        def _insert_frac():
+            self._note_editor.insert(tk.INSERT, "\\frac{分子}{分母}")
+        def _insert_sq():
+            self._note_editor.insert(tk.INSERT, "\\sqrt{x}")
+        def _insert_sm():
+            self._note_editor.insert(tk.INSERT, "\\sum_{i=1}^{n} x_i")
+        def _insert_int():
+            self._note_editor.insert(tk.INSERT, "\\int_{a}^{b} f(x) \\, dx")
+        def _insert_lim():
+            self._note_editor.insert(tk.INSERT, "\\lim_{x \\to \\infty}")
+        def _insert_mat():
+            self._note_editor.insert(tk.INSERT, "\n\\begin{pmatrix}\na_{11} & a_{12} \\\\\na_{21} & a_{22}\n\\end{pmatrix}\n")
+
+        math_menu.menu.add_command(label="$ 行内公式", command=_insert_inline_m)
+        math_menu.menu.add_command(label="$$ 行间公式", command=_insert_disp_m)
+        math_menu.menu.add_separator()
+        math_menu.menu.add_command(label="分式 \\frac", command=_insert_frac)
+        math_menu.menu.add_command(label="根号 \\sqrt", command=_insert_sq)
+        math_menu.menu.add_command(label="求和 \\sum", command=_insert_sm)
+        math_menu.menu.add_command(label="积分 \\int", command=_insert_int)
+        math_menu.menu.add_command(label="极限 \\lim", command=_insert_lim)
+        math_menu.menu.add_command(label="矩阵 pmatrix", command=_insert_mat)
+
+        # 希腊字母下拉菜单
+        greek_symbols = [
+            ("α", "\\alpha"), ("β", "\\beta"), ("γ", "\\gamma"), ("δ", "\\delta"),
+            ("ε", "\\epsilon"), ("θ", "\\theta"), ("λ", "\\lambda"), ("μ", "\\mu"),
+            ("π", "\\pi"), ("σ", "\\sigma"), ("φ", "\\phi"), ("ω", "\\omega"),
+            ("Δ", "\\Delta"), ("Σ", "\\Sigma"), ("Ω", "\\Omega"), ("∞", "\\infty"),
+            ("±", "\\pm"), ("≤", "\\leq"), ("≥", "\\geq"), ("≠", "\\neq"),
+            ("≈", "\\approx"), ("⊂", "\\subset"), ("⊆", "\\subseteq"), ("∈", "\\in"),
+            ("∀", "\\forall"), ("∃", "\\exists"), ("∇", "\\nabla"), ("∂", "\\partial"),
+        ]
+        greek_menu = tk.Menubutton(toolbar, text="αβγ", relief=tk.RAISED)
+        greek_menu.pack(side=tk.LEFT, padx=2)
+        greek_menu.menu = tk.Menu(greek_menu, tearoff=0)
+        greek_menu["menu"] = greek_menu.menu
+        for symbol, latex in greek_symbols:
+            greek_menu.menu.add_command(label=f"{symbol} {latex}", command=lambda lt=latex: self._note_editor.insert(tk.INSERT, lt))
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
+
+        
+        # 格式化按钮
+        ttk.Button(toolbar, text="代码",
+                   command=lambda: self._wrap_selection("`")).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text=">引用",
+                   command=lambda: self._insert_template("blockquote")).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="📋 链接",
+                   command=lambda: self._insert_template("link")).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="📊 表格",
+                   command=lambda: self._insert_template("table")).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="☑ 待办",
+                   command=lambda: self._insert_template("checkbox")).pack(side=tk.LEFT, padx=1)
+
+
         
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
         
@@ -11623,20 +14799,28 @@ output: html_document
         self._note_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         editor_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self._note_editor.tag_configure("yaml_delim", foreground="#7f8c8d", font=("Consolas", 10, "bold"))
-        self._note_editor.tag_configure("yaml_key", foreground="#8e44ad")
-        self._note_editor.tag_configure("yaml_val", foreground="#2980b9")
-        self._note_editor.tag_configure("heading", foreground="#2c3e50", font=("Consolas", 11, "bold"))
-        self._note_editor.tag_configure("heading2", foreground="#34495e", font=("Consolas", 10, "bold"))
-        self._note_editor.tag_configure("code_block", foreground="#27ae60", font=("Consolas", 10))
-        self._note_editor.tag_configure("code_delim", foreground="#95a5a6", font=("Consolas", 10, "bold"))
-        self._note_editor.tag_configure("math_block", foreground="#c0392b", font=("Consolas", 10))
-        self._note_editor.tag_configure("bold", foreground="#2c3e50", font=("Consolas", 10, "bold"))
-        self._note_editor.tag_configure("italic", foreground="#7f8c8d")
-        self._note_editor.tag_configure("link", foreground="#2980b9", underline=True)
-        self._note_editor.tag_configure("image_ref", foreground="#e67e22")
-        self._note_editor.tag_configure("blockquote", foreground="#7f8c8d", font=("Consolas", 10, "italic"))
-        self._note_editor.tag_configure("list_item", foreground="#8e44ad")
+        # 添加搜索/替换工具栏
+        self._add_search_replace_bar(parent, self._note_editor)
+
+        self._note_editor.tag_configure("yaml_delim", foreground="#555555", font=("Consolas", 10, "bold"))
+        self._note_editor.tag_configure("yaml_key", foreground="#6A0DAD", font=("Consolas", 10, "bold"))
+        self._note_editor.tag_configure("yaml_val", foreground="#0066CC")
+        self._note_editor.tag_configure("heading", foreground="#1a1a1a", font=("Consolas", 13, "bold"))
+        self._note_editor.tag_configure("heading2", foreground="#2c2c2c", font=("Consolas", 12, "bold"))
+        self._note_editor.tag_configure("heading3", foreground="#3a3a3a", font=("Consolas", 11, "bold"))
+        self._note_editor.tag_configure("heading4", foreground="#4a4a4a", font=("Consolas", 11, "bold", "italic"))
+        self._note_editor.tag_configure("code_block", foreground="#006400", font=("Consolas", 10), background="#f0f8f0")
+        self._note_editor.tag_configure("code_delim", foreground="#555555", font=("Consolas", 10, "bold"))
+        self._note_editor.tag_configure("inline_code", foreground="#B22222", background="#fff0f0", font=("Consolas", 10, "bold"))
+        self._note_editor.tag_configure("math_block", foreground="#8B0000", font=("Consolas", 11, "bold"))
+        self._note_editor.tag_configure("bold", foreground="#1a1a1a", font=("Consolas", 10, "bold"))
+        self._note_editor.tag_configure("italic", foreground="#444444", font=("Consolas", 10, "italic"))
+        self._note_editor.tag_configure("link", foreground="#0055CC", underline=True)
+        self._note_editor.tag_configure("image_ref", foreground="#CC6600", font=("Consolas", 10, "bold"))
+        self._note_editor.tag_configure("blockquote", foreground="#444444", font=("Consolas", 10, "italic"))
+        self._note_editor.tag_configure("list_item", foreground="#6A0DAD", font=("Consolas", 10, "bold"))
+        self._note_editor.tag_configure("hr", foreground="#999999", font=("Consolas", 8))
+        self._note_editor.tag_configure("table", foreground="#006400", font=("Consolas", 10))
 
         if note_path and note_path.exists():
             try:
@@ -11650,13 +14834,97 @@ output: html_document
         self._note_editor.bind("<Control-b>", lambda e: self._wrap_selection("**"))
         self._note_editor.bind("<Control-i>", lambda e: self._wrap_selection("*"))
 
+        def _inline_insert_math_block(event=None):
+            self._note_editor.insert(tk.INSERT, "\n$$\n\n$$\n")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-3c")
+        def _inline_insert_frac(event=None):
+            self._note_editor.insert(tk.INSERT, "\\frac{}{}")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-1c")
+        def _inline_insert_sum(event=None):
+            self._note_editor.insert(tk.INSERT, "\\sum_{i=1}^{n}")
+        def _inline_insert_int(event=None):
+            self._note_editor.insert(tk.INSERT, "\\int_{a}^{b} f(x) \\, dx")
+        def _inline_insert_sqrt(event=None):
+            self._note_editor.insert(tk.INSERT, "\\sqrt{}")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-1c")
+        def _inline_insert_vec(event=None):
+            self._note_editor.insert(tk.INSERT, "\\vec{}")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-1c")
+        def _inline_insert_limit(event=None):
+            self._note_editor.insert(tk.INSERT, "\\lim_{x \\to \\infty}")
+        def _inline_insert_matrix(event=None):
+            tpl = "\n\\begin{pmatrix}\n\n\\end{pmatrix}\n"
+            self._note_editor.insert(tk.INSERT, tpl)
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-18c")
+        def _inline_insert_code_block(event=None):
+            self._note_editor.insert(tk.INSERT, "\n```{r}\n\n```\n")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-4c")
+        def _inline_insert_blockquote(event=None):
+            self._note_editor.insert(tk.INSERT, "\n> ")
+        def _inline_insert_link(event=None):
+            self._note_editor.insert(tk.INSERT, "[]()")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-2c")
+        def _inline_insert_image(event=None):
+            self._note_editor.insert(tk.INSERT, "![](image.png)")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-10c")
+        def _inline_insert_h1(event=None):
+            self._note_editor.insert(tk.INSERT, "\n# 标题\n\n")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-5c")
+        def _inline_insert_h2(event=None):
+            self._note_editor.insert(tk.INSERT, "\n## 标题\n\n")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-5c")
+        def _inline_insert_h3(event=None):
+            self._note_editor.insert(tk.INSERT, "\n### 标题\n\n")
+            self._note_editor.mark_set("insert", f"{self._note_editor.index(tk.INSERT)}-5c")
+        def _inline_insert_hline(event=None):
+            self._note_editor.insert(tk.INSERT, "\n---\n\n")
+        def _inline_insert_ulist(event=None):
+            self._note_editor.insert(tk.INSERT, "\n- 列表项\n")
+        def _inline_insert_olist(event=None):
+            self._note_editor.insert(tk.INSERT, "\n1. 列表项\n")
+        def _inline_insert_checkbox(event=None):
+            self._note_editor.insert(tk.INSERT, "\n- [ ] 待办事项\n")
+        def _inline_insert_table(event=None):
+            tpl = "\n| 列1 | 列2 | 列3 |\n|------|------|------|\n|  |  |  |\n"
+            self._note_editor.insert(tk.INSERT, tpl)
+        def _inline_insert_footnote(event=None):
+            self._note_editor.insert(tk.INSERT, "[^1]\n\n[^1]: 脚注内容")
+        def _inline_insert_strikethrough(event=None):
+            self._note_editor.insert(tk.INSERT, "~~删除线~~")
+
+        self._note_editor.bind("<Control-0>", _inline_insert_math_block)
+        self._note_editor.bind("<Control-parenleft>", _inline_insert_frac)
+        self._note_editor.bind("<Control-plus>", lambda e: self._wrap_selection("$$"))
+        self._note_editor.bind("<Control-underscore>", _inline_insert_sum)
+        self._note_editor.bind("<Control-equal>", _inline_insert_int)
+        self._note_editor.bind("<Control-grave>", _inline_insert_code_block)
+        self._note_editor.bind("<Alt-q>", _inline_insert_blockquote)
+        self._note_editor.bind("<Alt-k>", _inline_insert_link)
+        self._note_editor.bind("<Alt-i>", _inline_insert_image)
+        self._note_editor.bind("<Control-1>", _inline_insert_h1)
+        self._note_editor.bind("<Control-2>", _inline_insert_h2)
+        self._note_editor.bind("<Control-3>", _inline_insert_h3)
+        self._note_editor.bind("<Alt-h>", _inline_insert_hline)
+        self._note_editor.bind("<Alt-u>", _inline_insert_ulist)
+        self._note_editor.bind("<Alt-o>", _inline_insert_olist)
+        self._note_editor.bind("<Alt-x>", _inline_insert_checkbox)
+        self._note_editor.bind("<Alt-t>", _inline_insert_table)
+        self._note_editor.bind("<Alt-f>", _inline_insert_footnote)
+        self._note_editor.bind("<Alt-d>", _inline_insert_strikethrough)
+
         status = ttk.Frame(parent)
         status.pack(fill=tk.X, pady=(3, 0))
         self._note_status = ttk.Label(status, text=f"📄 {note_path.name if note_path else '新笔记'}",
                                        font=("", 8), foreground="#95a5a6")
         self._note_status.pack(side=tk.LEFT)
-        ttk.Label(status, text="自动保存 | Ctrl+S 手动保存 | Ctrl+B 粗体 | Ctrl+I 斜体",
-                  font=("", 8), foreground="#bdc3c7").pack(side=tk.RIGHT)
+        shortcuts_text = (
+            "Ctrl+S保存 | Ctrl+B粗体 | Ctrl+I斜体 | Ctrl+M公式 | "
+            "Ctrl+1/2/3标题 | Ctrl+0公式块 | Ctrl+`代码块 | Ctrl+(分式 | "
+            "Alt+Q引用 | Alt+K链接 | Alt+I插图 | Alt+H横线 | "
+            "Alt+U无序 | Alt+O有序 | Alt+X待办 | Alt+T表格 | Alt+F脚注 | Alt+D删除线"
+        )
+        ttk.Label(status, text=shortcuts_text,
+                  font=("", 7), foreground="#bdc3c7").pack(side=tk.RIGHT)
         
         self._note_auto_save_delay = 5000
         self._note_auto_save_timer = None
@@ -11796,9 +15064,9 @@ output: html_document
             return
         te = self._note_editor
         cursor_pos = te.index(tk.INSERT)
-        for tag in ("yaml_delim", "yaml_key", "yaml_val", "heading", "heading2",
-                     "code_block", "code_delim", "math_block", "bold", "italic",
-                     "link", "image_ref", "blockquote", "list_item"):
+        for tag in ("yaml_delim", "yaml_key", "yaml_val", "heading", "heading2", "heading3", "heading4",
+                     "code_block", "code_delim", "inline_code", "math_block", "bold", "italic",
+                     "link", "image_ref", "blockquote", "list_item", "hr", "table"):
             te.tag_remove(tag, "1.0", tk.END)
 
         content = te.get("1.0", tk.END)
@@ -11846,21 +15114,39 @@ output: html_document
                 te.tag_add("math_block", f"{li}.0", f"{li}.end")
                 continue
 
+            # 标题 H1-H4
             if stripped.startswith('# ') and not stripped.startswith('## '):
                 te.tag_add("heading", f"{li}.0", f"{li}.end")
                 continue
             if stripped.startswith('## ') and not stripped.startswith('### '):
                 te.tag_add("heading2", f"{li}.0", f"{li}.end")
                 continue
+            if stripped.startswith('### ') and not stripped.startswith('#### '):
+                te.tag_add("heading3", f"{li}.0", f"{li}.end")
+                continue
+            if stripped.startswith('#### '):
+                te.tag_add("heading4", f"{li}.0", f"{li}.end")
+                continue
+
+            # 水平线
+            if re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', stripped):
+                te.tag_add("hr", f"{li}.0", f"{li}.end")
+                continue
 
             if stripped.startswith('> '):
                 te.tag_add("blockquote", f"{li}.0", f"{li}.end")
                 continue
 
-            if re.match(r'^\s*[-*]\s', line):
+            if re.match(r'^\s*[-*+]\s', line):
+                te.tag_add("list_item", f"{li}.0", f"{li}.end")
+                continue
+            if re.match(r'^\s*\d+\.\s', line):
                 te.tag_add("list_item", f"{li}.0", f"{li}.end")
                 continue
 
+            # 行内元素：行内代码、粗体、斜体、链接、图片
+            for m in re.finditer(r'`([^`]+)`', line):
+                te.tag_add("inline_code", f"{li}.{m.start()}", f"{li}.{m.end()}")
             for m in re.finditer(r'\*\*(.+?)\*\*', line):
                 te.tag_add("bold", f"{li}.{m.start()}", f"{li}.{m.end()}")
             for m in re.finditer(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', line):
@@ -11939,9 +15225,22 @@ output: html_document
     def _insert_template(self, template_type):
         templates = {
             "code": '\n```{r chunk_name, echo=TRUE}\n# R code here\n```\n',
+            "code_python": '\n```{python, echo=TRUE}\n# Python code here\n```\n',
             "math": '\n$$\nE = mc^2\n$$\n',
+            "math_inline": '$E = mc^2$',
+            "align": '\n\\begin{align}\nf(x) &= x^2 + 2x + 1 \\\\\n     &= (x + 1)^2\n\\end{align}\n',
+            "fraction": '\\frac{分子}{分母}',
+            "sqrt": '\\sqrt{x}',
+            "sum": '\\sum_{i=1}^{n} x_i',
+            "integral": '\\int_{a}^{b} f(x) \\, dx',
+            "limit": '\\lim_{x \\to \\infty}',
+            "matrix": '\\begin{pmatrix}\na_{11} & a_{12} \\\\\na_{21} & a_{22}\n\\end{pmatrix}',
             "link": '[链接文字](https://example.com)',
             "table": '\n| 列1 | 列2 | 列3 |\n|------|------|------|\n| 数据 | 数据 | 数据 |\n',
+            "blockquote": '\n> 引用内容\n',
+            "code_inline": '`code`',
+            "footnote": '[^1]\n\n[^1]: 脚注内容',
+            "checkbox": '- [ ] 待办事项\n- [x] 已完成',
         }
         tpl = templates.get(template_type, "")
         if tpl:
@@ -11953,10 +15252,17 @@ output: html_document
             "definition": '\n::: definition\n**定义名称**\n在这里输入定义内容\n:::\n',
             "theorem": '\n::: theorem\n**定理名称**\n在这里输入定理内容\n:::\n',
             "corollary": '\n::: corollary\n**推论名称**\n在这里输入推论内容\n:::\n',
-            "example": '\n::: example\n**例子名称**\n在这里输入例子内容\n:::\n',
+            "lemma": '\n::: lemma\n**引理名称**\n在这里输入引理内容\n:::\n',
+            "proposition": '\n::: proposition\n**命题名称**\n在这里输入命题内容\n:::\n',
+            "axiom": '\n::: axiom\n**公理名称**\n在这里输入公理内容\n:::\n',
+            "example": '\n::: example\n**例题名称**\n在这里输入例题内容\n:::\n',
             "problem": '\n::: problem\n**问题名称**\n在这里输入问题内容\n:::\n',
             "solution": '\n::: solution\n**解答名称**\n在这里输入解答内容\n:::\n',
             "remark": '\n::: remark\n**注解名称**\n在这里输入注解内容\n:::\n',
+            "exercise": '\n::: exercise\n**练习名称**\n在这里输入练习内容\n:::\n',
+            "homework": '\n::: homework\n**作业名称**\n在这里输入作业内容\n:::\n',
+            "proof": '\n::: proof\n**证明过程**\n在这里输入证明内容\n:::\n',
+            "summary": '\n::: summary\n**本节小结**\n在这里输入总结内容\n:::\n',
         }
         tpl = env_templates.get(env_type, "")
         if tpl:
@@ -12502,7 +15808,7 @@ output: html_document
     def _save_annotations(self, cid, lnum):
         """保存批注到文件"""
         try:
-            ann_file = BASE / "log_annotations.json"
+            ann_file = _resolve_data_file("log_annotations.json")
             data = {}
             if ann_file.exists():
                 data = json.loads(ann_file.read_text(encoding="utf-8"))
@@ -12513,9 +15819,9 @@ output: html_document
             print(f"保存批注错误: {e}")
 
     def _load_annotations(self, cid, lnum):
-        """加载批注"""
+        """加载批注（兼容旧位置）"""
         try:
-            ann_file = BASE / "log_annotations.json"
+            ann_file = _resolve_data_file("log_annotations.json")
             if ann_file.exists():
                 data = json.loads(ann_file.read_text(encoding="utf-8"))
                 key = f"{cid}|{lnum}"
@@ -12669,7 +15975,9 @@ output: html_document
 
         # 更新顶栏进度
         pct = self.system.get_completion_pct(course_id)
-        for w in self.content_frame.winfo_children():
+        # 在缓存标签页中查找进度条
+        search_root = self._tab_cache.get(f"exec_{course_id}", self.content_frame)
+        for w in search_root.winfo_children():
             if isinstance(w, ttk.Frame):
                 for child in w.winfo_children():
                     if isinstance(child, ttk.Progressbar):
@@ -12777,7 +16085,7 @@ output: html_document
         
         period_combo.bind("<<ComboboxSelected>>", _on_period_change)
         
-        ttk.Button(header, text="🔄 刷新", command=self._show_workflow_log).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(header, text="🔄 刷新", command=lambda: self._invalidate_and_switch("wflog", self._show_workflow_log)).pack(side=tk.RIGHT, padx=5)
         ttk.Button(header, text="🗑️ 清空日志", command=self._clear_workflow_log).pack(side=tk.RIGHT, padx=5)
 
         entries = self.wflogger.get_entries()
@@ -13765,80 +17073,182 @@ output: html_document
                   font=("", 9), foreground="#7f8c8d").pack(pady=10)
 
     def _show_batch_delete(self):
-        """批量选择删除课程"""
+        """批量选择删除课程（增强版：全选/反选/搜索/直接点击切换）"""
         dlg = tk.Toplevel(self.root)
         dlg.title("🗑️ 批量删除课程")
-        dlg.geometry("700x500")
+        dlg.geometry("800x560")
         dlg.transient(self.root)
         dlg.grab_set()
 
-        ttk.Label(dlg, text=f"选择要删除的课程（共 {len(self.system.courses)} 门）",
-                  font=("", 13, "bold"), foreground="#2C3E50").pack(pady=(10, 5))
+        all_courses = self.system.courses
+        row_map = {}
 
-        cols = ("select", "title", "domain", "hours", "lessons")
-        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=18)
+        top_frame = ttk.Frame(dlg)
+        top_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+        ttk.Label(top_frame, text=f"共 {len(all_courses)} 门课程",
+                  font=("", 13, "bold"), foreground="#2C3E50").pack(side=tk.LEFT)
+
+        search_frame = ttk.Frame(dlg)
+        search_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+        ttk.Label(search_frame, text="🔍 搜索：", font=("", 9)).pack(side=tk.LEFT)
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=search_var, width=30)
+        search_entry.pack(side=tk.LEFT, padx=(0, 5))
+
+        cols = ("select", "title", "domain", "hours", "lessons", "source")
+        tree_frame = ttk.Frame(dlg)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=20)
         tree.heading("select", text="删除?")
         tree.heading("title", text="课程标题")
         tree.heading("domain", text="域")
         tree.heading("hours", text="课时")
         tree.heading("lessons", text="条目")
+        tree.heading("source", text="来源文件")
         tree.column("select", width=50, anchor="center")
-        tree.column("title", width=320)
-        tree.column("domain", width=100, anchor="center")
+        tree.column("title", width=280)
+        tree.column("domain", width=80, anchor="center")
         tree.column("hours", width=60, anchor="center")
         tree.column("lessons", width=60, anchor="center")
+        tree.column("source", width=120)
 
-        ts = ttk.Scrollbar(dlg, orient="vertical", command=tree.yview)
+        ts = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=ts.set)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=5)
-        ts.pack(side=tk.LEFT, fill=tk.Y, pady=5)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ts.pack(side=tk.LEFT, fill=tk.Y)
 
-        right = ttk.Frame(dlg, padding=8)
-        right.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=5)
+        tree.tag_configure("del", foreground="#e74c3c")
+        tree.tag_configure("normal", foreground="#000000")
 
-        row_map = {}
-        for c in self.system.courses:
-            cid = c.get("note_id", c.get("course_title", ""))
-            title = c.get("course_title", "")
-            domain = c.get("domain", "UNKNOWN")
-            hours = c.get("total_hours", "?")
-            n_lessons = len(c.get("lessons", []))
-            iid = tree.insert("", "end", values=("☐", title, DOMAIN_NAMES.get(domain, domain),
-                                                   hours, n_lessons))
-            row_map[iid] = (cid, False)
+        def _populate(keyword=""):
+            for item in tree.get_children():
+                tree.delete(item)
+            row_map.clear()
+            kw = keyword.strip().lower()
+            for c in all_courses:
+                cid = c.get("note_id", c.get("course_title", ""))
+                title = c.get("course_title", "")
+                domain = c.get("domain", "UNKNOWN")
+                hours = c.get("total_hours", "?")
+                n_lessons = len(c.get("lessons", []))
+                source = ""
+                for p in self.system.db_paths:
+                    data = load_json_safe(p)
+                    if data:
+                        for dc in data.get("courses", []):
+                            if dc.get("note_id") == cid or dc.get("course_title") == title:
+                                source = p.name
+                                break
+                    if source:
+                        break
+                if kw and kw not in title.lower() and kw not in domain.lower() and kw not in source.lower():
+                    continue
+                iid = tree.insert("", "end", values=("☐", title, DOMAIN_NAMES.get(domain, domain),
+                                                       hours, n_lessons, source),
+                                  tags=("normal",))
+                row_map[iid] = (cid, False)
 
-        def _toggle():
-            sel = tree.selection()
-            if not sel:
+        _populate()
+
+        search_var.trace_add("write", lambda *args: _populate(search_var.get()))
+
+        def _toggle_item(iid):
+            if iid not in row_map:
                 return
-            iid = sel[0]
             cid, marked = row_map[iid]
             row_map[iid] = (cid, not marked)
             mark = "☑️" if not marked else "☐"
             vals = list(tree.item(iid, "values"))
             vals[0] = mark
-            tree.item(iid, values=vals, tags=("del",) if not marked else ())
+            tree.item(iid, values=vals, tags=("del",) if not marked else ("normal",))
 
-        tree.tag_configure("del", foreground="#e74c3c")
+        def _on_click(event):
+            region = tree.identify_region(event.x, event.y)
+            if region == "cell":
+                col = tree.identify_column(event.x)
+                iid = tree.identify_row(event.y)
+                if iid and col == "#1":
+                    _toggle_item(iid)
+
+        tree.bind("<Button-1>", _on_click)
+
+        def _toggle_selected():
+            for iid in tree.selection():
+                _toggle_item(iid)
+
+        def _select_all():
+            for iid in tree.get_children():
+                cid, marked = row_map[iid]
+                if not marked:
+                    row_map[iid] = (cid, True)
+                    vals = list(tree.item(iid, "values"))
+                    vals[0] = "☑️"
+                    tree.item(iid, values=vals, tags=("del",))
+
+        def _deselect_all():
+            for iid in tree.get_children():
+                cid, marked = row_map[iid]
+                if marked:
+                    row_map[iid] = (cid, False)
+                    vals = list(tree.item(iid, "values"))
+                    vals[0] = "☐"
+                    tree.item(iid, values=vals, tags=("normal",))
+
+        def _invert_selection():
+            for iid in tree.get_children():
+                _toggle_item(iid)
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        ttk.Button(btn_frame, text="☑️ 全选", command=_select_all).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="☐ 全不选", command=_deselect_all).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="🔄 反选", command=_invert_selection).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="☑️ 切换选中行", command=_toggle_selected).pack(side=tk.LEFT, padx=3)
+
+        ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        count_label = ttk.Label(btn_frame, text="已选: 0 门", font=("", 10, "bold"), foreground="#e74c3c")
+        count_label.pack(side=tk.LEFT, padx=5)
+
+        def _update_count(*args):
+            n = sum(1 for iid, (cid, marked) in row_map.items() if marked)
+            count_label.config(text=f"已选: {n} 门")
+        search_var.trace_add("write", _update_count)
+
+        bottom_frame = ttk.Frame(dlg)
+        bottom_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         def _delete():
             to_delete = [cid for iid, (cid, marked) in row_map.items() if marked]
             if not to_delete:
                 messagebox.showinfo("提示", "未选择要删除的课程", parent=dlg)
                 return
-            if not messagebox.askyesno("⚠️ 确认", f"将删除 {len(to_delete)} 门课程及其所有数据，继续？", parent=dlg):
+            course_names = []
+            for cid in to_delete:
+                c = self.system.get_course_by_id(cid)
+                if c:
+                    course_names.append(c.get("course_title", cid))
+            detail = "\n".join(f"  • {n}" for n in course_names[:10])
+            if len(course_names) > 10:
+                detail += f"\n  ... 等 {len(course_names)} 门"
+            if not messagebox.askyesno("⚠️ 确认删除",
+                    f"将删除以下 {len(to_delete)} 门课程及其所有数据：\n{detail}\n\n此操作不可撤销！继续？",
+                    parent=dlg):
                 return
             for cid in to_delete:
                 self.system.remove_course(cid)
             dlg.destroy()
+            self._log(f"🗑️ 批量删除: {len(to_delete)} 门课程")
             self._refresh_all()
 
-        ttk.Button(right, text="☑️ 切换选择", command=_toggle).pack(fill=tk.X, pady=(10, 5))
-        ttk.Button(right, text="🗑️ 删除选中", command=_delete).pack(fill=tk.X, pady=5)
-        ttk.Button(right, text="❌ 取消", command=dlg.destroy).pack(fill=tk.X, pady=5)
+        ttk.Button(bottom_frame, text="🗑️ 删除选中", command=_delete).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_frame, text="❌ 取消", command=dlg.destroy).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(right, text="点击课程行后\n点击切换选择\n标记要删除的课程",
-                  font=("", 9), foreground="#7f8c8d").pack(pady=10)
+        ttk.Label(bottom_frame, text="💡 点击第一列 ☐/☑️ 直接切换 | 支持搜索过滤",
+                  font=("", 9), foreground="#7f8c8d").pack(side=tk.RIGHT)
 
     def _show_review_reminder(self, course_id):
         """显示待复习课时列表，支持一键复习+自动打开笔记"""
@@ -13936,7 +17346,8 @@ output: html_document
             tree.selection_set(tree.get_children()[0])
 
     def _refresh_overview(self):
-        self._show_overview()
+        """刷新总览页 — 重建缓存标签页"""
+        self._invalidate_and_switch("overview", self._build_overview_tab)
 
 
 # ============================================================
@@ -13975,15 +17386,24 @@ output: html_document
                    command=self._tree_editor_add_course).pack(side=tk.LEFT, padx=1)
         ttk.Button(btn_frame, text="🗑️", width=3,
                    command=self._tree_editor_delete_course).pack(side=tk.LEFT, padx=1)
+        ttk.Button(btn_frame, text="🗑️✖", width=4,
+                   command=self._tree_editor_batch_delete_courses).pack(side=tk.LEFT, padx=1)
         ttk.Button(btn_frame, text="🔄", width=3,
                    command=self._tree_editor_refresh_courses).pack(side=tk.LEFT, padx=1)
+
+        toolbar2 = ttk.Frame(parent)
+        toolbar2.pack(fill=tk.X, pady=(0, 3))
+        ttk.Button(toolbar2, text="🏷️ 批量改域", width=10,
+                   command=self._show_batch_edit_domain).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar2, text="📤 导出选中", width=10,
+                   command=self._show_export_selected).pack(side=tk.LEFT, padx=1)
 
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
         cols = ("domain", "lessons", "hours")
         self._course_tree = ttk.Treeview(tree_frame, columns=cols, show="tree headings",
-                                         height=25, selectmode="browse")
+                                         height=25, selectmode="extended")
         self._course_tree.heading("#0", text="课程名称")
         self._course_tree.heading("domain", text="域")
         self._course_tree.heading("lessons", text="课时")
@@ -14017,12 +17437,9 @@ output: html_document
             n_lessons = len(c.get("lessons", []))
             hours = c.get("total_hours", "?")
 
-            color = DOMAIN_COLORS.get(domain, "#7f8c8d")
             self._course_tree.insert("", "end", iid=cid, text=title,
                                      values=(domain, n_lessons, hours),
                                      tags=("course",))
-            self._course_tree.tag_bind(cid, "<<TreeviewSelect>>",
-                                       lambda e, c=cid: self._tree_editor_on_course_select(e, c))
 
         if hasattr(self, '_course_tree') and self._course_tree.get_children():
             if not self._course_tree.selection():
@@ -14121,6 +17538,21 @@ output: html_document
                 "review_schedule": {},
             }
             self._save_progress()
+            
+            # 持久化到主数据库文件
+            if self.system.db_paths:
+                # 使用第一个数据库路径来保存
+                p = self.system.db_paths[0]
+                data = load_json_safe(p) or {"metadata": {}, "courses": []}
+                if "courses" not in data:
+                    data["courses"] = []
+                data["courses"].append(course)
+                p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            else:
+                # 如果没有数据库路径，创建默认的
+                p = _resolve_data_file("courses_structured.json")
+                self.system.save_courses_to(str(p), [course])
+                self.system.add_db_path(p)
 
             self._tree_editor_refresh_courses()
             self._course_tree.selection_set(key)
@@ -14136,6 +17568,10 @@ output: html_document
         sel = self._course_tree.selection()
         if not sel:
             messagebox.showinfo("提示", "请先选择要删除的课程")
+            return
+
+        if len(sel) > 1:
+            self._tree_editor_batch_delete_courses()
             return
 
         course_id = sel[0]
@@ -14154,6 +17590,39 @@ output: html_document
                 for item in self._lesson_tree.get_children():
                     self._lesson_tree.delete(item)
 
+    def _tree_editor_batch_delete_courses(self):
+        """批量删除选中的课程"""
+        sel = self._course_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择要删除的课程（Ctrl+点击多选）")
+            return
+
+        course_info = []
+        for course_id in sel:
+            course = self.system.get_course_by_id(course_id)
+            if course:
+                course_info.append((course_id, course.get("course_title", ""), len(course.get("lessons", []))))
+
+        if not course_info:
+            return
+
+        detail = "\n".join(f"  • {title} ({n_lessons} 课时)" for _, title, n_lessons in course_info[:15])
+        if len(course_info) > 15:
+            detail += f"\n  ... 等 {len(course_info)} 门"
+
+        if not messagebox.askyesno("⚠️ 确认批量删除",
+                f"将删除以下 {len(course_info)} 门课程：\n{detail}\n\n将同时删除进度记录和资源索引。\n此操作不可撤销！继续？"):
+            return
+
+        for course_id, _, _ in course_info:
+            self.system.remove_course(course_id)
+
+        self._tree_editor_refresh_courses()
+        if hasattr(self, '_lesson_tree'):
+            for item in self._lesson_tree.get_children():
+                self._lesson_tree.delete(item)
+        self._log(f"🗑️ 批量删除: {len(course_info)} 门课程")
+
     def _tree_editor_edit_course(self):
         """编辑选中课程基本信息"""
         sel = self._course_tree.selection()
@@ -14165,13 +17634,15 @@ output: html_document
         if not course:
             return
 
+        old_title = course.get("course_title", "")
+
         dlg = tk.Toplevel(self.root)
         dlg.title("✏️ 编辑课程信息")
-        dlg.geometry("500x450")
+        dlg.geometry("550x520")
         dlg.transient(self.root)
         dlg.grab_set()
 
-        ttk.Label(dlg, text=f"编辑：{course.get('course_title', '')}",
+        ttk.Label(dlg, text=f"编辑：{old_title}",
                  font=("", 13, "bold")).pack(pady=10)
 
         form_frame = ttk.Frame(dlg, padding=15)
@@ -14182,17 +17653,31 @@ output: html_document
         for label, key, value in [
             ("课程名称", "title", course.get("course_title", "")),
             ("学科域", "domain", course.get("domain", "UNKNOWN")),
-            ("总课时", "hours", str(course.get("total_hours", ""))),
+            ("总课时", "hours", str(course.get("total_hours", "") or "")),
             ("授课对象", "audience", course.get("target_audience", "")),
             ("考核方式", "assessment", course.get("assessment", "")),
             ("课程定位", "positioning", course.get("positioning", "")),
         ]:
             ttk.Label(form_frame, text=f"{label}：").grid(row=row, column=0, sticky="e", pady=5)
-            var = tk.StringVar(value=value)
+            var = tk.StringVar(value=str(value))
             entry = ttk.Entry(form_frame, textvariable=var, width=35)
             entry.grid(row=row, column=1, sticky="w", pady=5, padx=5)
             fields[key] = var
             row += 1
+
+        ttk.Label(form_frame, text="先修课程：").grid(row=row, column=0, sticky="ne", pady=5)
+        prereq_frame = ttk.Frame(form_frame)
+        prereq_frame.grid(row=row, column=1, sticky="w", pady=5, padx=5)
+        prereq_var = tk.StringVar(value=", ".join(course.get("prerequisites", [])))
+        ttk.Entry(prereq_frame, textvariable=prereq_var, width=35).pack()
+        ttk.Label(prereq_frame, text="多个用逗号分隔", font=("", 8), foreground="#888").pack()
+        row += 1
+
+        ttk.Label(form_frame, text="课程描述：").grid(row=row, column=0, sticky="ne", pady=5)
+        desc_text = tk.Text(form_frame, width=35, height=4, font=("", 10))
+        desc_text.insert("1.0", course.get("description", ""))
+        desc_text.grid(row=row, column=1, sticky="w", pady=5, padx=5)
+        row += 1
 
         btn_frame = ttk.Frame(dlg, padding=10)
         btn_frame.pack(fill=tk.X)
@@ -14210,19 +17695,31 @@ output: html_document
             course["target_audience"] = fields["audience"].get().strip()
             course["assessment"] = fields["assessment"].get().strip()
             course["positioning"] = fields["positioning"].get().strip()
+            course["prerequisites"] = [p.strip() for p in prereq_var.get().split(",") if p.strip()]
+            course["description"] = desc_text.get("1.0", tk.END).strip()
 
             for p in self.system.db_paths:
                 data = load_json_safe(p)
                 if not data:
                     continue
                 for ci, c in enumerate(data.get("courses", [])):
-                    if c.get("note_id") == course_id or c.get("course_title") == title:
+                    if c.get("note_id") == course_id:
+                        data["courses"][ci] = course
+                        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                        break
+                    elif c.get("course_title") == old_title and not c.get("note_id"):
                         data["courses"][ci] = course
                         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                         break
 
+            self.system.reload_all_sources()
+            self._rename_note_on_title_change(course, old_title)
             self._tree_editor_refresh_courses()
-            self._course_tree.selection_set(course_id)
+            new_id = course.get("note_id") or course.get("course_title")
+            try:
+                self._course_tree.selection_set(new_id)
+            except Exception:
+                pass
             dlg.destroy()
             self._log(f"✅ 更新课程: 《{title}》")
 
@@ -14247,6 +17744,8 @@ output: html_document
                    command=self._tree_editor_edit_lesson).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="🗑️ 删除", width=8,
                    command=self._tree_editor_delete_lesson).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="🗑️✖ 批量删课时", width=12,
+                   command=self._tree_editor_batch_delete_lessons).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="⬆️ 上移", width=8,
                    command=lambda: self._tree_editor_move_lesson(-1)).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="⬇️ 下移", width=8,
@@ -14257,7 +17756,7 @@ output: html_document
 
         cols = ("num", "title", "section", "question", "hours", "status")
         self._lesson_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
-                                         height=25, selectmode="browse")
+                                         height=25, selectmode="extended")
         self._lesson_tree.heading("num", text="#")
         self._lesson_tree.heading("title", text="课时标题")
         self._lesson_tree.heading("section", text="所属Section")
@@ -14281,7 +17780,7 @@ output: html_document
         self._lesson_tree.tag_configure("pending", foreground="#000000")
         self._lesson_tree.bind("<Double-1>", lambda e: self._tree_editor_edit_lesson())
 
-        hint = ttk.Label(parent, text="💡 双击行编辑课时 | 使用按钮增删改课程和课时",
+        hint = ttk.Label(parent, text="💡 双击行编辑课时 | Ctrl+点击多选课时批量删除 | 使用按钮增删改课程和课时",
                         font=("", 9), foreground="#888")
         hint.pack(pady=5)
 
@@ -14405,6 +17904,7 @@ output: html_document
             }
             lessons.append(new_lesson)
 
+            self._auto_sort_lessons(course)
             self._save_editor_course(course)
             self._tree_editor_load_lessons(course_id)
             dlg.destroy()
@@ -14434,6 +17934,8 @@ output: html_document
 
         if not lesson:
             return
+
+        old_lesson_title = lesson.get("lesson_title", "")
 
         dlg = tk.Toplevel(self.root)
         dlg.title("✏️ 编辑课时")
@@ -14493,6 +17995,12 @@ output: html_document
             lesson["estimated_hours"] = float(fields["hours"].get().strip() or "1")
             lesson["description"] = fields["desc"].get("1.0", tk.END).strip()
 
+            if title != old_lesson_title:
+                self._rename_note_on_title_change(course, course.get("course_title", ""),
+                                                   lesson_old_title=old_lesson_title,
+                                                   lesson_number=new_num)
+
+            self._auto_sort_lessons(course)
             self._save_editor_course(course)
             self._tree_editor_load_lessons(course_id)
             dlg.destroy()
@@ -14509,6 +18017,10 @@ output: html_document
             return
 
         if not hasattr(self, '_current_editor_course') or not self._current_editor_course:
+            return
+
+        if len(sel) > 1:
+            self._tree_editor_batch_delete_lessons()
             return
 
         course_id = self._current_editor_course
@@ -14535,6 +18047,658 @@ output: html_document
             self._save_editor_course(course)
             self._tree_editor_load_lessons(course_id)
             self._log(f"🗑️ 删除课时: {title} (#{lnum})")
+
+    def _tree_editor_batch_delete_lessons(self):
+        """批量删除选中的课时"""
+        sel = self._lesson_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择要删除的课时（Ctrl+点击多选）")
+            return
+
+        if not hasattr(self, '_current_editor_course') or not self._current_editor_course:
+            return
+
+        course_id = self._current_editor_course
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+
+        lessons = course.get("lessons", [])
+        lnums_to_delete = []
+        titles = []
+        for iid in sel:
+            lnum = int(iid)
+            lesson = next((l for l in lessons if l.get("lesson_number") == lnum), None)
+            if lesson:
+                lnums_to_delete.append(lnum)
+                titles.append(lesson.get("lesson_title", f"#{lnum}"))
+
+        if not lnums_to_delete:
+            return
+
+        detail = ", ".join(titles[:10])
+        if len(titles) > 10:
+            detail += f" ... 等 {len(titles)} 个"
+
+        if not messagebox.askyesno("⚠️ 确认批量删除课时",
+                f"将删除 {len(lnums_to_delete)} 个课时：\n{detail}\n\n此操作不可撤销！继续？"):
+            return
+
+        progress = self.system.get_course_progress(course_id)
+        for lnum in lnums_to_delete:
+            if lnum in progress.get("completed_lessons", []):
+                progress["completed_lessons"].remove(lnum)
+
+        course["lessons"] = [l for l in lessons if l.get("lesson_number") not in lnums_to_delete]
+
+        self._save_editor_course(course)
+        self._tree_editor_load_lessons(course_id)
+        self._log(f"🗑️ 批量删除课时: {len(lnums_to_delete)} 个")
+
+    def _show_batch_edit_domain(self):
+        """批量修改选中课程的学科域"""
+        sel = self._course_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择课程（Ctrl+点击多选）")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("🔄 批量修改学科域")
+        dlg.geometry("450x300")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text=f"批量修改 {len(sel)} 门课程的学科域",
+                  font=("", 13, "bold")).pack(pady=10)
+
+        form_frame = ttk.Frame(dlg, padding=15)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(form_frame, text="新学科域：").grid(row=0, column=0, sticky="e", pady=5)
+        domain_var = tk.StringVar()
+        domain_entry = ttk.Entry(form_frame, textvariable=domain_var, width=20)
+        domain_entry.grid(row=0, column=1, sticky="w", pady=5, padx=5)
+
+        domain_hint = ttk.Label(form_frame, text="常用: P/A/N/CS/SE/DS/DE/D/LM", font=("", 9), foreground="#888")
+        domain_hint.grid(row=1, column=1, sticky="w", padx=5)
+
+        course_list_frame = ttk.LabelFrame(dlg, text="将修改的课程", padding=5)
+        course_list_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+        course_names = []
+        for cid in sel:
+            c = self.system.get_course_by_id(cid)
+            if c:
+                course_names.append(f"  • {c.get('course_title', '')} [{c.get('domain', '?')}]")
+
+        ttk.Label(course_list_frame, text="\n".join(course_names[:15]),
+                  font=("", 9)).pack(anchor="w")
+
+        btn_frame = ttk.Frame(dlg, padding=10)
+        btn_frame.pack(fill=tk.X)
+
+        def _apply():
+            new_domain = domain_var.get().strip()
+            if not new_domain:
+                messagebox.showwarning("警告", "学科域不能为空", parent=dlg)
+                return
+
+            count = 0
+            for cid in sel:
+                c = self.system.get_course_by_id(cid)
+                if c:
+                    c["domain"] = new_domain
+                    count += 1
+
+            for p in self.system.db_paths:
+                data = load_json_safe(p)
+                if not data:
+                    continue
+                changed = False
+                for ci, c in enumerate(data.get("courses", [])):
+                    c_id = c.get("note_id", c.get("course_title", ""))
+                    if c_id in sel:
+                        data["courses"][ci] = self.system.get_course_by_id(c_id) or c
+                        changed = True
+                if changed:
+                    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            self.system.reload_all_sources()
+            self._tree_editor_refresh_courses()
+            dlg.destroy()
+            self._log(f"✅ 批量修改学科域: {count} 门课程 -> {new_domain}")
+
+        ttk.Button(btn_frame, text="✅ 应用", command=_apply).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="❌ 取消", command=dlg.destroy).pack(side=tk.LEFT)
+
+    def _show_export_selected(self):
+        """导出选中课程到JSON文件"""
+        sel = self._course_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择要导出的课程（Ctrl+点击多选）")
+            return
+
+        courses_to_export = []
+        for cid in sel:
+            c = self.system.get_course_by_id(cid)
+            if c:
+                courses_to_export.append(c)
+
+        if not courses_to_export:
+            return
+
+        fp = filedialog.asksaveasfilename(
+            title="导出选中课程",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json")],
+            initialfile="exported_courses.json"
+        )
+        if not fp:
+            return
+
+        data = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "source": "TS2 课程管理编辑器导出",
+                "framework": "课程处理方程：符号化建模、最佳实践与全日程时刻表",
+            },
+            "courses": courses_to_export,
+        }
+        Path(fp).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        messagebox.showinfo("导出成功", f"已导出 {len(courses_to_export)} 门课程到\n{fp}")
+        self._log(f"📤 导出: {len(courses_to_export)} 门课程 -> {Path(fp).name}")
+
+    # ============================================================
+    # 执行模式课时管理方法
+    # ============================================================
+
+    def _exec_add_lesson(self, course_id):
+        """在执行模式中添加课时（插入方式）"""
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            messagebox.showwarning("警告", "课程不存在")
+            return
+
+        lessons = course.setdefault("lessons", [])
+        existing_nums = sorted([l.get("lesson_number", 0) for l in lessons])
+
+        # 自动识别选中的课时序号
+        selected_num = None
+        if hasattr(self, 'exec_tree'):
+            sel = self.exec_tree.selection()
+            if sel:
+                item = self.exec_tree.item(sel[0])
+                vals = item.get("values", [])
+                if len(vals) >= 1:
+                    try:
+                        selected_num = int(vals[0])  # 第0列是课时编号
+                    except (ValueError, IndexError):
+                        pass
+
+        # 计算建议插入位置
+        if selected_num is not None:
+            suggested_num = selected_num + 1  # 插入到选中课时之后
+        else:
+            suggested_num = len(existing_nums) + 1 if existing_nums else 1
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("➕ 插入课时")
+        dlg.geometry("550x620")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # 窗口居中
+        dlg.update_idletasks()
+        w = 550
+        h = 620
+        x = (dlg.winfo_screenwidth() - w) // 2
+        y = (dlg.winfo_screenheight() - h) // 2
+        dlg.geometry(f"{w}x{h}+{x}+{y}")
+
+        ttk.Label(dlg, text=f"为《{course.get('course_title', '')}》插入课时",
+                 font=("", 12, "bold")).pack(pady=(15, 5))
+
+        form_frame = ttk.Frame(dlg, padding=15)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 插入位置说明
+        hint_frame = ttk.LabelFrame(form_frame, text="💡 插入位置", padding=8)
+        hint_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        if existing_nums:
+            hint_text = f"现有课时: {', '.join(map(str, existing_nums))}"
+        else:
+            hint_text = "暂无课时"
+        ttk.Label(hint_frame, text=hint_text, font=("", 9), foreground="#888").pack(anchor="w")
+        
+        sel_info = f"当前选中: 课时 #{selected_num}" if selected_num else "未选中课时，将追加到末尾"
+        ttk.Label(hint_frame, text=sel_info, font=("", 9), foreground="#2980b9").pack(anchor="w")
+        ttk.Label(hint_frame, text=f"将插入编号 #{suggested_num}，确认后自动重排全部课时", 
+                 font=("", 9, "bold"), foreground="#27ae60").pack(anchor="w")
+
+        fields = {}
+
+        # 课时编号
+        f1 = ttk.Frame(form_frame)
+        f1.pack(fill=tk.X, pady=4)
+        ttk.Label(f1, text="课时编号：", width=12).pack(side=tk.LEFT)
+        num_var = tk.StringVar(value=str(suggested_num))
+        ttk.Entry(f1, textvariable=num_var, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Label(f1, text="(自动重排)", font=("", 8), foreground="#888").pack(side=tk.LEFT)
+        fields["num"] = num_var
+
+        # 课时标题
+        f2 = ttk.Frame(form_frame)
+        f2.pack(fill=tk.X, pady=4)
+        ttk.Label(f2, text="课时标题：", width=12).pack(side=tk.LEFT)
+        title_var = tk.StringVar(value="")
+        ttk.Entry(f2, textvariable=title_var, width=30).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        fields["title"] = title_var
+
+        # 所属Section
+        f3 = ttk.Frame(form_frame)
+        f3.pack(fill=tk.X, pady=4)
+        ttk.Label(f3, text="所属Section：", width=12).pack(side=tk.LEFT)
+        section_var = tk.StringVar(value="")
+        ttk.Entry(f3, textvariable=section_var, width=30).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        fields["section"] = section_var
+
+        # 中心问题
+        f4 = ttk.Frame(form_frame)
+        f4.pack(fill=tk.X, pady=4)
+        ttk.Label(f4, text="中心问题：", width=12).pack(side=tk.LEFT)
+        question_var = tk.StringVar(value="")
+        ttk.Entry(f4, textvariable=question_var, width=30).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        fields["question"] = question_var
+
+        # 预计课时
+        f5 = ttk.Frame(form_frame)
+        f5.pack(fill=tk.X, pady=4)
+        ttk.Label(f5, text="预计课时(h)：", width=12).pack(side=tk.LEFT)
+        hours_var = tk.StringVar(value="1")
+        ttk.Entry(f5, textvariable=hours_var, width=10).pack(side=tk.LEFT, padx=5)
+        fields["hours"] = hours_var
+
+        # 课时描述
+        f6 = ttk.Frame(form_frame)
+        f6.pack(fill=tk.X, pady=4)
+        ttk.Label(f6, text="课时描述：", width=12).pack(side=tk.LEFT, anchor="n")
+        desc_text = tk.Text(f6, width=30, height=3, font=("", 10))
+        desc_text.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        fields["desc"] = desc_text
+
+        # 参考资料
+        f7 = ttk.Frame(form_frame)
+        f7.pack(fill=tk.X, pady=4)
+        ttk.Label(f7, text="参考资料：", width=12).pack(side=tk.LEFT, anchor="n")
+        ref_text = tk.Text(f7, width=30, height=2, font=("", 10))
+        ref_text.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        fields["refs"] = ref_text
+
+        # 按钮区域
+        btn_frame = ttk.Frame(dlg, padding=10)
+        btn_frame.pack(fill=tk.X)
+
+        def _insert():
+            num_str = fields["num"].get().strip()
+            try:
+                insert_num = int(num_str)
+            except ValueError:
+                messagebox.showwarning("警告", "课时编号必须是数字", parent=dlg)
+                return
+
+            title = fields["title"].get().strip()
+            if not title:
+                messagebox.showwarning("警告", "课时标题不能为空", parent=dlg)
+                return
+
+            section = fields["section"].get().strip()
+            question = fields["question"].get().strip()
+            desc = fields["desc"].get("1.0", tk.END).strip()
+            hours_str = fields["hours"].get().strip()
+            hours = float(hours_str) if hours_str.replace(".", "").isdigit() else 1.0
+            refs_text = fields["refs"].get("1.0", tk.END).strip()
+
+            refs = []
+            if refs_text:
+                refs = [r.strip() for r in refs_text.split('\n') if r.strip()]
+
+            new_lesson = {
+                "lesson_number": insert_num,
+                "lesson_title": title,
+                "section": section,
+                "central_question": question,
+                "description": desc,
+                "estimated_hours": hours,
+            }
+            if refs:
+                new_lesson["references"] = refs
+
+            lessons.append(new_lesson)
+            self._auto_sort_lessons(course)
+            self._save_editor_course(course)
+
+            dlg.destroy()
+            self._log(f"✅ 插入课时: {title} (#{insert_num})，已自动重排")
+
+            if self.exec_mode_active:
+                self._show_execution_mode(course_id)
+
+        ttk.Button(btn_frame, text="✅ 插入并重排", command=_insert).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="❌ 取消", command=dlg.destroy).pack(side=tk.LEFT)
+
+    def _exec_edit_lesson(self, course_id):
+        """在执行模式中编辑课时"""
+        if not hasattr(self, 'exec_tree'):
+            messagebox.showinfo("提示", "请先选择要编辑的课时")
+            return
+
+        sel = self.exec_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择要编辑的课时")
+            return
+
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+
+        lnum = int(self.exec_tree.item(sel[0])["values"][0])
+        lessons = course.get("lessons", [])
+        lesson = next((l for l in lessons if l.get("lesson_number") == lnum), None)
+
+        if not lesson:
+            return
+
+        old_exec_lesson_title = lesson.get("lesson_title", "")
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("✏️ 编辑课时")
+        dlg.geometry("700x650")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # 使用grid布局管理器
+        dlg.columnconfigure(0, weight=1)
+        dlg.rowconfigure(1, weight=1)
+
+        ttk.Label(dlg, text=f"编辑课时 #{lnum}",
+                 font=("", 12, "bold")).grid(row=0, column=0, pady=10, sticky="ew")
+
+        # 主表单区域
+        form_frame = ttk.Frame(dlg, padding=15)
+        form_frame.grid(row=1, column=0, sticky="nsew", padx=15)
+        form_frame.columnconfigure(1, weight=1)
+
+        fields = {}
+        row = 0
+
+        # 课时编号
+        ttk.Label(form_frame, text="课时编号：").grid(row=row, column=0, sticky="ne", pady=5)
+        num_var = tk.StringVar(value=str(lesson.get("lesson_number", "")))
+        ttk.Entry(form_frame, textvariable=num_var, width=15).grid(row=row, column=1, sticky="w", pady=5, padx=5)
+        fields["num"] = num_var
+        row += 1
+
+        # 课时标题
+        ttk.Label(form_frame, text="课时标题：").grid(row=row, column=0, sticky="ne", pady=5)
+        title_var = tk.StringVar(value=lesson.get("lesson_title", ""))
+        ttk.Entry(form_frame, textvariable=title_var, width=40).grid(row=row, column=1, sticky="ew", pady=5, padx=5)
+        fields["title"] = title_var
+        row += 1
+
+        # 所属Section
+        ttk.Label(form_frame, text="所属Section：").grid(row=row, column=0, sticky="ne", pady=5)
+        section_var = tk.StringVar(value=lesson.get("section", ""))
+        ttk.Entry(form_frame, textvariable=section_var, width=40).grid(row=row, column=1, sticky="ew", pady=5, padx=5)
+        fields["section"] = section_var
+        row += 1
+
+        # 中心问题
+        ttk.Label(form_frame, text="中心问题：").grid(row=row, column=0, sticky="ne", pady=5)
+        question_var = tk.StringVar(value=lesson.get("central_question", ""))
+        ttk.Entry(form_frame, textvariable=question_var, width=40).grid(row=row, column=1, sticky="ew", pady=5, padx=5)
+        fields["question"] = question_var
+        row += 1
+
+        # 预计课时
+        ttk.Label(form_frame, text="预计课时(小时)：").grid(row=row, column=0, sticky="ne", pady=5)
+        hours_var = tk.StringVar(value=str(lesson.get("estimated_hours", "1")))
+        ttk.Entry(form_frame, textvariable=hours_var, width=15).grid(row=row, column=1, sticky="w", pady=5, padx=5)
+        fields["hours"] = hours_var
+        row += 1
+
+        # 课时描述
+        ttk.Label(form_frame, text="课时描述：").grid(row=row, column=0, sticky="ne", pady=5)
+        desc_text = tk.Text(form_frame, width=40, height=4, font=("", 10))
+        desc_text.insert("1.0", lesson.get("description", ""))
+        desc_text.grid(row=row, column=1, sticky="ew", pady=5, padx=5)
+        fields["desc"] = desc_text
+        row += 1
+
+        # 参考资料
+        ttk.Label(form_frame, text="参考资料：").grid(row=row, column=0, sticky="ne", pady=5)
+        refs_list = lesson.get("references", [])
+        refs_text = "\n".join(refs_list) if refs_list else ""
+        ref_text = tk.Text(form_frame, width=40, height=3, font=("", 10))
+        ref_text.insert("1.0", refs_text)
+        ref_text.grid(row=row, column=1, sticky="ew", pady=5, padx=5)
+        fields["refs"] = ref_text
+        row += 1
+
+        # 按钮区域
+        btn_frame = ttk.Frame(dlg, padding=10)
+        btn_frame.grid(row=2, column=0, sticky="ew", pady=10)
+
+        def _save():
+            num_str = fields["num"].get().strip()
+            try:
+                new_num = int(num_str)
+            except ValueError:
+                messagebox.showwarning("警告", "课时编号必须是数字", parent=dlg)
+                return
+
+            title = fields["title"].get().strip()
+            if not title:
+                messagebox.showwarning("警告", "课时标题不能为空", parent=dlg)
+                return
+
+            lesson["lesson_number"] = new_num
+            lesson["lesson_title"] = title
+            lesson["section"] = fields["section"].get().strip()
+            lesson["central_question"] = fields["question"].get().strip()
+            lesson["estimated_hours"] = float(fields["hours"].get().strip() or "1")
+            lesson["description"] = fields["desc"].get("1.0", tk.END).strip()
+
+            refs_text = fields["refs"].get("1.0", tk.END).strip()
+            if refs_text:
+                lesson["references"] = [r.strip() for r in refs_text.split('\n') if r.strip()]
+            else:
+                lesson["references"] = []
+
+            if title != old_exec_lesson_title:
+                self._rename_note_on_title_change(course, course.get("course_title", ""),
+                                                   lesson_old_title=old_exec_lesson_title,
+                                                   lesson_number=new_num)
+
+            self._auto_sort_lessons(course)
+            self._save_editor_course(course)
+
+            dlg.destroy()
+            self._log(f"✏️ 更新课时: {title} (#{new_num})")
+
+            if self.exec_mode_active:
+                self._show_execution_mode(course_id)
+
+        ttk.Button(btn_frame, text="💾 保存", command=_save).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="❌ 取消", command=dlg.destroy).pack(side=tk.LEFT)
+
+    def _exec_delete_lesson(self, course_id):
+        """在执行模式中删除课时"""
+        if not hasattr(self, 'exec_tree'):
+            messagebox.showinfo("提示", "请先选择要删除的课时")
+            return
+
+        sel = self.exec_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择要删除的课时")
+            return
+
+        if len(sel) > 1:
+            self._exec_batch_delete_lessons(course_id)
+            return
+
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+
+        lnum = int(self.exec_tree.item(sel[0])["values"][0])
+        lessons = course.get("lessons", [])
+        lesson = next((l for l in lessons if l.get("lesson_number") == lnum), None)
+
+        if not lesson:
+            return
+
+        title = lesson.get("lesson_title", "")
+        if messagebox.askyesno("确认删除", f"确定要删除课时「{title}」(#{lnum})吗？\n\n此操作不可撤销！"):
+
+            progress = self.system.get_course_progress(course_id)
+            if lnum in progress.get("completed_lessons", []):
+                progress["completed_lessons"].remove(lnum)
+
+            course["lessons"] = [l for l in lessons if l.get("lesson_number") != lnum]
+            self._save_editor_course(course)
+
+            self._log(f"🗑️ 删除课时: {title} (#{lnum})")
+
+            if self.exec_mode_active:
+                self._show_execution_mode(course_id)
+
+    def _exec_batch_delete_lessons(self, course_id):
+        """执行模式：批量删除课时"""
+        if not hasattr(self, 'exec_tree'):
+            messagebox.showinfo("提示", "请先选择要删除的课时（Ctrl+点击多选）")
+            return
+
+        sel = self.exec_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择要删除的课时")
+            return
+
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+
+        lnums = []
+        titles = []
+        for item_id in sel:
+            lnum = int(self.exec_tree.item(item_id)["values"][0])
+            lesson = next((l for l in course.get("lessons", []) if l.get("lesson_number") == lnum), None)
+            if lesson:
+                lnums.append(lnum)
+                titles.append(lesson.get("lesson_title", f"#{lnum}"))
+
+        if not lnums:
+            return
+
+        detail = ", ".join(titles[:15])
+        if len(titles) > 15:
+            detail += f" ... 等 {len(titles)} 个"
+
+        if not messagebox.askyesno("⚠️ 确认批量删除课时",
+                f"将删除 {len(lnums)} 个课时：\n{detail}\n\n此操作不可撤销！继续？"):
+            return
+
+        progress = self.system.get_course_progress(course_id)
+        for lnum in lnums:
+            if lnum in progress.get("completed_lessons", []):
+                progress["completed_lessons"].remove(lnum)
+
+        course["lessons"] = [l for l in course.get("lessons", []) if l.get("lesson_number") not in lnums]
+        self._auto_sort_lessons(course)
+        self._save_editor_course(course)
+
+        self._log(f"🗑️ 批量删除课时: {len(lnums)} 个")
+
+        if self.exec_mode_active:
+            self._show_execution_mode(course_id)
+
+    def _exec_edit_course(self, course_id):
+        """执行模式：编辑课程基本信息（域、总课时等）"""
+        course = self.system.get_course_by_id(course_id)
+        if not course:
+            return
+
+        old_title = course.get("course_title", "")
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("✏️ 编辑课程信息")
+        dlg.geometry("500x380")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text=f"编辑：{old_title}", font=("", 13, "bold")).pack(pady=10)
+
+        form_frame = ttk.Frame(dlg, padding=15)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+
+        fields = {}
+        row = 0
+        for label, key, value in [
+            ("课程名称", "title", course.get("course_title", "")),
+            ("学科域", "domain", course.get("domain", "UNKNOWN")),
+            ("总课时", "hours", str(course.get("total_hours", "") or "")),
+            ("授课对象", "audience", course.get("target_audience", "")),
+            ("考核方式", "assessment", course.get("assessment", "")),
+            ("课程定位", "positioning", course.get("positioning", "")),
+        ]:
+            ttk.Label(form_frame, text=f"{label}：").grid(row=row, column=0, sticky="e", pady=5)
+            var = tk.StringVar(value=str(value))
+            entry = ttk.Entry(form_frame, textvariable=var, width=35)
+            entry.grid(row=row, column=1, sticky="w", pady=5, padx=5)
+            fields[key] = var
+            row += 1
+
+        btn_frame = ttk.Frame(dlg, padding=10)
+        btn_frame.pack(fill=tk.X)
+
+        def _save():
+            title = fields["title"].get().strip()
+            if not title:
+                messagebox.showwarning("警告", "课程名称不能为空", parent=dlg)
+                return
+
+            course["course_title"] = title
+            course["domain"] = fields["domain"].get().strip() or "UNKNOWN"
+            hours_str = fields["hours"].get().strip()
+            course["total_hours"] = int(hours_str) if hours_str.isdigit() else None
+            course["target_audience"] = fields["audience"].get().strip()
+            course["assessment"] = fields["assessment"].get().strip()
+            course["positioning"] = fields["positioning"].get().strip()
+
+            self._rename_note_on_title_change(course, old_title)
+
+            for p in self.system.db_paths:
+                data = load_json_safe(p)
+                if not data:
+                    continue
+                for ci, c in enumerate(data.get("courses", [])):
+                    if c.get("note_id") == course_id:
+                        data["courses"][ci] = course
+                        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                        break
+                    elif c.get("course_title") == old_title and not c.get("note_id"):
+                        data["courses"][ci] = course
+                        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                        break
+
+            self.system.reload_all_sources()
+            dlg.destroy()
+            self._log(f"✅ 编辑课程: 《{title}》")
+            if self.exec_mode_active:
+                self._show_execution_mode(course_id)
+
+        ttk.Button(btn_frame, text="💾 保存", command=_save).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="❌ 取消", command=dlg.destroy).pack(side=tk.LEFT)
 
     def _tree_editor_move_lesson(self, direction):
         """上下移动课时顺序"""
@@ -14575,17 +18739,131 @@ output: html_document
             self._lesson_tree.selection_set(new_iid)
             self._lesson_tree.see(new_iid)
 
+    def _auto_sort_lessons(self, course):
+        """自动按lesson_number排序课时，并重新编号为连续序号"""
+        lessons = course.get("lessons", [])
+        if not lessons:
+            return
+
+        old_nums = {l.get("lesson_number", 0): l.get("lesson_title", "") for l in lessons}
+
+        lessons.sort(key=lambda l: l.get("lesson_number", 0))
+
+        num_map = {}
+        for i, lesson in enumerate(lessons, 1):
+            old_num = lesson.get("lesson_number", i)
+            if old_num != i:
+                num_map[old_num] = i
+            lesson["lesson_number"] = i
+
+        if num_map:
+            course_id = course.get("note_id", course.get("course_title", ""))
+            progress = self.system.progress.get(course_id, {})
+            completed = progress.get("completed_lessons", [])
+            review_schedule = progress.get("review_schedule", {})
+            new_completed = []
+            for c in completed:
+                new_completed.append(num_map.get(c, c))
+            progress["completed_lessons"] = new_completed
+            new_rs = {}
+            for k, v in review_schedule.items():
+                old_k = int(k) if k.isdigit() else k
+                new_k = str(num_map.get(old_k, old_k))
+                new_rs[new_k] = v
+            progress["review_schedule"] = new_rs
+            self.system._save_progress()
+
+            self._rename_notes_after_renumber(course, num_map)
+
+    def _rename_notes_after_renumber(self, course, num_map):
+        """课时重编号后重命名对应笔记文件"""
+        title = course.get("course_title", "")
+        safe_title = re.sub(r'[\\/:*?"<>|]', '_', title)[:40]
+        notes_dir = BASE / "Notes" / safe_title
+        if not notes_dir.exists():
+            return
+
+        for old_num, new_num in num_map.items():
+            for f in notes_dir.glob(f"L{old_num:02d}_*.Rmd"):
+                lesson = next((l for l in course.get("lessons", []) if l.get("lesson_number") == new_num), None)
+                if lesson:
+                    safe_ltitle = re.sub(r'[\\/:*?"<>|]', '_', lesson.get("lesson_title", ""))[:30]
+                    new_name = f"L{new_num:02d}_{safe_ltitle}.Rmd" if safe_ltitle else f"L{new_num:02d}.Rmd"
+                else:
+                    new_name = f"L{new_num:02d}.Rmd"
+                new_path = notes_dir / new_name
+                if f != new_path and not new_path.exists():
+                    try:
+                        f.rename(new_path)
+                    except Exception:
+                        pass
+
+    def _rename_note_on_title_change(self, course, old_title, lesson_old_title=None, lesson_number=None):
+        """课程或课时标题变更时重命名笔记文件"""
+        new_title = course.get("course_title", "")
+        old_safe = re.sub(r'[\\/:*?"<>|]', '_', old_title)[:40]
+        new_safe = re.sub(r'[\\/:*?"<>|]', '_', new_title)[:40]
+
+        old_dir = BASE / "Notes" / old_safe
+        new_dir = BASE / "Notes" / new_safe
+
+        if old_safe != new_safe and old_dir.exists():
+            if not new_dir.exists():
+                try:
+                    old_dir.rename(new_dir)
+                except Exception:
+                    pass
+            else:
+                for f in old_dir.glob("*"):
+                    target = new_dir / f.name
+                    if not target.exists():
+                        try:
+                            f.rename(target)
+                        except Exception:
+                            pass
+
+        if lesson_old_title is not None and lesson_number is not None:
+            notes_dir = new_dir if new_dir.exists() else old_dir
+            if not notes_dir.exists():
+                return
+            lesson = next((l for l in course.get("lessons", []) if l.get("lesson_number") == lesson_number), None)
+            if not lesson:
+                return
+            new_ltitle = lesson.get("lesson_title", "")
+            old_safe_lt = re.sub(r'[\\/:*?"<>|]', '_', lesson_old_title)[:30]
+            new_safe_lt = re.sub(r'[\\/:*?"<>|]', '_', new_ltitle)[:30]
+            old_fn_pattern = f"L{lesson_number:02d}_{old_safe_lt}.Rmd"
+            new_fn = f"L{lesson_number:02d}_{new_safe_lt}.Rmd" if new_safe_lt else f"L{lesson_number:02d}.Rmd"
+            for f in notes_dir.glob(f"L{lesson_number:02d}_*.Rmd"):
+                new_path = notes_dir / new_fn
+                if f != new_path and not new_path.exists():
+                    try:
+                        f.rename(new_path)
+                    except Exception:
+                        pass
+
     def _save_editor_course(self, course):
         """保存编辑后的课程到JSON文件"""
+        course_id = course.get("note_id", "")
+        course_title = course.get("course_title", "")
+        saved = False
         for p in self.system.db_paths:
             data = load_json_safe(p)
             if not data:
                 continue
             for ci, c in enumerate(data.get("courses", [])):
-                if c.get("note_id") == course.get("note_id"):
+                if c.get("note_id") and c.get("note_id") == course_id:
                     data["courses"][ci] = course
                     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-                    return
+                    saved = True
+                    break
+                elif not c.get("note_id") and c.get("course_title") == course_title:
+                    data["courses"][ci] = course
+                    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                    saved = True
+                    break
+        if saved:
+            self.system.reload_all_sources()
 
     # ========== 任务看板模块 ==========
     
@@ -14594,6 +18872,12 @@ output: html_document
         self._clear_content()
         self._highlight_nav("taskboard")
         self.nav_title.config(text="任务看板")
+        
+        # 顶部工具栏
+        task_top = ttk.Frame(self.content_frame)
+        task_top.pack(fill=tk.X, padx=10, pady=(5, 0))
+        ttk.Label(task_top, text="📋 任务看板", font=("", 14, "bold"), foreground="#2C3E50").pack(side=tk.LEFT)
+        self._add_specialist_button(task_top, "task", style="Accent.TButton")
         
         # 先初始化日历相关变量
         self._calendar_current = datetime.now().date()
@@ -14621,22 +18905,22 @@ output: html_document
         # 顶部工具栏
         toolbar = ttk.Frame(parent)
         toolbar.pack(fill=tk.X, pady=(0, 8))
-        
+
         ttk.Button(toolbar, text="➕ 新建任务", command=self._add_new_task).pack(side=tk.LEFT, padx=2)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
-        
+
         # 看板容器：四宫格布局（2x2）
         self._kanban_columns = {}
         self._kanban_expanded = {"待办": True, "进行中": True, "已完成": False, "已归档": False}
         self._kanban_container = tk.Frame(parent, bg="#ecf0f1")
         self._kanban_container.pack(fill=tk.BOTH, expand=True)
-        
+
         # 配置网格布局
         for i in range(2):
             self._kanban_container.grid_rowconfigure(i, weight=1)
             self._kanban_container.grid_columnconfigure(0, weight=1)
             self._kanban_container.grid_columnconfigure(1, weight=1)
-        
+
         # 创建四个状态列（2x2 四宫格）
         # 第一行：待办（0,0）、进行中（0,1）
         # 第二行：已完成（1,0）、已归档（1,1）
@@ -14646,57 +18930,70 @@ output: html_document
             ("已完成", 1, 0),
             ("已归档", 1, 1)
         ]
-        
+
         for status, row, col in grid_positions:
             col_frame = ttk.LabelFrame(self._kanban_container, text="")
             col_frame.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
-            
+
             # 可折叠头部
             header_frame = ttk.Frame(col_frame)
             header_frame.pack(fill=tk.X, pady=2)
-            
+
             # 展开/收起按钮
             toggle_btn = ttk.Button(header_frame, text="▼", width=3)
             toggle_btn.pack(side=tk.LEFT, padx=4)
-            
+
             # 标题
             ttk.Label(header_frame, text=f"{status}", font=("", 11, "bold")).pack(side=tk.LEFT, padx=4)
-            
+
             # 任务计数
             count_label = ttk.Label(header_frame, text="(0)", foreground="#7f8c8d")
             count_label.pack(side=tk.LEFT)
-            
+
             # 内容区域
             content_frame = ttk.Frame(col_frame)
             content_frame.pack(fill=tk.BOTH, expand=True)
-            
+
             # 任务列表容器（可折叠）
             tasks_container = ttk.Frame(content_frame)
             tasks_container.pack(fill=tk.BOTH, expand=True)
-            
-            # 任务列表
-            tasks_list_frame = tk.Canvas(tasks_container, bg="#ffffff")
+
+            # 任务列表（Canvas + 滚动条 + 滚轮支持）
+            tasks_list_frame = tk.Canvas(tasks_container, bg="#ffffff", highlightthickness=0)
             tasks_scrollbar = ttk.Scrollbar(tasks_container, orient="vertical", command=tasks_list_frame.yview)
             tasks_scroll_frame = ttk.Frame(tasks_list_frame)
-            
+
+            def _on_mousewheel(event, canvas=tasks_list_frame):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
             tasks_scroll_frame.bind("<Configure>", lambda e, c=tasks_list_frame: c.configure(scrollregion=c.bbox("all")))
             tasks_list_frame.create_window((0, 0), window=tasks_scroll_frame, anchor="nw", width=300)
             tasks_list_frame.configure(yscrollcommand=tasks_scrollbar.set)
-            
+
+            # 绑定滚轮到 Canvas 和内部框架
+            tasks_list_frame.bind("<MouseWheel>", _on_mousewheel)
+            tasks_scroll_frame.bind("<MouseWheel>", _on_mousewheel)
+            # 递归绑定子组件的滚轮事件
+            def _bind_all_mousewheel(widget):
+                widget.bind("<MouseWheel>", _on_mousewheel)
+                for child in widget.winfo_children():
+                    _bind_all_mousewheel(child)
+
             tasks_list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             tasks_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-            
+
             # 保存引用
             self._kanban_columns[status] = {
                 "toggle_btn": toggle_btn,
                 "count_label": count_label,
                 "tasks_container": tasks_container,
-                "tasks_frame": tasks_scroll_frame
+                "tasks_frame": tasks_scroll_frame,
+                "tasks_canvas": tasks_list_frame,
             }
-            
+
             # 绑定 toggle 按钮
             toggle_btn.config(command=lambda s=status: self._toggle_kanban_column(s))
-        
+
         self._refresh_task_kanban()
     
     def _build_task_calendar(self, parent):
@@ -15417,6 +19714,19 @@ output: html_document
                     else:
                         # 收起状态：隐藏内容
                         col["tasks_container"].pack_forget()
+
+                    # 绑定滚轮事件到 Canvas
+                    canvas = col.get("tasks_canvas")
+                    if canvas:
+                        def _on_mousewheel(event, c=canvas):
+                            c.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                        canvas.bind("<MouseWheel>", _on_mousewheel)
+                        # 递归绑定 Canvas 内所有子组件的滚轮事件
+                        def _bind_recursive(widget):
+                            widget.bind("<MouseWheel>", _on_mousewheel)
+                            for child in widget.winfo_children():
+                                _bind_recursive(child)
+                        _bind_recursive(col["tasks_frame"])
                 except:
                     continue
         except:
@@ -15705,14 +20015,17 @@ output: html_document
 
     def _show_search_page(self):
         """显示网络搜索界面"""
-        self._clear_content()
-        self._highlight_nav("search")
+        if not getattr(self, '_building_tab', False):
+            self._clear_content()
+            self._highlight_nav("search")
         self.nav_title.config(text="🔍 网络探研")
 
         # 顶部空间切换栏
         switch_bar = ttk.Frame(self.content_frame)
         switch_bar.pack(fill=tk.X, padx=10, pady=(5, 0))
-
+        
+        ttk.Label(switch_bar, text="🔍 网络探研", font=("", 12, "bold"), foreground="#2C3E50").pack(side=tk.LEFT, padx=(0, 10))
+        self._add_specialist_button(switch_bar, "bookmark", style="Accent.TButton")
 
         ttk.Separator(switch_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
@@ -15864,8 +20177,9 @@ output: html_document
         ]
 
     def _load_bookmarks(self):
-        """加载书签（从文件或默认）"""
-        bookmark_file = BASE / "bookmarks.json"
+        """加载书签（从文件或默认，兼容旧位置），同时增量同步工作目录和系统目录"""
+        self._sync_bookmarks_incremental()
+        bookmark_file = _resolve_data_file("bookmarks.json")
         if bookmark_file.exists():
             try:
                 bookmarks = json.loads(bookmark_file.read_text(encoding="utf-8"))
@@ -15887,10 +20201,88 @@ output: html_document
         self._save_bookmarks(bookmarks)
         return bookmarks
 
+    def _sync_bookmarks_incremental(self):
+        """增量双向同步工作目录 bookmarks.json 与系统目录 ~/.ts2/bookmarks.json
+        以 id 为主键匹配，url 为备用键；新条目双向添加，已有条目字段合并。
+        """
+        sys_path = TS2_USER_DIR / "bookmarks.json"
+        work_path = BASE / "bookmarks.json"
+        if not sys_path.exists() and not work_path.exists():
+            return
+
+        def _load_bm(p):
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except:
+                return []
+
+        def _save_bm(p, data):
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        sys_bm = _load_bm(sys_path)
+        work_bm = _load_bm(work_path)
+
+        # 构建索引：id -> bookmark, url -> bookmark
+        sys_by_id = {b.get("id"): b for b in sys_bm if b.get("id")}
+        sys_by_url = {b.get("url"): b for b in sys_bm if b.get("url")}
+        work_by_id = {b.get("id"): b for b in work_bm if b.get("id")}
+        work_by_url = {b.get("url"): b for b in work_bm if b.get("url")}
+
+        synced_ids = set()
+
+        # 遍历工作目录书签，同步到系统目录
+        for wb in work_bm:
+            wid = wb.get("id")
+            wurl = wb.get("url")
+            matched = None
+            if wid and wid in sys_by_id:
+                matched = sys_by_id[wid]
+            elif wurl and wurl in sys_by_url:
+                matched = sys_by_url[wurl]
+            if matched:
+                synced_ids.add(matched.get("id"))
+                # 字段合并：工作目录有但系统目录没有的字段补充过来
+                for k in ("description", "icon", "color", "category", "tags"):
+                    if k in wb and k not in matched:
+                        matched[k] = wb[k]
+                # 合并 children（递归去重）
+                if wb.get("children") and matched.get("children") is not None:
+                    existing_child_ids = {c.get("id") for c in matched["children"] if c.get("id")}
+                    for c in wb["children"]:
+                        if c.get("id") not in existing_child_ids:
+                            matched["children"].append(c)
+                            existing_child_ids.add(c.get("id"))
+            else:
+                # 新增书签
+                sys_bm.append(wb)
+                synced_ids.add(wb.get("id"))
+
+        # 遍历系统目录书签，将未同步的新书签补充到工作目录
+        for sb in sys_bm:
+            sid = sb.get("id")
+            surl = sb.get("url")
+            if sid and sid in synced_ids:
+                continue
+            matched = None
+            if sid and sid in work_by_id:
+                matched = work_by_id[sid]
+            elif surl and surl in work_by_url:
+                matched = work_by_url[surl]
+            if not matched:
+                work_bm.append(sb)
+
+        # 保存两边
+        _save_bm(sys_path, sys_bm)
+        _save_bm(work_path, work_bm)
+
     def _save_bookmarks(self, bookmarks):
-        """保存书签到文件"""
-        bookmark_file = BASE / "bookmarks.json"
-        bookmark_file.write_text(json.dumps(bookmarks, ensure_ascii=False, indent=2), encoding="utf-8")
+        """保存书签到文件（同步写入系统目录和工作目录）"""
+        sys_path = TS2_USER_DIR / "bookmarks.json"
+        sys_path.parent.mkdir(parents=True, exist_ok=True)
+        sys_path.write_text(json.dumps(bookmarks, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 同步写入工作目录
+        work_path = BASE / "bookmarks.json"
+        work_path.write_text(json.dumps(bookmarks, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _refresh_bookmarks(self):
         """刷新书签显示（懒加载版）"""
@@ -16528,7 +20920,7 @@ output: html_document
         top = ttk.Frame(self.content_frame)
         top.pack(fill=tk.X, pady=5)
         
-        ttk.Button(top, text="← 返回书签", command=self._show_search_page).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="← 返回书签", command=lambda: self._switch_to_tab("search", self._show_search_page)).pack(side=tk.LEFT, padx=5)
         
         info_frame = ttk.Frame(top)
         info_frame.pack(side=tk.LEFT, padx=20)
@@ -17642,6 +22034,8 @@ output: html_document
             self._rmd_auto_saving = False
         
         ttk.Button(toolbar, text="💾 保存", command=save_rmd).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="📄 Markdown 预览",
+                   command=lambda: self._open_markdown_preview(self._rmd_editor, f"RMD 预览: {note_file.name}")).pack(side=tk.LEFT, padx=2)
         
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
         
@@ -17709,13 +22103,6 @@ output: html_document
         
         ttk.Button(toolbar, text="💻 代码", command=insert_code).pack(side=tk.LEFT, padx=2)
         
-        # 插入LaTeX公式
-        def insert_math():
-            math_template = "$$\n\n$$"
-            self._rmd_editor.insert(tk.INSERT, math_template)
-        
-        ttk.Button(toolbar, text="📐 公式", command=insert_math).pack(side=tk.LEFT, padx=2)
-        
         # 插入链接
         def insert_link():
             link_template = "[链接文本](URL)"
@@ -17735,83 +22122,125 @@ output: html_document
         
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
         
-        # 环境模板
-        def insert_definition():
-            env_template = """::: {.definition}
-名称: 
+        # 公式下拉菜单
+        math_menu = tk.Menubutton(toolbar, text="📐 公式", relief=tk.RAISED)
+        math_menu.pack(side=tk.LEFT, padx=2)
+        math_menu.menu = tk.Menu(math_menu, tearoff=0)
+        math_menu["menu"] = math_menu.menu
 
-内容:
-:::
-"""
-            self._rmd_editor.insert(tk.INSERT, env_template)
+        def insert_inline_math():
+            self._rmd_editor.insert(tk.INSERT, "$ $")
+            self._rmd_editor.mark_set("insert", f"{self._rmd_editor.index(tk.INSERT)}-2c")
         
-        ttk.Button(toolbar, text="📌 定义", command=insert_definition).pack(side=tk.LEFT, padx=2)
+        def insert_display_math():
+            tpl = "\n$$\n\n$$\n"
+            self._rmd_editor.insert(tk.INSERT, tpl)
+            self._rmd_editor.mark_set("insert", f"{self._rmd_editor.index(tk.INSERT)}-3c")
         
-        def insert_theorem():
-            env_template = """::: {.theorem}
-名称: 
+        def insert_align():
+            tpl = "\n\\begin{align}\nf(x) &= x^2 + 2x + 1 \\\\\n     &= (x + 1)^2\n\\end{align}\n"
+            self._rmd_editor.insert(tk.INSERT, tpl)
+        
+        def insert_fraction():
+            self._rmd_editor.insert(tk.INSERT, "\\frac{分子}{分母}")
+        
+        def insert_sqrt():
+            self._rmd_editor.insert(tk.INSERT, "\\sqrt{x}")
+        
+        def insert_sum():
+            self._rmd_editor.insert(tk.INSERT, "\\sum_{i=1}^{n} x_i")
+        
+        def insert_integral():
+            self._rmd_editor.insert(tk.INSERT, "\\int_{a}^{b} f(x) \\, dx")
+        
+        def insert_limit():
+            self._rmd_editor.insert(tk.INSERT, "\\lim_{x \\to \\infty}")
+        
+        def insert_matrix():
+            tpl = """\\begin{pmatrix}
+a_{11} & a_{12} & a_{13} \\\\
+a_{21} & a_{22} & a_{23} \\\\
+a_{31} & a_{32} & a_{33}
+\\end{pmatrix}"""
+            self._rmd_editor.insert(tk.INSERT, tpl)
 
-内容:
-:::
-"""
-            self._rmd_editor.insert(tk.INSERT, env_template)
-        
-        ttk.Button(toolbar, text="📜 定理", command=insert_theorem).pack(side=tk.LEFT, padx=2)
-        
-        def insert_corollary():
-            env_template = """::: {.corollary}
-名称: 
+        def insert_vector():
+            tpl = "\\vec{a} = \\begin{pmatrix} x \\\\ y \\\\ z \\end{pmatrix}"
+            self._rmd_editor.insert(tk.INSERT, tpl)
 
-内容:
-:::
-"""
-            self._rmd_editor.insert(tk.INSERT, env_template)
+        math_menu.menu.add_command(label="$ 行内公式", command=insert_inline_math)
+        math_menu.menu.add_command(label="$$ 行间公式", command=insert_display_math)
+        math_menu.menu.add_command(label="对齐 align", command=insert_align)
+        math_menu.menu.add_separator()
+        math_menu.menu.add_command(label="分式 \\frac", command=insert_fraction)
+        math_menu.menu.add_command(label="根号 \\sqrt", command=insert_sqrt)
+        math_menu.menu.add_command(label="求和 \\sum", command=insert_sum)
+        math_menu.menu.add_command(label="积分 \\int", command=insert_integral)
+        math_menu.menu.add_command(label="极限 \\lim", command=insert_limit)
+        math_menu.menu.add_command(label="矩阵 pmatrix", command=insert_matrix)
+        math_menu.menu.add_command(label="向量 \\vec", command=insert_vector)
         
-        ttk.Button(toolbar, text="💡 推论", command=insert_corollary).pack(side=tk.LEFT, padx=2)
-        
-        def insert_example():
-            env_template = """::: {.example}
-示例: 
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
 
-内容:
-:::
-"""
-            self._rmd_editor.insert(tk.INSERT, env_template)
-        
-        ttk.Button(toolbar, text="🎯 例子", command=insert_example).pack(side=tk.LEFT, padx=2)
-        
-        def insert_problem():
-            env_template = """::: {.problem}
-问题: 
+        greek_symbols = [
+            ("α", "\\alpha"), ("β", "\\beta"), ("γ", "\\gamma"), ("δ", "\\delta"),
+            ("ε", "\\epsilon"), ("θ", "\\theta"), ("λ", "\\lambda"), ("μ", "\\mu"),
+            ("π", "\\pi"), ("σ", "\\sigma"), ("φ", "\\phi"), ("ω", "\\omega"),
+            ("Δ", "\\Delta"), ("Σ", "\\Sigma"), ("Ω", "\\Omega"), ("∞", "\\infty"),
+            ("±", "\\pm"), ("≤", "\\leq"), ("≥", "\\geq"), ("≠", "\\neq"),
+            ("≈", "\\approx"), ("⊂", "\\subset"), ("⊆", "\\subseteq"), ("∈", "\\in"),
+            ("∀", "\\forall"), ("∃", "\\exists"), ("∇", "\\nabla"), ("∂", "\\partial"),
+        ]
+        greek_menu = tk.Menubutton(toolbar, text="αβγ 符号", relief=tk.RAISED)
+        greek_menu.pack(side=tk.LEFT, padx=2)
+        greek_menu.menu = tk.Menu(greek_menu, tearoff=0)
+        greek_menu["menu"] = greek_menu.menu
+        for symbol, latex in greek_symbols:
+            greek_menu.menu.add_command(label=f"{symbol} ({latex})", command=lambda lt=latex: self._rmd_editor.insert(tk.INSERT, lt))
 
-内容:
-:::
-"""
-            self._rmd_editor.insert(tk.INSERT, env_template)
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
         
-        ttk.Button(toolbar, text="❓ 问题", command=insert_problem).pack(side=tk.LEFT, padx=2)
-        
-        def insert_solution():
-            env_template = """::: {.solution}
-解答: 
+        # 环境下拉菜单
+        rmd_env_menu = tk.Menubutton(toolbar, text="📦 环境", relief=tk.RAISED)
+        rmd_env_menu.pack(side=tk.LEFT, padx=2)
+        rmd_env_menu.menu = tk.Menu(rmd_env_menu, tearoff=0)
+        rmd_env_menu["menu"] = rmd_env_menu.menu
 
-内容:
-:::
-"""
-            self._rmd_editor.insert(tk.INSERT, env_template)
-        
-        ttk.Button(toolbar, text="✅ 解答", command=insert_solution).pack(side=tk.LEFT, padx=2)
-        
-        def insert_remark():
-            env_template = """::: {.remark}
-备注: 
+        def _insert_rmd_env(env_type):
+            env_tpls = {
+                "definition": "\n::: definition\n\n:::\n",
+                "theorem": "\n::: theorem\n\n:::\n",
+                "lemma": "\n::: lemma\n\n:::\n",
+                "corollary": "\n::: corollary\n\n:::\n",
+                "proposition": "\n::: proposition\n\n:::\n",
+                "axiom": "\n::: axiom\n\n:::\n",
+                "example": "\n::: example\n\n:::\n",
+                "problem": "\n::: problem\n\n:::\n",
+                "solution": "\n::: solution\n\n:::\n",
+                "remark": "\n::: remark\n\n:::\n",
+                "exercise": "\n::: exercise\n\n:::\n",
+                "homework": "\n::: homework\n\n:::\n",
+                "proof": "\n::: proof\n\n:::\n",
+                "summary": "\n::: summary\n\n:::\n",
+            }
+            self._rmd_editor.insert(tk.INSERT, env_tpls.get(env_type, ""))
 
-内容:
-:::
-"""
-            self._rmd_editor.insert(tk.INSERT, env_template)
-        
-        ttk.Button(toolbar, text="📝 注解", command=insert_remark).pack(side=tk.LEFT, padx=2)
+        rmd_env_menu.menu.add_command(label="📌 定义", command=lambda: _insert_rmd_env("definition"))
+        rmd_env_menu.menu.add_command(label="📜 定理", command=lambda: _insert_rmd_env("theorem"))
+        rmd_env_menu.menu.add_command(label="🎯 引理", command=lambda: _insert_rmd_env("lemma"))
+        rmd_env_menu.menu.add_command(label="💡 推论", command=lambda: _insert_rmd_env("corollary"))
+        rmd_env_menu.menu.add_command(label="📋 命题", command=lambda: _insert_rmd_env("proposition"))
+        rmd_env_menu.menu.add_command(label="🏛️ 公理", command=lambda: _insert_rmd_env("axiom"))
+        rmd_env_menu.menu.add_separator()
+        rmd_env_menu.menu.add_command(label="📝 例题", command=lambda: _insert_rmd_env("example"))
+        rmd_env_menu.menu.add_command(label="❓ 问题", command=lambda: _insert_rmd_env("problem"))
+        rmd_env_menu.menu.add_command(label="✅ 解答", command=lambda: _insert_rmd_env("solution"))
+        rmd_env_menu.menu.add_command(label="📝 注解", command=lambda: _insert_rmd_env("remark"))
+        rmd_env_menu.menu.add_command(label="🏋️ 练习", command=lambda: _insert_rmd_env("exercise"))
+        rmd_env_menu.menu.add_command(label="📚 作业", command=lambda: _insert_rmd_env("homework"))
+        rmd_env_menu.menu.add_separator()
+        rmd_env_menu.menu.add_command(label="📐 证明", command=lambda: _insert_rmd_env("proof"))
+        rmd_env_menu.menu.add_command(label="📊 小结", command=lambda: _insert_rmd_env("summary"))
         
         # 编辑器区域
         editor_frame = ttk.Frame(parent)
@@ -17826,6 +22255,9 @@ output: html_document
         self._rmd_editor.configure(yscrollcommand=editor_scroll.set)
         self._rmd_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         editor_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 添加搜索/替换工具栏
+        self._add_search_replace_bar(parent, self._rmd_editor)
         
         # 语法高亮
         self._rmd_editor.tag_configure("yaml_delim", foreground="#7f8c8d", font=("Consolas", 10, "bold"))
@@ -17872,6 +22304,14 @@ output: html_document
         self._rmd_editor.bind("<Control-s>", lambda e: save_rmd())
         self._rmd_editor.bind("<FocusOut>", lambda e: save_rmd())
         
+        # 撤销/重做（Tkinter Text 内置支持，显式绑定确保生效）
+        self._rmd_editor.bind("<Control-z>", lambda e: self._rmd_editor.edit_undo() or "break")
+        self._rmd_editor.bind("<Control-y>", lambda e: self._rmd_editor.edit_redo() or "break")
+        
+        # macOS 快捷键兼容
+        self._rmd_editor.bind("<Command-z>", lambda e: self._rmd_editor.edit_undo() or "break")
+        self._rmd_editor.bind("<Command-y>", lambda e: self._rmd_editor.edit_redo() or "break")
+        
         # 快捷键绑定
         def wrap_with_bold():
             try:
@@ -17894,6 +22334,89 @@ output: html_document
                 self._rmd_editor.mark_set(tk.INSERT, "insert-1c")
         
         self._rmd_editor.bind("<Control-i>", lambda e: wrap_with_italic())
+        
+        def wrap_with_math():
+            try:
+                sel_text = self._rmd_editor.get(tk.SEL_FIRST, tk.SEL_LAST)
+                self._rmd_editor.delete(tk.SEL_FIRST, tk.SEL_LAST)
+                self._rmd_editor.insert(tk.INSERT, f"${sel_text}$")
+            except:
+                self._rmd_editor.insert(tk.INSERT, "$$")
+                self._rmd_editor.mark_set(tk.INSERT, "insert-1c")
+        
+        self._rmd_editor.bind("<Control-m>", lambda e: wrap_with_math())
+        
+        def wrap_with_code_inline():
+            try:
+                sel_text = self._rmd_editor.get(tk.SEL_FIRST, tk.SEL_LAST)
+                self._rmd_editor.delete(tk.SEL_FIRST, tk.SEL_LAST)
+                self._rmd_editor.insert(tk.INSERT, f"`{sel_text}`")
+            except:
+                self._rmd_editor.insert(tk.INSERT, "``")
+                self._rmd_editor.mark_set(tk.INSERT, "insert-1c")
+        
+        self._rmd_editor.bind("<Control-grave>", lambda e: wrap_with_code_inline())
+        
+        def insert_math_block():
+            self._rmd_editor.insert(tk.INSERT, "\n$$\n\n$$\n")
+            self._rmd_editor.mark_set("insert", f"{self._rmd_editor.index(tk.INSERT)}-3c")
+        
+        self._rmd_editor.bind("<Control-0>", lambda e: insert_math_block())
+        
+        def insert_blockquote():
+            self._rmd_editor.insert(tk.INSERT, "\n> ")
+        
+        self._rmd_editor.bind("<Alt-q>", lambda e: insert_blockquote())
+        
+        def insert_link():
+            self._rmd_editor.insert(tk.INSERT, "[]()")
+            self._rmd_editor.mark_set("insert", f"{self._rmd_editor.index(tk.INSERT)}-2c")
+        
+        self._rmd_editor.bind("<Alt-k>", lambda e: insert_link())
+        
+        def insert_display_math():
+            self._rmd_editor.insert(tk.INSERT, "\n$$\nE = mc^2\n$$\n")
+        
+        self._rmd_editor.bind("<Control-3>", lambda e: insert_display_math())
+        
+        def insert_h1():
+            self._rmd_editor.insert(tk.INSERT, "\n# 标题\n\n")
+            self._rmd_editor.mark_set("insert", f"{self._rmd_editor.index(tk.INSERT)}-5c")
+        def insert_h2():
+            self._rmd_editor.insert(tk.INSERT, "\n## 标题\n\n")
+            self._rmd_editor.mark_set("insert", f"{self._rmd_editor.index(tk.INSERT)}-5c")
+        def insert_h3():
+            self._rmd_editor.insert(tk.INSERT, "\n### 标题\n\n")
+            self._rmd_editor.mark_set("insert", f"{self._rmd_editor.index(tk.INSERT)}-5c")
+        def insert_hline():
+            self._rmd_editor.insert(tk.INSERT, "\n---\n\n")
+        def insert_ulist():
+            self._rmd_editor.insert(tk.INSERT, "\n- 列表项\n")
+        def insert_olist():
+            self._rmd_editor.insert(tk.INSERT, "\n1. 列表项\n")
+        def insert_checkbox():
+            self._rmd_editor.insert(tk.INSERT, "\n- [ ] 待办事项\n")
+        def insert_table():
+            tpl = "\n| 列1 | 列2 | 列3 |\n|------|------|------|\n|  |  |  |\n"
+            self._rmd_editor.insert(tk.INSERT, tpl)
+        def insert_footnote():
+            self._rmd_editor.insert(tk.INSERT, "[^1]\n\n[^1]: 脚注内容")
+        def insert_strikethrough():
+            self._rmd_editor.insert(tk.INSERT, "~~删除线~~")
+        def insert_image():
+            self._rmd_editor.insert(tk.INSERT, "![](image.png)")
+            self._rmd_editor.mark_set("insert", f"{self._rmd_editor.index(tk.INSERT)}-10c")
+
+        self._rmd_editor.bind("<Control-1>", lambda e: insert_h1())
+        self._rmd_editor.bind("<Control-2>", lambda e: insert_h2())
+        self._rmd_editor.bind("<Alt-h>", lambda e: insert_hline())
+        self._rmd_editor.bind("<Alt-u>", lambda e: insert_ulist())
+        self._rmd_editor.bind("<Alt-o>", lambda e: insert_olist())
+        self._rmd_editor.bind("<Alt-x>", lambda e: insert_checkbox())
+        self._rmd_editor.bind("<Alt-t>", lambda e: insert_table())
+        self._rmd_editor.bind("<Alt-f>", lambda e: insert_footnote())
+        self._rmd_editor.bind("<Alt-d>", lambda e: insert_strikethrough())
+        self._rmd_editor.bind("<Alt-i>", lambda e: insert_image())
     
     def _refresh_rmd_editor(self, note_file):
         """刷新Rmd编辑器显示"""
@@ -18024,7 +22547,8 @@ output: html_document
         # 项目列表标题
         list_header = ttk.Frame(left_frame)
         list_header.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(list_header, text="项目列表", font=("", 12, "bold")).pack(side=tk.LEFT)
+        ttk.Label(list_header, text="📁 项目管理", font=("", 12, "bold"), foreground="#2C3E50").pack(side=tk.LEFT)
+        self._add_specialist_button(list_header, "project", style="Accent.TButton")
         ttk.Button(list_header, text="➕ 新建", command=self._create_project_dialog).pack(side=tk.RIGHT)
 
         # 项目列表
@@ -18128,6 +22652,7 @@ output: html_document
         status_btn.pack(side=tk.LEFT, padx=2)
         
         ttk.Button(btn_frame, text="🗑️ 删除", command=lambda: self._delete_project_dialog(project)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="📝 快捷笔记", command=lambda: self._quick_note(project)).pack(side=tk.LEFT, padx=2)
 
         # 项目文件浏览器
         files_frame = ttk.LabelFrame(self._project_detail_frame, text="项目文件", padding=10)
@@ -18145,42 +22670,253 @@ output: html_document
         
         ext = file_path.suffix.lower()
         
-        if ext in [".md", ".rmd", ".txt", ".tex", ".html", ".css", ".js", ".py", ".r"]:
-            # 使用类似Rmd的编辑器
+        # 支持更多格式
+        supported_exts = {
+            ".md", ".rmd", ".txt", ".tex", ".html", ".css", ".js", ".py", ".r",
+            ".json", ".yaml", ".yml", ".xml", ".sql", ".toml", ".ini", ".cfg",
+            ".csv", ".jsonl", ".bat", ".sh", ".ps1", ".zsh", ".bash",
+            ".lua", ".ts", ".jsx", ".tsx", ".vue", ".svelte", ".jsonc",
+            ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".swift",
+            ".kt", ".scala", ".php", ".rb", ".pl", ".dart",
+            ".log", ".diff", ".patch", ".env", ".gitignore", ".dockerfile",
+        }
+        
+        if ext in supported_exts or file_path.name.lower() in ("makefile", "dockerfile", ".gitignore", ".env"):
             self._build_project_file_editor(dlg, file_path, project)
         else:
-            # 其他类型用系统默认打开
             open_file(str(file_path))
             dlg.destroy()
     
     def _build_project_file_editor(self, parent, file_path, project):
-        """构建项目文件编辑器"""
+        """构建项目文件编辑器（支持搜索高亮+替换+语法高亮+快捷键）"""
         self._current_proj_edit_file = file_path
+        ext = file_path.suffix.lower()
         
-        # 标题
+        # 标题栏
         header = ttk.Frame(parent)
         header.pack(fill=tk.X, padx=10, pady=(10, 5))
-        ttk.Label(header, text=f"📝 编辑: {file_path.name}", font=("", 12, "bold")).pack(side=tk.LEFT)
+        header_title = ttk.Label(header, text=f"📝 编辑: {file_path.name}", font=("", 12, "bold"))
+        header_title.pack(side=tk.LEFT)
         ttk.Label(header, text=f"项目: {project['name']}", font=("", 9), foreground="#7f8c8d").pack(side=tk.RIGHT)
+        
+        # 前向声明状态标签（save_file 需要引用）
+        status_label = None
+        
+        def save_file():
+            try:
+                content = editor.get("1.0", tk.END)
+                file_path.write_text(content, encoding="utf-8")
+                status_label.config(text=f"✅ 已保存 {datetime.now().strftime('%H:%M:%S')}", foreground="#27ae60")
+                # 清除修改标记
+                nonlocal _file_modified
+                _file_modified = False
+                header_title.config(text=f"📝 编辑: {file_path.name}")
+            except Exception as e:
+                messagebox.showerror("错误", f"保存失败: {e}")
+                status_label.config(text=f"❌ 保存失败", foreground="#e74c3c")
+        
+        # 搜索/替换工具栏
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(fill=tk.X, padx=10, pady=(0, 5))
+        
+        # 第一行：搜索
+        ttk.Label(toolbar, text="🔍").pack(side=tk.LEFT, padx=(0, 2))
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(toolbar, textvariable=search_var, width=30, font=("", 9))
+        search_entry.pack(side=tk.LEFT, padx=2)
+        
+        replace_var = tk.StringVar()
+        ttk.Label(toolbar, text="替换为：", font=("", 8)).pack(side=tk.LEFT, padx=(5, 2))
+        replace_entry = ttk.Entry(toolbar, textvariable=replace_var, width=25, font=("", 9))
+        replace_entry.pack(side=tk.LEFT, padx=2)
+        
+        search_label = ttk.Label(toolbar, text="", font=("", 8), foreground="#888")
+        search_label.pack(side=tk.LEFT, padx=2)
+
+        # 配置高亮标签
+        editor_tags = {"search_highlight": "search_hl"}
+        
+        def _highlight_all(query):
+            """高亮所有匹配项"""
+            # 清除旧高亮
+            editor.tag_remove("search_hl", "1.0", tk.END)
+            if not query:
+                search_label.config(text="")
+                return
+            count = 0
+            start = "1.0"
+            while True:
+                pos = editor.search(query, start, stopindex=tk.END, nocase=True)
+                if not pos:
+                    break
+                end_pos = f"{pos}+{len(query)}c"
+                editor.tag_add("search_hl", pos, end_pos)
+                count += 1
+                start = end_pos
+            search_label.config(text=f"{count} 处匹配", foreground="#27ae60")
+
+        def _search_text(forward=True):
+            query = search_var.get().strip()
+            if not query:
+                return
+            try:
+                if forward:
+                    pos = editor.search(query, "insert", stopindex=tk.END, nocase=True)
+                else:
+                    pos = editor.search(query, "insert", stopindex="1.0", backwards=True, nocase=True)
+                if not pos:
+                    if forward:
+                        pos = editor.search(query, "1.0", stopindex=tk.END, nocase=True)
+                    else:
+                        last_line = editor.index(tk.END)
+                        pos = editor.search(query, last_line, stopindex="1.0", backwards=True, nocase=True)
+                if pos:
+                    end_pos = f"{pos}+{len(query)}c"
+                    editor.tag_remove("sel", "1.0", tk.END)
+                    editor.tag_add("sel", pos, end_pos)
+                    editor.mark_set("insert", pos)
+                    editor.see(pos)
+                else:
+                    search_label.config(text="未找到", foreground="#e74c3c")
+            except Exception:
+                pass
+
+        def _replace_current():
+            """替换当前选中项"""
+            query = search_var.get().strip()
+            replacement = replace_var.get()
+            if not query:
+                return
+            sel = editor.tag_ranges("sel")
+            if not sel:
+                _search_text(True)
+                return
+            sel_text = editor.get(sel[0], sel[1])
+            if sel_text.lower() == query.lower():
+                editor.delete(sel[0], sel[1])
+                editor.insert(sel[0], replacement)
+                _highlight_all(query)
+                search_label.config(text="已替换 1 处", foreground="#27ae60")
+
+        def _replace_all():
+            """替换全部"""
+            query = search_var.get().strip()
+            replacement = replace_var.get()
+            if not query:
+                return
+            count = 0
+            pos = "1.0"
+            while True:
+                pos = editor.search(query, pos, stopindex=tk.END, nocase=True)
+                if not pos:
+                    break
+                end_pos = f"{pos}+{len(query)}c"
+                editor.delete(pos, end_pos)
+                editor.insert(pos, replacement)
+                count += 1
+                pos = f"{pos}+{len(replacement)}c"
+            editor.tag_remove("search_hl", "1.0", tk.END)
+            search_label.config(text=f"已替换全部 {count} 处", foreground="#27ae60")
+
+        search_entry.bind("<Return>", lambda e: _search_text(True))
+        search_entry.bind("<Shift-Return>", lambda e: _search_text(False))
+        
+        # 实时高亮
+        search_var.trace_add("write", lambda *args: _highlight_all(search_var.get().strip()))
+        
+        ttk.Button(toolbar, text="▲", width=2, command=lambda: _search_text(False)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="▼", width=2, command=lambda: _search_text(True)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="替换", width=4, command=_replace_current).pack(side=tk.LEFT, padx=1)
+        ttk.Button(toolbar, text="全部替换", width=6, command=_replace_all).pack(side=tk.LEFT, padx=1)
         
         # 编辑器区域
         edit_frame = ttk.Frame(parent)
         edit_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        editor = tk.Text(edit_frame, wrap="word", font=("Consolas", 11))
+        editor = tk.Text(edit_frame, wrap="word", font=("Consolas", 11), undo=True, maxundo=1000)
         scroll = ttk.Scrollbar(edit_frame, orient=tk.VERTICAL, command=editor.yview)
         editor.configure(yscrollcommand=scroll.set)
+        
+        # 配置搜索高亮样式 + 语法高亮标签（高对比度，适配白底编辑器）
+        editor.tag_configure("search_hl", background="yellow", foreground="black")
+        editor.tag_configure("syntax_comment", foreground="#228B22", font=("", 11, "italic"))
+        editor.tag_configure("syntax_string", foreground="#B22222")
+        editor.tag_configure("syntax_keyword", foreground="#0000CD", font=("", 11, "bold"))
+        editor.tag_configure("syntax_number", foreground="#8B008B", font=("", 11, "bold"))
+        editor.tag_configure("syntax_function", foreground="#B8860B", font=("", 11, "bold"))
+        editor.tag_configure("syntax_builtin", foreground="#8B4513", font=("", 11, "bold"))
+        editor.tag_configure("syntax_class", foreground="#008B8B", font=("", 11, "bold"))
+        editor.tag_configure("syntax_decorator", foreground="#B8860B", font=("", 11, "bold"))
+        editor.tag_configure("syntax_constant", foreground="#008B8B", font=("", 11, "bold"))
+        editor.tag_configure("syntax_type", foreground="#008B8B", font=("", 11, "bold"))
         
         editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
+        # Markdown/RMD 文件添加预览按钮（必须在 editor 创建之后）
+        if ext in (".md", ".rmd", ".markdown", ".tex", ".txt"):
+            # 在状态栏添加预览按钮
+            status_toolbar = ttk.Frame(parent)
+            status_toolbar.pack(fill=tk.X, padx=10, pady=2)
+            ttk.Separator(status_toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2)
+            ttk.Button(status_toolbar, text="📄 预览",
+                       command=lambda ed=editor: self._open_markdown_preview(ed, f"文件预览: {file_path.name}")).pack(side=tk.LEFT, padx=2)
+        
         # 加载文件内容
+        _file_modified = False
         try:
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
                 editor.insert("1.0", content)
+                # 语法高亮
+                self._apply_project_syntax_highlighting(editor, ext, content)
         except Exception as e:
             messagebox.showerror("错误", f"读取文件失败: {e}")
+        
+        def _mark_modified(event=None):
+            nonlocal _file_modified
+            if not _file_modified:
+                _file_modified = True
+                header_title.config(text=f"📝 编辑: {file_path.name} *")
+        
+        # 实时语法高亮（延迟 800ms，仅监听 KeyRelease 避免 tag 操作触发循环）
+        _highlight_after_id = [None]
+        def _schedule_realtime_highlight(event=None):
+            _mark_modified(event)
+            if _highlight_after_id[0]:
+                try:
+                    parent.after_cancel(_highlight_after_id[0])
+                except:
+                    pass
+            _highlight_after_id[0] = parent.after(800, lambda: _do_realtime_highlight())
+        
+        def _do_realtime_highlight():
+            """实时高亮 — 只读内容不改文本，不会触发 Modified"""
+            try:
+                content = editor.get("1.0", tk.END)
+                # 清除所有语法高亮标签
+                for tag in ("syntax_comment", "syntax_string", "syntax_keyword",
+                            "syntax_number", "syntax_function", "syntax_builtin",
+                            "syntax_class", "syntax_decorator", "syntax_constant", "syntax_type"):
+                    editor.tag_remove(tag, "1.0", tk.END)
+                self._apply_project_syntax_highlighting(editor, ext, content)
+            except:
+                pass
+        
+        editor.bind("<KeyRelease>", _schedule_realtime_highlight)
+        
+        def _confirm_close():
+            """关闭前确认保存"""
+            if _file_modified:
+                result = messagebox.askyesnocancel("未保存的更改", f"「{file_path.name}」有未保存的更改，是否保存？")
+                if result is None:  # Cancel
+                    return False
+                elif result:  # Yes
+                    save_file()
+            parent.destroy()
+            return True
+        
+        parent.protocol("WM_DELETE_WINDOW", _confirm_close)
         
         # 状态栏
         status_frame = ttk.Frame(parent)
@@ -18188,51 +22924,782 @@ output: html_document
         status_label = ttk.Label(status_frame, text="就绪", foreground="#27ae60")
         status_label.pack(side=tk.LEFT)
         
-        # 保存函数
-        def save_file():
-            try:
-                content = editor.get("1.0", tk.END)
-                file_path.write_text(content, encoding="utf-8")
-                status_label.config(text=f"✅ 已保存 {datetime.now().strftime('%H:%M:%S')}", foreground="#27ae60")
-            except Exception as e:
-                messagebox.showerror("错误", f"保存失败: {e}")
-                status_label.config(text=f"❌ 保存失败", foreground="#e74c3c")
+        # 行号/列号显示
+        cursor_label = ttk.Label(status_frame, text="Ln 1, Col 1", font=("", 8))
+        cursor_label.pack(side=tk.RIGHT)
         
-        # 按钮栏
+        def _update_cursor(event=None):
+            pos = editor.index(tk.INSERT)
+            line, col = pos.split('.')
+            cursor_label.config(text=f"Ln {line}, Col {int(col)+1}")
+        
+        editor.bind("<KeyRelease>", _update_cursor)
+        editor.bind("<ButtonRelease-1>", _update_cursor)
+        
+        # 快捷键（对齐执行模式编辑器）
+        editor.bind("<Control-s>", lambda e: (save_file(), "break"))
+        editor.bind("<Control-f>", lambda e: (search_entry.focus_set(), "break"))
+        editor.bind("<Control-h>", lambda e: (replace_entry.focus_set(), "break"))
+        editor.bind("<Control-z>", lambda e: None)  # Text 组件默认支持撤销
+        editor.bind("<Control-y>", lambda e: None)  # 重做
+        
+        # 剪切/复制/粘贴（跨平台兼容）
+        editor.bind("<Control-x>", lambda e: None)  # Text 组件默认支持
+        editor.bind("<Control-c>", lambda e: None)  # Text 组件默认支持
+        editor.bind("<Control-v>", lambda e: None)  # Text 组件默认支持
+        
+        # macOS 快捷键兼容（Command 键）
+        is_mac = parent.tk.call('tk', 'windowingsystem') == 'aqua'
+        if is_mac:
+            editor.bind("<Command-s>", lambda e: (save_file(), "break"))
+            editor.bind("<Command-f>", lambda e: (search_entry.focus_set(), "break"))
+            editor.bind("<Command-z>", lambda e: None)
+            editor.bind("<Command-x>", lambda e: None)
+            editor.bind("<Command-c>", lambda e: None)
+            editor.bind("<Command-v>", lambda e: None)
+        
+        # Markdown 快捷键
+        is_markdown = ext in (".md", ".rmd", ".txt", ".tex")
+        if is_markdown:
+            def do_bold():
+                editor.insert(tk.INSERT, "****")
+                editor.mark_set("insert", f"{editor.index(tk.INSERT)}-2c")
+            def do_italic():
+                editor.insert(tk.INSERT, "__")
+                editor.mark_set("insert", f"{editor.index(tk.INSERT)}-1c")
+            def do_code():
+                editor.insert(tk.INSERT, "``")
+                editor.mark_set("insert", f"{editor.index(tk.INSERT)}-1c")
+            editor.bind("<Control-b>", lambda e: (do_bold(), "break"))
+            editor.bind("<Control-i>", lambda e: (do_italic(), "break"))
+            editor.bind("<Control-k>", lambda e: (do_code(), "break"))
+        
+        # 底部操作栏
         btn_frame = ttk.Frame(parent)
-        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
         
         ttk.Button(btn_frame, text="💾 保存", command=save_file).pack(side=tk.LEFT, padx=2)
-        ttk.Separator(btn_frame, orient="vertical").pack(side=tk.LEFT, fill="y", padx=10)
         
         # 根据文件类型添加辅助按钮
-        ext = file_path.suffix.lower()
         if ext in [".rmd", ".md"]:
-            # 添加预览按钮
             def preview():
+                """预览：按默认方式打开文件（不编译）"""
+                save_file()
+                open_file(str(file_path))
+            
+            def compile_rmd():
+                """编译Rmd为PDF并打开"""
                 save_file()
                 if ext == ".rmd":
-                    # Rmd预览
                     import subprocess
+                    # 使用 as_posix() 将 Windows 反斜杠转为正斜杠，避免 R 将 \u 解释为 Unicode 转义
+                    rmd_path_posix = file_path.as_posix()
                     try:
-                        subprocess.Popen(["Rscript", "-e", f"rmarkdown::render('{file_path}')"], 
-                                        cwd=str(file_path.parent))
+                        result = subprocess.run(
+                            ["Rscript", "-e", f"rmarkdown::render('{rmd_path_posix}', output_format='pdf_document')"],
+                            cwd=str(file_path.parent),
+                            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300
+                        )
+                        if result.returncode == 0:
+                            pdf_path = file_path.with_suffix(".pdf")
+                            if pdf_path.exists():
+                                open_file(str(pdf_path))
+                            else:
+                                messagebox.showwarning("警告", "编译完成但未找到PDF文件")
+                        else:
+                            err_msg = result.stderr.strip()[:500] if result.stderr else "未知错误"
+                            messagebox.showerror("编译失败", f"R Markdown 编译出错：\n\n{err_msg}")
+                    except subprocess.TimeoutExpired:
+                        messagebox.showerror("超时", "编译超过5分钟，请检查是否有死循环代码")
+                    except Exception as e:
+                        messagebox.showinfo("提示", f"编译失败: {e}\n\n请确保已安装R、rmarkdown和tinytex包")
+                else:
+                    open_file(str(file_path))
+
+            ttk.Button(btn_frame, text="👁️ 预览", command=preview).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="📄 编译PDF", command=compile_rmd).pack(side=tk.LEFT, padx=2)
+
+            def compile_html():
+                """编译Rmd为HTML并打开"""
+                save_file()
+                import subprocess
+                # 使用 as_posix() 将 Windows 反斜杠转为正斜杠，避免 R 将 \u 解释为 Unicode 转义
+                rmd_path_posix = file_path.as_posix()
+                try:
+                    result = subprocess.run(
+                        ["Rscript", "-e", f"rmarkdown::render('{rmd_path_posix}', output_format='html_document')"],
+                        cwd=str(file_path.parent),
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300
+                    )
+                    if result.returncode == 0:
                         html_path = file_path.with_suffix(".html")
                         if html_path.exists():
                             open_file(str(html_path))
-                    except:
-                        messagebox.showinfo("提示", "请确保已安装R和rmarkdown包")
-                else:
-                    open_file(str(file_path))
-            
-            ttk.Button(btn_frame, text="👁️ 预览", command=preview).pack(side=tk.LEFT, padx=2)
+                        else:
+                            messagebox.showwarning("警告", "编译完成但未找到HTML文件")
+                    else:
+                        err_msg = result.stderr.strip()[:500] if result.stderr else "未知错误"
+                        messagebox.showerror("编译失败", f"R Markdown 编译出错：\n\n{err_msg}")
+                except subprocess.TimeoutExpired:
+                    messagebox.showerror("超时", "编译超过5分钟，请检查是否有死循环代码")
+                except Exception as e:
+                    messagebox.showinfo("提示", f"编译失败: {e}")
+
+            def compile_docx():
+                """编译Rmd为DOCX并打开"""
+                save_file()
+                import subprocess
+                # 使用 as_posix() 将 Windows 反斜杠转为正斜杠，避免 R 将 \u 解释为 Unicode 转义
+                rmd_path_posix = file_path.as_posix()
+                try:
+                    result = subprocess.run(
+                        ["Rscript", "-e", f"rmarkdown::render('{rmd_path_posix}', output_format='word_document')"],
+                        cwd=str(file_path.parent),
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300
+                    )
+                    if result.returncode == 0:
+                        docx_path = file_path.with_suffix(".docx")
+                        if docx_path.exists():
+                            open_file(str(docx_path))
+                        else:
+                            messagebox.showwarning("警告", "编译完成但未找到DOCX文件")
+                    else:
+                        err_msg = result.stderr.strip()[:500] if result.stderr else "未知错误"
+                        messagebox.showerror("编译失败", f"R Markdown 编译出错：\n\n{err_msg}")
+                except subprocess.TimeoutExpired:
+                    messagebox.showerror("超时", "编译超过5分钟，请检查是否有死循环代码")
+                except Exception as e:
+                    messagebox.showinfo("提示", f"编译失败: {e}")
+
+            ttk.Button(btn_frame, text="🌐 HTML", command=compile_html).pack(side=tk.LEFT, padx=2)
+            ttk.Button(btn_frame, text="📝 DOCX", command=compile_docx).pack(side=tk.LEFT, padx=2)
         
         ttk.Separator(btn_frame, orient="vertical").pack(side=tk.LEFT, fill="y", padx=10)
         ttk.Button(btn_frame, text="📂 在文件夹中打开", command=lambda: open_file(str(file_path.parent))).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="关闭", command=parent.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btn_frame, text="关闭", command=_confirm_close).pack(side=tk.RIGHT)
+
+    def _apply_project_syntax_highlighting(self, editor, ext, content):
+        """应用项目文件语法高亮"""
+        if ext == ".py":
+            self._highlight_python(editor, content)
+        elif ext in (".js", ".ts", ".jsx", ".tsx"):
+            self._highlight_javascript(editor, content)
+        elif ext in (".yaml", ".yml"):
+            self._highlight_yaml(editor, content)
+        elif ext == ".html":
+            self._highlight_html(editor, content)
+        elif ext in (".css",):
+            self._highlight_css(editor, content)
+        elif ext == ".sql":
+            self._highlight_sql(editor, content)
+        elif ext in (".sh", ".bash", ".zsh", ".bat", ".ps1"):
+            self._highlight_shell(editor, content)
+        elif ext in (".json",):
+            self._highlight_json(editor, content)
+        elif ext in (".r", ".R"):
+            self._highlight_r(editor, content)
+        elif ext in (".java",):
+            self._highlight_java(editor, content)
+        elif ext in (".c", ".cpp", ".h", ".hpp"):
+            self._highlight_cpp(editor, content)
+        elif ext in (".go",):
+            self._highlight_go(editor, content)
+        elif ext in (".rs",):
+            self._highlight_rust(editor, content)
+        elif ext in (".lua",):
+            self._highlight_lua(editor, content)
+        elif ext in (".toml", ".ini", ".cfg"):
+            self._highlight_config(editor, content)
+
+    def _clear_global_cut_markers(self):
+        """清除全局剪切标记（跨项目支持）"""
+        for tree_widget, item_id in self._global_cut_markers:
+            try:
+                tree_widget.item(item_id, tags=())
+            except:
+                pass
+        self._global_cut_markers.clear()
+
+    def _highlight_python(self, editor, content):
+        import re
+        keywords = {"def", "class", "import", "from", "return", "if", "elif", "else", "for", "while",
+                    "try", "except", "with", "as", "lambda", "yield", "pass", "break", "continue",
+                    "True", "False", "None", "and", "or", "not", "in", "is", "raise", "finally",
+                    "global", "nonlocal", "assert", "del"}
+        builtins = {"print", "len", "range", "int", "str", "float", "list", "dict", "set", "tuple",
+                    "type", "isinstance", "hasattr", "getattr", "setattr", "open", "input", "super",
+                    "map", "filter", "zip", "enumerate", "sorted", "reversed", "sum", "min", "max",
+                    "abs", "all", "any", "repr", "format", "hash", "id", "help", "dir"}
+        
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            # 注释
+            if stripped.startswith('#'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            
+            # 关键字
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            
+            # 内置函数
+            for bi in builtins:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{bi}\b(?=\s*\()', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_builtin", idx, f"{idx}+{len(bi)}c")
+                    pos = f"{idx}+{len(bi)}c"
+            
+            # 函数定义: def foo(
+            for m in re.finditer(r'\bdef\s+(\w+)\s*\(', line):
+                start = f"{i}.{m.start(1)}"
+                end = f"{i}.{m.end(1)}"
+                editor.tag_add("syntax_function", start, end)
+            
+            # 类定义: class Foo(
+            for m in re.finditer(r'\bclass\s+(\w+)', line):
+                start = f"{i}.{m.start(1)}"
+                end = f"{i}.{m.end(1)}"
+                editor.tag_add("syntax_class", start, end)
+            
+            # 装饰器: @decorator
+            for m in re.finditer(r'@(\w+)', line):
+                start = f"{i}.{m.start(1)}"
+                end = f"{i}.{m.end(1)}"
+                editor.tag_add("syntax_decorator", start, end)
+            
+            # 字符串: "..." 或 '...'
+            for m in re.finditer(r'(?<!\\)\"(.*?)(?<!\\)\"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r"(?<!\\)'(.*?)(?<!\\)'", line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            
+            # 数字: 整数、浮点数、科学计数法
+            for m in re.finditer(r'\b(\d+\.?\d*(?:e[+-]?\d+)?j?)\b', line, re.IGNORECASE):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_javascript(self, editor, content):
+        import re
+        keywords = {"const", "let", "var", "function", "return", "if", "else", "for", "while",
+                    "class", "import", "export", "from", "async", "await", "try", "catch",
+                    "true", "false", "null", "undefined", "new", "this", "throw", "switch",
+                    "case", "default", "break", "continue", "typeof", "instanceof", "in",
+                    "of", "do", "finally", "extends", "super", "static", "get", "set", "yield"}
+        builtins = {"console", "window", "document", "Math", "JSON", "Array", "Object", "String",
+                    "Number", "Boolean", "Promise", "Map", "Set", "Date", "RegExp", "Error",
+                    "parseInt", "parseFloat", "setTimeout", "setInterval", "fetch", "alert"}
+        
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('//'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            
+            # 关键字
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            
+            # 内置对象
+            for bi in builtins:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{bi}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_builtin", idx, f"{idx}+{len(bi)}c")
+                    pos = f"{idx}+{len(bi)}c"
+            
+            # 函数定义: function foo( 或 const foo = (
+            for m in re.finditer(r'function\s+(\w+)\s*\(', line):
+                editor.tag_add("syntax_function", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            for m in re.finditer(r'(?:const|let|var)\s+(\w+)\s*=\s*(?:\(|async\s+function|\(\s*\)\s*=>)', line):
+                editor.tag_add("syntax_function", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            
+            # 字符串: "..." 或 '...' 或 `...`
+            for m in re.finditer(r'(?<!\\)\"(.*?)(?<!\\)\"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r"(?<!\\)'(.*?)(?<!\\)'", line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r'`([^`]*?)`', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            
+            # 数字
+            for m in re.finditer(r'\b(\d+\.?\d*(?:e[+-]?\d+)?)\b', line, re.IGNORECASE):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_yaml(self, editor, content):
+        import re
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+            elif ':' in line and not line.strip().startswith('-'):
+                colon_idx = line.index(':')
+                editor.tag_add("syntax_keyword", f"{i}.0", f"{i}.{colon_idx}")
+                # 值高亮
+                val_start = f"{i}.{colon_idx + 1}"
+                val_end = f"{i}.end"
+                editor.tag_add("syntax_string", val_start, val_end)
+            # 数字
+            for m in re.finditer(r'\b(\d+\.?\d*)\b', line):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_html(self, editor, content):
+        import re
+        # 注释
+        for m in re.finditer(r'<!--.*?-->', content, re.DOTALL):
+            start_pos = editor.index(f"1.0+{m.start()}c")
+            end_pos = editor.index(f"1.0+{m.end()}c")
+            editor.tag_add("syntax_comment", start_pos, end_pos)
+        
+        # 标签名
+        for m in re.finditer(r'<(/?)(\w+)([\s>])', content):
+            lines = content[:m.start()].count('\n')
+            line_num = lines + 1
+            col_offset = m.start() - content.rfind('\n', 0, m.start()) - 1 if '\n' in content[:m.start()] else m.start()
+            tag_start = f"{line_num}.{col_offset + len(m.group(1)) + 1}"
+            tag_end = f"{line_num}.{col_offset + len(m.group(1)) + len(m.group(2)) + 1}"
+            editor.tag_add("syntax_keyword", tag_start, tag_end)
+        
+        # 属性值
+        for m in re.finditer(r'="([^"]*)"', content):
+            lines = content[:m.start()].count('\n')
+            line_num = lines + 1
+            col_offset = m.start() - content.rfind('\n', 0, m.start()) - 1 if '\n' in content[:m.start()] else m.start()
+            editor.tag_add("syntax_string", f"{line_num}.{col_offset}", f"{line_num}.{col_offset + len(m.group())}")
+
+    def _highlight_sql(self, editor, content):
+        import re
+        keywords = {"SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+                    "TABLE", "INTO", "VALUES", "SET", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
+                    "ON", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "ORDER", "BY", "GROUP",
+                    "HAVING", "AS", "DISTINCT", "COUNT", "SUM", "AVG", "MAX", "MIN",
+                    "ALTER", "INDEX", "VIEW", "GRANT", "REVOKE", "COMMIT", "ROLLBACK",
+                    "UNION", "EXISTS", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "END",
+                    "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "CONSTRAINT", "DEFAULT",
+                    "INT", "VARCHAR", "CHAR", "TEXT", "DATE", "TIMESTAMP", "BOOLEAN",
+                    "LIMIT", "OFFSET", "ASC", "DESC", "WITH", "OVER", "PARTITION"}
+        functions = {"COUNT", "SUM", "AVG", "MAX", "MIN", "UPPER", "LOWER", "TRIM", "SUBSTRING",
+                     "CONCAT", "LENGTH", "ROUND", "CEIL", "FLOOR", "NOW", "CURDATE", "COALESCE",
+                     "IFNULL", "CAST", "CONVERT", "ABS", "RAND", "DATE_FORMAT"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('--'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True, nocase=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            
+            # SQL 函数
+            for fn in functions:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{fn}\s*\(', pos, stopindex=f"{i}.end", regexp=True, nocase=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_function", idx, f"{idx}+{len(fn)}c")
+                    pos = f"{idx}+{len(fn)}c"
+            
+            # 字符串
+            for m in re.finditer(r"'(.*?)'", line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            
+            # 数字
+            for m in re.finditer(r'\b(\d+\.?\d*)\b', line):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_shell(self, editor, content):
+        import re
+        keywords = {"if", "then", "else", "fi", "for", "while", "do", "done", "case", "esac",
+                    "function", "return", "exit", "echo", "export", "source", "alias",
+                    "local", "readonly", "shift", "set", "unset", "eval", "exec"}
+        commands = {"cd", "ls", "cp", "mv", "rm", "mkdir", "cat", "grep", "find", "awk", "sed",
+                    "chmod", "chown", "tar", "gzip", "curl", "wget", "ssh", "scp", "kill",
+                    "ps", "top", "df", "du", "free", "mount", "uname", "whoami", "pwd"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('#') or stripped.startswith('REM') or stripped.startswith('rem'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            
+            # 命令
+            for cmd in commands:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{cmd}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_builtin", idx, f"{idx}+{len(cmd)}c")
+                    pos = f"{idx}+{len(cmd)}c"
+            
+            # 字符串
+            for m in re.finditer(r'"([^"]*)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            
+            # 变量: $VAR 或 ${VAR}
+            for m in re.finditer(r'\$\{?(\w+)\}?', line):
+                editor.tag_add("syntax_constant", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_css(self, editor, content):
+        import re
+        properties = {"color", "background", "margin", "padding", "border", "font", "display",
+                      "position", "top", "left", "right", "bottom", "width", "height", "flex",
+                      "grid", "overflow", "opacity", "transform", "transition", "animation"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('/*'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            # 属性名
+            for prop in properties:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{prop}\s*:', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(prop)}c")
+                    pos = f"{idx}+{len(prop)}c"
+            # 值中的数字
+            for m in re.finditer(r'(\d+\.?\d*)(px|em|rem|%|vh|vw|s|ms|deg)?', line):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            # 字符串/颜色值
+            for m in re.finditer(r'#[0-9a-fA-F]{3,8}\b', line):
+                editor.tag_add("syntax_constant", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_json(self, editor, content):
+        import re
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            # 键
+            for m in re.finditer(r'"(\w+)"\s*:', line):
+                editor.tag_add("syntax_keyword", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            # 字符串值
+            for m in re.finditer(r':\s*"([^"]*)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            # 数字
+            for m in re.finditer(r':\s*(-?\d+\.?\d*(?:e[+-]?\d+)?)', line, re.IGNORECASE):
+                editor.tag_add("syntax_number", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            # true/false/null
+            for kw in ("true", "false", "null"):
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_constant", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+
+    def _highlight_r(self, editor, content):
+        import re
+        keywords = {"function", "if", "else", "for", "while", "repeat", "return", "in",
+                    "library", "require", "TRUE", "FALSE", "NULL", "NA", "Inf", "NaN",
+                    "switch", "break", "next", "try", "tryCatch", "stop", "warning"}
+        builtins = {"c", "list", "data.frame", "matrix", "array", "factor", "table",
+                    "print", "summary", "str", "head", "tail", "dim", "length", "names",
+                    "read.csv", "read.table", "write.csv", "write.table",
+                    "ggplot", "plot", "hist", "boxplot", "barplot", "points", "lines",
+                    "lm", "glm", "summary", "anova", "coef", "predict",
+                    "mean", "median", "sd", "var", "min", "max", "range", "quantile",
+                    "lapply", "sapply", "apply", "tapply", "mapply",
+                    "subset", "merge", "transform", "aggregate", "reshape"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            for bi in builtins:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{bi}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_builtin", idx, f"{idx}+{len(bi)}c")
+                    pos = f"{idx}+{len(bi)}c"
+            for m in re.finditer(r'(?<!\\)"(.*?)(?<!\\)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r"(?<!\\)'(.*?)(?<!\\)'", line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r'\b(\d+\.?\d*(?:e[+-]?\d+)?j?)\b', line, re.IGNORECASE):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_java(self, editor, content):
+        import re
+        keywords = {"public", "private", "protected", "static", "final", "abstract", "class",
+                    "interface", "extends", "implements", "new", "this", "super", "void",
+                    "return", "if", "else", "for", "while", "do", "switch", "case", "break",
+                    "continue", "try", "catch", "finally", "throw", "throws", "import",
+                    "package", "instanceof", "synchronized", "volatile", "transient"}
+        types = {"int", "long", "double", "float", "boolean", "char", "byte", "short",
+                 "String", "Integer", "Long", "Double", "Float", "Boolean", "Character",
+                 "Byte", "Short", "Object", "List", "ArrayList", "Map", "HashMap", "Set",
+                 "HashSet", "Collection", "Arrays", "Collections", "StringBuilder"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('//'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            for t in types:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{t}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_type", idx, f"{idx}+{len(t)}c")
+                    pos = f"{idx}+{len(t)}c"
+            for m in re.finditer(r'\b(\w+)\s*\(', line):
+                editor.tag_add("syntax_function", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            for m in re.finditer(r'"([^"]*)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r'\b(\d+\.?\d*(?:[fFdDlL])?)\b', line):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_cpp(self, editor, content):
+        import re
+        keywords = {"auto", "break", "case", "char", "const", "continue", "default", "do",
+                    "double", "else", "enum", "extern", "float", "for", "goto", "if",
+                    "int", "long", "register", "return", "short", "signed", "sizeof",
+                    "static", "struct", "switch", "typedef", "union", "unsigned", "void",
+                    "volatile", "while", "class", "public", "private", "protected",
+                    "virtual", "override", "final", "inline", "namespace", "template",
+                    "typename", "using", "new", "delete", "this", "throw", "try", "catch",
+                    "nullptr", "true", "false", "const_cast", "static_cast", "dynamic_cast",
+                    "reinterpret_cast", "noexcept", "constexpr", "auto", "decltype"}
+        types = {"string", "vector", "map", "set", "list", "queue", "stack", "pair",
+                 "unordered_map", "unordered_set", "array", "deque", "priority_queue",
+                 "iostream", "fstream", "sstream", "cin", "cout", "cerr", "endl",
+                 "shared_ptr", "unique_ptr", "weak_ptr", "optional", "variant", "any",
+                 "size_t", "ptrdiff_t", "int8_t", "int16_t", "int32_t", "int64_t",
+                 "uint8_t", "uint16_t", "uint32_t", "uint64_t"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('//'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            for t in types:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{t}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_type", idx, f"{idx}+{len(t)}c")
+                    pos = f"{idx}+{len(t)}c"
+            for m in re.finditer(r'\b(\w+)\s*(?:<.*?>)?\s*\(', line):
+                if not any(kw in line[:m.start()] for kw in ("if", "for", "while", "switch", "return")):
+                    editor.tag_add("syntax_function", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            for m in re.finditer(r'"([^"\\]*(?:\\.[^"\\]*)*)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r"'([^'\\]|\\.)'", line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r'\b(\d+\.?\d*(?:[fFlL])?)\b', line):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_go(self, editor, content):
+        import re
+        keywords = {"package", "import", "func", "return", "if", "else", "for", "range",
+                    "switch", "case", "default", "select", "go", "defer", "chan", "map",
+                    "struct", "interface", "type", "const", "var", "break", "continue",
+                    "fallthrough", "goto", "nil", "true", "false"}
+        types = {"int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16",
+                 "uint32", "uint64", "float32", "float64", "complex64", "complex128",
+                 "byte", "rune", "string", "bool", "error", "any"}
+        builtins = {"fmt", "Print", "Printf", "Println", "Sprint", "Sprintf", "Sprintln",
+                    "len", "cap", "make", "new", "append", "copy", "delete", "close",
+                    "panic", "recover", "real", "imag", "complex", "log"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('//'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            for t in types:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{t}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_type", idx, f"{idx}+{len(t)}c")
+                    pos = f"{idx}+{len(t)}c"
+            for bi in builtins:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{bi}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_builtin", idx, f"{idx}+{len(bi)}c")
+                    pos = f"{idx}+{len(bi)}c"
+            for m in re.finditer(r'`([^`]*)`', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r'"([^"\\]*(?:\\.[^"\\]*)*)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r'\b(\d+\.?\d*(?:[eE][+-]?\d+)?[i]?)\b', line):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_rust(self, editor, content):
+        import re
+        keywords = {"fn", "let", "mut", "const", "static", "if", "else", "loop", "while",
+                    "for", "in", "match", "break", "continue", "return", "move", "ref",
+                    "pub", "struct", "enum", "impl", "trait", "type", "where", "use",
+                    "mod", "crate", "extern", "self", "Self", "super", "true", "false",
+                    "async", "await", "dyn", "unsafe", "unsafe", "try", "macro_rules",
+                    "Box", "Vec", "String", "Option", "Result", "Some", "None", "Ok", "Err"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('//'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            for m in re.finditer(r'\b(\w+)\s*[<(]', line):
+                if not any(kw in line[:m.start()] for kw in ("if", "for", "while", "match", "return", "fn")):
+                    editor.tag_add("syntax_function", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            for m in re.finditer(r'"([^"\\]*(?:\\.[^"\\]*)*)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r'\b(\d+\.?\d*(?:[fF][36])?)\b', line):
+                editor.tag_add("syntax_number", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_lua(self, editor, content):
+        import re
+        keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function",
+                    "if", "in", "local", "nil", "not", "or", "repeat", "return", "then",
+                    "true", "until", "while", "goto"}
+        builtins = {"print", "type", "tostring", "tonumber", "pairs", "ipairs", "unpack",
+                    "setmetatable", "getmetatable", "rawget", "rawset", "select",
+                    "string", "table", "math", "io", "os", "coroutine", "debug",
+                    "require", "assert", "error", "pcall", "xpcall"}
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('--'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            for kw in keywords:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_keyword", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
+            for bi in builtins:
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{bi}\b', pos, stopindex=f"{i}.end", regexp=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_builtin", idx, f"{idx}+{len(bi)}c")
+                    pos = f"{idx}+{len(bi)}c"
+            for m in re.finditer(r'"([^"\\]*(?:\\.[^"\\]*)*)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+            for m in re.finditer(r"'([^'\\]*(?:\\.[^'\\]*)*)'", line):
+                editor.tag_add("syntax_string", f"{i}.{m.start()}", f"{i}.{m.end()}")
+
+    def _highlight_config(self, editor, content):
+        import re
+        lines = content.split('\n')
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('#') or stripped.startswith(';') or stripped.startswith('//'):
+                editor.tag_add("syntax_comment", f"{i}.0", f"{i}.end")
+                continue
+            # 键
+            for m in re.finditer(r'^(\w+)\s*[=:\[]', line):
+                editor.tag_add("syntax_keyword", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            # 字符串值
+            for m in re.finditer(r'=\s*"([^"]*)"', line):
+                editor.tag_add("syntax_string", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            # 数字
+            for m in re.finditer(r'[=:]\s*(-?\d+\.?\d*)', line):
+                editor.tag_add("syntax_number", f"{i}.{m.start(1)}", f"{i}.{m.end(1)}")
+            # 布尔值
+            for kw in ("true", "false", "yes", "no", "on", "off"):
+                pos = f"{i}.0"
+                while True:
+                    idx = editor.search(rf'\b{kw}\b', pos, stopindex=f"{i}.end", regexp=True, nocase=True)
+                    if not idx:
+                        break
+                    editor.tag_add("syntax_constant", idx, f"{idx}+{len(kw)}c")
+                    pos = f"{idx}+{len(kw)}c"
 
     def _build_project_file_browser(self, parent, project):
-        """构建项目文件浏览器（支持子文件夹、创建文件、编辑）"""
+        """构建项目文件浏览器（惰性加载+搜索时递归搜索）"""
         folder_path = Path(project["folder_path"])
         self._current_proj_folder = folder_path
         self._current_project = project
@@ -18251,7 +23718,7 @@ output: html_document
         search_entry = ttk.Entry(search_frame, textvariable=search_var, font=("Microsoft YaHei UI", 9))
         search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
-        search_type_var = tk.StringVar(value="name")
+        search_type_var = tk.StringVar(value="名称")
         type_combo = ttk.Combobox(search_frame, textvariable=search_type_var, values=["名称", "扩展名", "全部"], 
                                    state="readonly", width=8)
         type_combo.pack(side=tk.LEFT, padx=2)
@@ -18289,83 +23756,152 @@ output: html_document
 
         # 存储所有原始项数据
         all_items = {}  # {node_id: {"path": Path, "type": str, "name": str, "modified": str}}
+        
+        # 搜索防抖相关
+        search_timer = None
+        last_search_text = ""
+        is_searching = False
+        DEBOUNCE_DELAY = 500
 
-        # 递归填充目录
-        def populate_tree(parent_node, current_path, filter_text="", filter_type="name"):
+        # --- 工具函数：获取文件/文件夹修改时间 ---
+        def get_modified_time(path):
+            try:
+                stat = path.stat()
+                return datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            except (OSError, PermissionError):
+                return ""
+
+        # --- 1. 惰性加载单个文件夹（不递归，速度快） ---
+        def load_single_folder(parent_node, current_path):
             if not current_path.exists():
                 return
             
-            items = sorted(current_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            try:
+                items = sorted(current_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            except (PermissionError, OSError):
+                return
             
             for item in items:
                 if item.name.startswith('.'):
                     continue
                 
-                # 搜索过滤逻辑
-                if filter_text:
-                    filter_lower = filter_text.lower()
-                    if filter_type == "名称":
-                        if filter_lower not in item.name.lower():
-                            continue
-                    elif filter_type == "扩展名":
-                        ext = item.suffix[1:].lower() if item.suffix else ""
-                        if filter_lower not in ext:
-                            continue
-                    elif filter_type == "全部":
-                        # 同时匹配名称和扩展名
-                        ext = item.suffix[1:].lower() if item.suffix else ""
-                        if filter_lower not in item.name.lower() and filter_lower not in ext:
-                            continue
-                
-                stat = item.stat()
-                modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                modified = get_modified_time(item)
                 
                 if item.is_dir():
-                    # 文件夹
                     node_id = tree.insert(parent_node, tk.END, text=f"📁 {item.name}", values=("", "文件夹", modified), open=False)
-                    # 预填充一个占位符，使文件夹可展开
-                    tree.insert(node_id, tk.END, text="")
-                    # 存储项信息
+                    tree.insert(node_id, tk.END, text="")  # 占位符
                     all_items[node_id] = {"path": item, "type": "folder", "name": item.name, "modified": modified}
-                    # 如果有搜索条件，高亮文件夹
-                    if filter_text:
-                        tree.item(node_id, tags=("highlight",))
                 else:
-                    # 文件
                     ext = item.suffix[1:].upper() if item.suffix else "文件"
                     node_id = tree.insert(parent_node, tk.END, text=f"📄 {item.name}", values=("", ext, modified))
                     all_items[node_id] = {"path": item, "type": "file", "name": item.name, "modified": modified}
-                    # 如果有搜索条件，高亮匹配项
-                    if filter_text:
-                        tree.item(node_id, tags=("highlight",))
-            
-            # 配置高亮样式
-            tree.tag_configure("highlight", background="#e6f3ff")
-            
-            # 更新搜索计数
-            children_count = len(tree.get_children(parent_node))
-            total_count = len([k for k, v in all_items.items() if v["type"] == "file"])
-            search_count_var.set(f"共 {total_count} 个文件")
 
-        # 搜索函数
+        # --- 2. 递归搜索整个项目（搜索时使用） ---
+        def recursive_search(parent_node, current_path, filter_text, filter_type):
+            if not current_path.exists():
+                return False
+            
+            try:
+                items = sorted(current_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            except (PermissionError, OSError):
+                return False
+            
+            has_match = False
+            
+            for item in items:
+                if item.name.startswith('.'):
+                    continue
+                
+                # 检查是否匹配
+                item_matches = False
+                filter_lower = filter_text.lower()
+                name_lower = item.name.lower()
+                ext_lower = item.suffix[1:].lower() if item.suffix else ""
+                
+                if filter_type == "名称":
+                    item_matches = filter_lower in name_lower
+                elif filter_type == "扩展名":
+                    item_matches = filter_lower in ext_lower
+                elif filter_type == "全部":
+                    item_matches = filter_lower in name_lower or filter_lower in ext_lower
+                
+                modified = get_modified_time(item)
+                
+                if item.is_dir():
+                    child_has_match = recursive_search(None, item, filter_text, filter_type)
+                    if item_matches or child_has_match:
+                        has_match = True
+                        if parent_node is not None:
+                            node_id = tree.insert(parent_node, tk.END, text=f"📁 {item.name}", values=("", "文件夹", modified), open=False)
+                            all_items[node_id] = {"path": item, "type": "folder", "name": item.name, "modified": modified}
+                            if item_matches:
+                                tree.item(node_id, tags=("highlight",))
+                            # 递归加载子内容
+                            recursive_search(node_id, item, filter_text, filter_type)
+                else:
+                    if item_matches:
+                        has_match = True
+                        if parent_node is not None:
+                            ext = item.suffix[1:].upper() if item.suffix else "文件"
+                            node_id = tree.insert(parent_node, tk.END, text=f"📄 {item.name}", values=("", ext, modified))
+                            all_items[node_id] = {"path": item, "type": "file", "name": item.name, "modified": modified}
+                            tree.item(node_id, tags=("highlight",))
+            
+            return has_match
+
+        # --- 搜索函数 ---
         def perform_search(*args):
+            nonlocal search_timer, last_search_text, is_searching
+            
             filter_text = search_var.get().strip()
             filter_type = search_type_var.get()
             
-            # 清空树
-            for item in tree.get_children():
-                tree.delete(item)
-            all_items.clear()
+            if filter_text == last_search_text:
+                return
+            last_search_text = filter_text
             
-            # 重新填充
-            populate_tree("", folder_path, filter_text, filter_type)
+            is_searching = True
+            search_count_var.set("搜索中...")
+            
+            def do_search():
+                nonlocal is_searching
+                try:
+                    for item in tree.get_children():
+                        tree.delete(item)
+                    all_items.clear()
+                    
+                    if not filter_text:
+                        # 无搜索：惰性加载根目录
+                        load_single_folder("", folder_path)
+                        # 更新计数
+                        file_count = sum(1 for v in all_items.values() if v["type"] == "file")
+                        search_count_var.set(f"共 {file_count} 个文件")
+                    else:
+                        # 有搜索：递归搜索整个项目
+                        recursive_search("", folder_path, filter_text, filter_type)
+                        # 配置高亮
+                        tree.tag_configure("highlight", background="#e6f3ff")
+                        # 更新计数
+                        file_count = sum(1 for v in all_items.values() if v["type"] == "file")
+                        search_count_var.set(f"找到 {file_count} 个匹配文件")
+                finally:
+                    is_searching = False
+            
+            self.root.after(10, do_search)
         
-        # 绑定搜索事件
-        search_var.trace("w", lambda *args: perform_search())
+        # 防抖搜索
+        def debounced_search():
+            nonlocal search_timer
+            if search_timer:
+                self.root.after_cancel(search_timer)
+            search_timer = self.root.after(DEBOUNCE_DELAY, perform_search)
+        
+        search_var.trace_add("write", lambda *_: debounced_search())
+        search_entry.bind("<KeyRelease>", lambda e: debounced_search())
         search_entry.bind("<Return>", lambda e: perform_search())
+        type_combo.bind("<<ComboboxSelected>>", lambda e: perform_search())
         
-        # 初始化填充
-        populate_tree("", folder_path)
+        # --- 节点展开事件 ---
         def on_open_node(event):
             item_id = tree.focus()
             if not item_id:
@@ -18377,12 +23913,10 @@ output: html_document
                 current_node = node
                 while current_node:
                     text = tree.item(current_node, "text")
-                    # 只处理非空的文本（根节点是空字符串，不要加入）
                     if text and text.strip():
                         name = text[2:] if text.startswith(("📁", "📄")) else text
                         parts.insert(0, name)
                     current_node = tree.parent(current_node)
-                # 直接用所有收集到的部分构建路径
                 return folder_path.joinpath(*parts)
 
             current_path = get_full_path(item_id)
@@ -18390,19 +23924,20 @@ output: html_document
             # 检查是否有占位符子节点
             children = tree.get_children(item_id)
             if len(children) == 1 and tree.item(children[0], "text") == "":
-                # 删除占位符，加载实际内容（保持当前搜索条件）
+                # 删除占位符，惰性加载实际内容
                 tree.delete(children[0])
+                # 检查是否有搜索过滤
                 filter_text = search_var.get().strip()
-                filter_type = search_type_var.get()
-                populate_tree(item_id, current_path, filter_text, filter_type)
+                if filter_text:
+                    # 有搜索：递归搜索（保证完整）
+                    recursive_search(item_id, current_path, filter_text, search_type_var.get())
+                else:
+                    # 无搜索：惰性加载单个文件夹
+                    load_single_folder(item_id, current_path)
 
         tree.bind("<<TreeviewOpen>>", on_open_node)
 
-        # 初始化按钮变量 - 后面会赋值
-        selected_edit_btn = None
-        selected_delete_btn = None
-
-        # 获取选中文件路径
+        # --- 获取选中文件路径 ---
         def get_selected_path():
             sel = tree.selection()
             if not sel:
@@ -18415,46 +23950,47 @@ output: html_document
                 current_node = node
                 while current_node:
                     text = tree.item(current_node, "text")
-                    # 只处理非空的文本（根节点是空字符串，不要加入）
                     if text and text.strip():
                         name = text[2:] if text.startswith(("📁", "📄")) else text
                         parts.insert(0, name)
                     current_node = tree.parent(current_node)
-                # 直接用所有收集到的部分构建路径
                 return folder_path.joinpath(*parts)
             
             return get_full_path(item_id)
 
+        # 初始化按钮变量 - 后面会赋值
+        selected_edit_btn = None
+        selected_delete_btn = None
+
         # 选择变化事件 - 更新按钮状态
         def on_select(event):
-            # 获取当前选中的项
             sel = tree.selection()
             if sel:
-                # 先从Treeview的显示信息判断类型（更可靠）
                 item_id = sel[0]
                 item_text = tree.item(item_id, "text")
                 is_folder = item_text.startswith("📁")
                 is_file = item_text.startswith("📄")
-                
-                # 更新按钮状态
-                if selected_edit_btn and selected_delete_btn:
+
+                if selected_edit_btn and selected_delete_btn and selected_rename_btn:
                     if is_folder:
-                        # 是文件夹 - 禁用编辑，启用删除
                         selected_edit_btn.state(['disabled'])
+                        selected_rename_btn.state(['!disabled'])
                         selected_delete_btn.state(['!disabled'])
                     elif is_file:
-                        # 是文件 - 启用编辑和删除
                         selected_edit_btn.state(['!disabled'])
+                        selected_rename_btn.state(['!disabled'])
                         selected_delete_btn.state(['!disabled'])
                     else:
-                        # 其他情况
                         selected_edit_btn.state(['disabled'])
+                        selected_rename_btn.state(['disabled'])
                         selected_delete_btn.state(['disabled'])
             else:
-                # 没有选中
-                if selected_edit_btn and selected_delete_btn:
+                if selected_edit_btn and selected_delete_btn and selected_rename_btn:
                     selected_edit_btn.state(['disabled'])
+                    selected_rename_btn.state(['disabled'])
                     selected_delete_btn.state(['disabled'])
+
+        tree.bind("<<TreeviewSelect>>", on_select)
 
         # 双击打开文件或文件夹
         def on_double_click(event):
@@ -18463,19 +23999,13 @@ output: html_document
                 return
             
             if full_path.is_dir():
-                # 切换展开/折叠
                 item_id = tree.selection()[0]
                 if tree.item(item_id, "open"):
                     tree.item(item_id, open=False)
                 else:
                     tree.item(item_id, open=True)
             else:
-                # 检查是否是可编辑文件类型，是则用内置编辑器，否则用系统默认
-                ext = full_path.suffix.lower()
-                if ext in [".md", ".rmd", ".py", ".r", ".txt", ".tex", ".html", ".css", ".js"]:
-                    self._edit_project_file(full_path, project)
-                else:
-                    open_file(str(full_path))
+                self._edit_project_file(full_path, project)
 
         tree.bind("<Double-1>", on_double_click)
 
@@ -18483,8 +24013,13 @@ output: html_document
         def refresh_files():
             for item in tree.get_children():
                 tree.delete(item)
-            populate_tree("", folder_path)
+            all_items.clear()
+            load_single_folder("", folder_path)
+            # 更新计数
+            file_count = sum(1 for v in all_items.values() if v["type"] == "file")
+            search_count_var.set(f"共 {file_count} 个文件")
 
+        # 初始化填充
         refresh_files()
 
         # 创建新文件
@@ -18535,6 +24070,7 @@ output: html_document
             name_entry.pack()
             name_entry.select_range(0, tk.END)
             name_entry.focus_set()
+            name_entry.bind("<Return>", lambda e: do_create())
             
             def do_create():
                 name = name_var.get().strip()
@@ -18559,8 +24095,23 @@ output: html_document
                     elif ext == "Rmd":
                         content = f'''---
 title: "{name}"
-output: html_document
+author: "P.C."
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: true
+    keep_tex: false
+    extra_dependencies:
+      ctex: []
+      geometry: [top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm]
 ---
+
+# {name}
+
 
 ```r
 # 代码开始
@@ -18651,6 +24202,37 @@ output: html_document
             if full_path:
                 self._edit_project_file(full_path, project)
 
+        # 重命名选中项
+        def rename_selected():
+            sel = tree.selection()
+            if not sel:
+                return
+            item_id = sel[0]
+            item_text = tree.item(item_id, "text")
+            is_folder = item_text.startswith("📁")
+            is_file = item_text.startswith("📄")
+            if not is_folder and not is_file:
+                return
+            full_path = get_selected_path()
+            if not full_path or not full_path.exists():
+                return
+            old_name = full_path.name
+            new_name = simpledialog.askstring("重命名", f"{'文件夹' if is_folder else '文件'}新名称:", initialvalue=old_name)
+            if not new_name or new_name == old_name:
+                return
+            new_name = new_name.strip()
+            if not new_name:
+                return
+            new_path = full_path.parent / new_name
+            if new_path.exists():
+                messagebox.showerror("错误", f"「{new_name}」已存在，请选择其他名称。")
+                return
+            try:
+                full_path.rename(new_path)
+                refresh_files()
+            except Exception as e:
+                messagebox.showerror("错误", f"重命名失败: {e}")
+
         # 删除选中项
         def delete_selected():
             # 先从Treeview判断类型（更可靠）
@@ -18669,11 +24251,11 @@ output: html_document
             full_path = get_selected_path()
             if not full_path:
                 return
-            
+
             msg = f"确定要删除「{full_path.name}」吗？"
             if is_folder:
                 msg += "\n\n⚠️ 这是一个文件夹，将删除其下所有内容！"
-            
+
             if messagebox.askyesno("确认删除", msg):
                 try:
                     if is_folder:
@@ -18693,16 +24275,219 @@ output: html_document
         # 保存按钮引用以便后面控制状态
         selected_edit_btn = ttk.Button(btn_frame, text="✏️ 编辑", command=edit_selected_file)
         selected_edit_btn.pack(side=tk.LEFT, padx=5)
+        selected_rename_btn = ttk.Button(btn_frame, text="🏷️ 重命名", command=rename_selected)
+        selected_rename_btn.pack(side=tk.LEFT, padx=5)
         selected_delete_btn = ttk.Button(btn_frame, text="🗑️ 删除", command=delete_selected)
         selected_delete_btn.pack(side=tk.LEFT, padx=5)
         ttk.Separator(btn_frame, orient="vertical").pack(side=tk.LEFT, fill="y", padx=10)
         ttk.Button(btn_frame, text="🔄 刷新", command=refresh_files).pack(side=tk.LEFT)
         ttk.Button(btn_frame, text="📂 打开根文件夹", command=lambda: open_file(str(folder_path))).pack(side=tk.LEFT, padx=5)
-        
+
         # 绑定选择事件并设置初始按钮状态
         tree.bind("<<TreeviewSelect>>", on_select)
+
+        # ============================================================
+        # 剪贴板操作（复制/剪切/粘贴）- 跨项目支持
+        # ============================================================
+        # 使用 self._global_clipboard 实现跨项目剪贴板
+        # _cut_item_ids 仍为局部变量，用于当前 tree 的视觉标记
+
+        _cut_item_ids = []  # 被剪切项的 item_id，用于视觉标记
+
+        def copy_selected_files():
+            """复制选中文件到全局剪贴板"""
+            self._clear_global_cut_markers()
+            sel = tree.selection()
+            if not sel:
+                return
+            paths = []
+            for item_id in sel:
+                item_text = tree.item(item_id, "text")
+                if item_text.startswith(("📁", "📄")):
+                    item_data = all_items.get(item_id)
+                    if item_data:
+                        paths.append(item_data["path"])
+            if paths:
+                self._global_clipboard["mode"] = "copy"
+                self._global_clipboard["paths"] = paths
+
+        def cut_selected_files():
+            """剪切选中文件 - 带视觉标记"""
+            self._clear_global_cut_markers()
+            _cut_item_ids.clear()
+            sel = tree.selection()
+            if not sel:
+                return
+            paths = []
+            for item_id in sel:
+                item_text = tree.item(item_id, "text")
+                if item_text.startswith(("📁", "📄")):
+                    item_data = all_items.get(item_id)
+                    if item_data:
+                        paths.append(item_data["path"])
+                        _cut_item_ids.append(item_id)
+            if paths:
+                self._global_clipboard["mode"] = "cut"
+                self._global_clipboard["paths"] = paths
+                # 视觉标记：被剪切的文件显示为灰色
+                for item_id in _cut_item_ids:
+                    tree.item(item_id, tags=("cut_item",))
+                    self._global_cut_markers.append((tree, item_id))
+
+        def paste_files(target_dir):
+            """粘贴文件到目标目录（支持跨项目）"""
+            if not self._global_clipboard["paths"]:
+                return
+            
+            import shutil
+            
+            mode = self._global_clipboard["mode"]
+            src_paths = self._global_clipboard["paths"]
+            
+            for src in src_paths:
+                if not src.exists():
+                    continue
+                dst = target_dir / src.name
+                # 处理同名
+                counter = 1
+                while dst.exists():
+                    stem = src.stem
+                    suffix = src.suffix
+                    dst = target_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+                
+                try:
+                    if mode == "cut" and src.parent == target_dir:
+                        # 同一目录内剪切：无需操作
+                        continue
+                    if src.is_dir():
+                        shutil.copytree(src, dst)
+                    else:
+                        shutil.copy2(src, dst)
+                    
+                    if mode == "cut":
+                        shutil.rmtree(src) if src.is_dir() else src.unlink()
+                except Exception as e:
+                    messagebox.showerror("错误", f"操作失败: {src.name}: {e}")
+            
+            if mode == "cut":
+                self._global_clipboard["mode"] = None
+                self._global_clipboard["paths"] = []
+                self._clear_global_cut_markers()
+            refresh_files()
+
+        def get_paste_target():
+            """获取粘贴目标目录 - 根据当前选中项决定"""
+            sel = tree.selection()
+            if sel:
+                item_id = sel[0]
+                item_data = all_items.get(item_id)
+                if item_data:
+                    p = item_data["path"]
+                    if p.is_dir():
+                        return p
+                    return p.parent
+            return folder_path
+
+        # 快捷键绑定
+        tree.bind("<Control-c>", lambda e: copy_selected_files())
+        tree.bind("<Control-x>", lambda e: (cut_selected_files(), tree.update()))
+        tree.bind("<Control-v>", lambda e: paste_files(get_paste_target()))
         
-        # 右键菜单 - 默认打开方式
+        # macOS 快捷键兼容
+        if parent.tk.call('tk', 'windowingsystem') == 'aqua':
+            tree.bind("<Command-c>", lambda e: copy_selected_files())
+            tree.bind("<Command-x>", lambda e: (cut_selected_files(), tree.update()))
+            tree.bind("<Command-v>", lambda e: paste_files(get_paste_target()))
+
+        # ============================================================
+        # 内部拖拽移动（在文件树中拖拽文件/文件夹到其他文件夹）
+        # 兼容 Windows / macOS / Linux
+        # ============================================================
+        _drag_data = {"item_id": None, "start_x": 0, "start_y": 0, "dragging": False, "drop_target": None}
+        
+        # 配置拖拽目标高亮样式
+        tree.tag_configure("drag_target", background="#cce5ff")
+        # 配置剪切项视觉标记样式
+        tree.tag_configure("cut_item", foreground="#999999")
+        
+        def _on_drag_start(event):
+            """记录拖拽起点（不消费事件，让 Treeview 正常处理选中）"""
+            item_id = tree.identify_row(event.y)
+            if item_id:
+                _drag_data["item_id"] = item_id
+                _drag_data["start_x"] = event.x
+                _drag_data["start_y"] = event.y
+                _drag_data["dragging"] = False
+        
+        def _on_drag_motion(event):
+            """拖拽移动中"""
+            if not _drag_data["item_id"]:
+                return
+            dx = abs(event.x - _drag_data["start_x"])
+            dy = abs(event.y - _drag_data["start_y"])
+            if dx > 5 or dy > 5:
+                _drag_data["dragging"] = True
+                # 高亮目标文件夹
+                target_id = tree.identify_row(event.y)
+                if target_id:
+                    target_text = tree.item(target_id, "text")
+                    if target_text.startswith("📁") and target_id != _drag_data["item_id"]:
+                        if _drag_data["drop_target"] and _drag_data["drop_target"] != target_id:
+                            tree.item(_drag_data["drop_target"], tags=())
+                        tree.item(target_id, tags=("drag_target",))
+                        _drag_data["drop_target"] = target_id
+                        return
+                # 清除高亮
+                if _drag_data["drop_target"]:
+                    tree.item(_drag_data["drop_target"], tags=())
+                    _drag_data["drop_target"] = None
+        
+        def _on_drag_end(event):
+            """结束拖拽，执行移动"""
+            if _drag_data["dragging"] and _drag_data["drop_target"]:
+                src_id = _drag_data["item_id"]
+                dst_id = _drag_data["drop_target"]
+                
+                src_path = all_items.get(src_id, {}).get("path")
+                dst_path = all_items.get(dst_id, {}).get("path")
+                
+                if src_path and dst_path and dst_path.is_dir():
+                    # 不能拖到自身或子文件夹
+                    src_str = str(src_path)
+                    dst_str = str(dst_path)
+                    if not dst_str.startswith(src_str):
+                        try:
+                            import shutil
+                            dst = dst_path / src_path.name
+                            counter = 1
+                            while dst.exists():
+                                if src_path.is_file():
+                                    dst = dst_path / f"{src_path.stem}_{counter}{src_path.suffix}"
+                                else:
+                                    dst = dst_path / f"{src_path.name}_{counter}"
+                                counter += 1
+                            shutil.move(str(src_path), str(dst))
+                            refresh_files()
+                        except Exception as e:
+                            messagebox.showerror("错误", f"移动失败: {e}")
+            
+            # 清除状态
+            if _drag_data.get("drop_target"):
+                tree.item(_drag_data["drop_target"], tags=())
+            _drag_data["item_id"] = None
+            _drag_data["start_x"] = 0
+            _drag_data["start_y"] = 0
+            _drag_data["dragging"] = False
+            _drag_data["drop_target"] = None
+        
+        tree.bind("<Button-1>", _on_drag_start)
+        tree.bind("<B1-Motion>", _on_drag_motion)
+        tree.bind("<ButtonRelease-1>", _on_drag_end)
+
+        # ============================================================
+        # 右键菜单 - 增强版
+        # ============================================================
         def show_context_menu(event):
             item_id = tree.identify_row(event.y)
             if not item_id:
@@ -18720,19 +24505,34 @@ output: html_document
                 menu.add_command(label="📄 在此创建文件", command=lambda: [tree.selection_set(item_id), create_new_file()])
                 menu.add_command(label="📁 在此创建文件夹", command=lambda: [tree.selection_set(item_id), create_new_folder()])
                 menu.add_separator()
+                # 剪贴板操作
+                menu.add_command(label="📋 粘贴到此处", command=lambda: paste_files(full_path))
+                menu.add_command(label="📋 粘贴并替换", command=lambda: paste_files(full_path))
+                menu.add_separator()
+                menu.add_command(label="📄 复制", command=copy_selected_files)
+                menu.add_command(label="✂️ 剪切", command=cut_selected_files)
+                menu.add_separator()
+                menu.add_command(label="🏷️ 重命名文件夹", command=lambda: [tree.selection_set(item_id), rename_selected()])
                 menu.add_command(label="🗑️ 删除文件夹", command=lambda: [tree.selection_set(item_id), delete_selected()])
             elif full_path and full_path.is_file():
                 menu.add_command(label="🚀 用默认程序打开", command=lambda: open_file(str(full_path)))
                 menu.add_command(label="✏️ 编辑文件", command=lambda: [tree.selection_set(item_id), edit_selected_file()])
                 menu.add_separator()
+                menu.add_command(label="📄 复制", command=copy_selected_files)
+                menu.add_command(label="✂️ 剪切", command=cut_selected_files)
+                menu.add_separator()
+                menu.add_command(label="🏷️ 重命名文件", command=lambda: [tree.selection_set(item_id), rename_selected()])
                 menu.add_command(label="🗑️ 删除文件", command=lambda: [tree.selection_set(item_id), delete_selected()])
-            
+
             menu.tk_popup(event.x_root, event.y_root)
-        
+
+        # 跨平台右键绑定：Windows/Linux = Button-3, macOS = Button-2
         tree.bind("<Button-3>", show_context_menu)
-        
-        # 初始状态 - 禁用编辑和删除按钮
+        tree.bind("<Button-2>", show_context_menu)
+
+        # 初始状态 - 禁用编辑、重命名和删除按钮
         selected_edit_btn.state(['disabled'])
+        selected_rename_btn.state(['disabled'])
         selected_delete_btn.state(['disabled'])
 
     def _create_project_dialog(self):
@@ -18787,6 +24587,7 @@ output: html_document
 
             try:
                 proj = self.project_mgr.create_project(name, description, folder, tags)
+                self._wf_log_action("create_project", detail=f"创建项目 '{name}'")
                 messagebox.showinfo("成功", f"项目 '{name}' 创建成功！", parent=dlg)
                 self._refresh_projects_list()
                 dlg.destroy()
@@ -18829,6 +24630,7 @@ output: html_document
             description = desc_text.get("1.0", tk.END).strip()
 
             self.project_mgr.update_project(project["id"], name=name, description=description, tags=tags)
+            self._wf_log_action("edit_project", detail=f"编辑项目 '{name}'")
             messagebox.showinfo("成功", "项目更新成功！", parent=dlg)
             self._refresh_projects_list()
             self._show_project_detail(self.project_mgr.get_project_by_id(project["id"]))
@@ -18846,8 +24648,33 @@ output: html_document
         
         if messagebox.askyesno("确认", f"确定要{action_text}项目 '{project['name']}' 吗？"):
             self.project_mgr.update_project(project["id"], status=new_status)
+            self._wf_log_action("archive_project" if new_status == "archived" else "unarchive_project", detail=f"{action_text}项目 '{project['name']}'")
             self._refresh_projects_list()
             self._show_project_detail(self.project_mgr.get_project_by_id(project["id"]))
+
+    def _quick_note(self, project):
+        """快捷笔记：在笔记目录下创建以项目名命名的笔记文件，直接打开编辑"""
+        from datetime import datetime
+        
+        notes_dir = BASE / "Notes"
+        notes_dir.mkdir(exist_ok=True)
+        
+        # 以项目名作为笔记文件名
+        proj_name = project["name"]
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", proj_name)
+        safe_name = safe_name.strip()
+        
+        # 检查是否已有同名笔记
+        note_path = notes_dir / f"{safe_name}.md"
+        
+        if not note_path.exists():
+            # 创建新笔记
+            content = f"# {proj_name}\n\n> 创建于: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n## 笔记\n\n"
+            note_path.write_text(content, encoding="utf-8")
+            self._wf_log_action("create_note", detail=f"快捷笔记 '{safe_name}.md'")
+        
+        # 打开编辑
+        self._edit_project_file(note_path, project)
 
     def _delete_project_dialog(self, project):
         """删除项目对话框"""
@@ -18863,7 +24690,9 @@ output: html_document
         ttk.Checkbutton(dlg, text="同时删除项目文件夹", variable=delete_folder_var).pack()
 
         def delete():
+            proj_name = project["name"]
             self.project_mgr.delete_project(project["id"], delete_folder=delete_folder_var.get())
+            self._wf_log_action("delete_project", detail=f"删除项目 '{proj_name}'")
             messagebox.showinfo("成功", "项目已删除", parent=dlg)
             self._refresh_projects_list()
             self._clear_project_detail()
@@ -18931,6 +24760,8 @@ output: html_document
         ttk.Separator(btn_frame, orient="vertical").pack(side=tk.LEFT, fill="y", padx=10)
         ttk.Button(btn_frame, text="🔍 分析", command=self._analyze_research_text).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="📝 生成笔记", command=self._generate_literature_note).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(btn_frame, orient="vertical").pack(side=tk.LEFT, fill="y", padx=10)
+        ttk.Button(btn_frame, text="🖼️ OCR识别", command=self._ocr_from_image).pack(side=tk.LEFT, padx=2)
 
         # 右侧：分析结果区
         right_frame = ttk.Frame(paned, padding=10)
@@ -19033,6 +24864,46 @@ output: html_document
         self._links_data = []
         self._links_hub_imported = False
 
+        # OCR 识别标签页
+        ocr_frame = ttk.Frame(self._research_notebook, padding=10)
+        self._research_notebook.add(ocr_frame, text="🖼️ OCR")
+
+        ocr_toolbar = ttk.Frame(ocr_frame)
+        ocr_toolbar.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(ocr_toolbar, text="模式:").pack(side=tk.LEFT, padx=(0, 4))
+        self._ocr_mode_var = tk.StringVar(value="mixed")
+        ocr_mode_combo = ttk.Combobox(ocr_toolbar, textvariable=self._ocr_mode_var,
+                                       values=["ocr", "mixed", "latex", "pdf", "pdf_mixed"], state="readonly", width=10)
+        ocr_mode_combo.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(ocr_toolbar, text="语言:").pack(side=tk.LEFT, padx=(8, 4))
+        self._ocr_lang_var = tk.StringVar(value="简体中文")
+        ocr_lang_combo = ttk.Combobox(ocr_toolbar, textvariable=self._ocr_lang_var,
+                                       values=["简体中文", "繁体中文", "English", "日本語", "한국어"],
+                                       state="readonly", width=10)
+        ocr_lang_combo.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(ocr_toolbar, text="公式阈值:").pack(side=tk.LEFT, padx=(8, 4))
+        self._ocr_threshold_var = tk.DoubleVar(value=0.85)
+        ocr_threshold_spin = ttk.Spinbox(ocr_toolbar, textvariable=self._ocr_threshold_var,
+                                          from_=0.1, to=1.0, increment=0.05, width=5)
+        ocr_threshold_spin.pack(side=tk.LEFT, padx=2)
+
+        ttk.Separator(ocr_toolbar, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
+        ttk.Button(ocr_toolbar, text="📂 选择图片/PDF", command=self._ocr_from_image).pack(side=tk.LEFT, padx=2)
+        ttk.Button(ocr_toolbar, text="📋 从剪贴板粘贴图片", command=self._ocr_from_clipboard).pack(side=tk.LEFT, padx=2)
+
+        ocr_result_frame = ttk.Frame(ocr_frame)
+        ocr_result_frame.pack(fill=tk.BOTH, expand=True)
+
+        self._ocr_result_text = tk.Text(ocr_result_frame, wrap="word", font=("Consolas", 11))
+        ocr_result_scroll = ttk.Scrollbar(ocr_result_frame, orient=tk.VERTICAL,
+                                           command=self._ocr_result_text.yview)
+        self._ocr_result_text.configure(yscrollcommand=ocr_result_scroll.set)
+        self._ocr_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ocr_result_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
         # 存储当前加载的文件路径
         self._current_paper_file = None
         
@@ -19094,6 +24965,8 @@ output: html_document
         ttk.Separator(btn_frame, orient="vertical").pack(side=tk.LEFT, fill="y", padx=10)
         ttk.Button(btn_frame, text="🔍 分析", command=self._analyze_research_text).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="📝 生成笔记", command=self._generate_literature_note).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(btn_frame, orient="vertical").pack(side=tk.LEFT, fill="y", padx=10)
+        ttk.Button(btn_frame, text="🖼️ OCR识别", command=self._ocr_from_image).pack(side=tk.LEFT, padx=2)
         
         # 初始化欢迎文本
         welcome_text = """╔═══════════════════════════════════════════════════════════╗
@@ -19157,7 +25030,150 @@ output: html_document
                 
             except Exception as e:
                 messagebox.showerror("错误", f"导入文件时出错: {str(e)}")
-    
+
+    def _ocr_from_image(self):
+        """从图片进行 OCR 识别"""
+        # 选择图片文件
+        img_types = [("图片/PDF文件", "*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.tif *.pdf"), ("图片文件", "*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.tif"), ("PDF文件", "*.pdf"), ("所有文件", "*.*")]
+        img_path = filedialog.askopenfilename(title="选择要识别的图片", filetypes=img_types)
+        if not img_path:
+            return
+
+        mode = self._ocr_mode_var.get()
+        lang = self._ocr_lang_var.get()
+        threshold = self._ocr_threshold_var.get()
+
+        # 切换到 OCR 标签页
+        for i in range(self._research_notebook.index("end")):
+            if "OCR" in self._research_notebook.tab(i, "text"):
+                self._research_notebook.select(i)
+                break
+
+        self._ocr_result_text.delete(1.0, tk.END)
+        self._ocr_result_text.insert(tk.END, f"正在识别 {Path(img_path).name}（模式: {mode}）...\n")
+        self.root.update()
+
+        try:
+            if mode == "latex":
+                # 纯 LaTeX 公式识别
+                from mcp.tools import LatexOCRTool
+                tool = LatexOCRTool(base_dir=Path(img_path).parent)
+                result = tool.execute_structured(image_path=img_path)
+                if result.success:
+                    self._ocr_result_text.delete(1.0, tk.END)
+                    self._ocr_result_text.insert(tk.END, result.message)
+                    latex = result.data.get("latex", "") if result.data else ""
+                    if latex:
+                        self._research_text.delete(1.0, tk.END)
+                        self._research_text.insert(1.0, latex)
+                else:
+                    self._ocr_result_text.delete(1.0, tk.END)
+                    self._ocr_result_text.insert(tk.END, f"❌ 识别失败: {result.error}")
+            else:
+                # OCR / Mixed / PDF 模式
+                from mcp.tools import OCRTool
+                tool = OCRTool(base_dir=Path(img_path).parent)
+                result = tool.execute_structured(
+                    image_path=img_path,
+                    mode=mode,
+                    language=lang,
+                    formula_score_threshold=threshold,
+                )
+                if result.success:
+                    self._ocr_result_text.delete(1.0, tk.END)
+                    self._ocr_result_text.insert(tk.END, result.message)
+                    text = result.data.get("text", "") if result.data else ""
+                    if text:
+                        self._research_text.delete(1.0, tk.END)
+                        self._research_text.insert(1.0, text)
+                        self._paper_info_label.config(text=f"📷 OCR: {Path(img_path).name}（{mode} 模式）")
+                else:
+                    self._ocr_result_text.delete(1.0, tk.END)
+                    self._ocr_result_text.insert(tk.END, f"❌ 识别失败: {result.error}")
+        except ImportError as e:
+            self._ocr_result_text.delete(1.0, tk.END)
+            self._ocr_result_text.insert(tk.END, f"❌ 模块未安装: {e}\n请安装 pix2tex（pip install pix2tex）或确认 Umi-OCR 服务已启动")
+        except Exception as e:
+            self._ocr_result_text.delete(1.0, tk.END)
+            self._ocr_result_text.insert(tk.END, f"❌ 识别出错: {e}")
+
+    def _ocr_from_clipboard(self):
+        """从剪贴板粘贴图片进行 OCR 识别"""
+        mode = self._ocr_mode_var.get()
+        lang = self._ocr_lang_var.get()
+        threshold = self._ocr_threshold_var.get()
+
+        try:
+            from PIL import ImageGrab, Image
+            import io, tempfile
+            img = ImageGrab.grabclipboard()
+            if img is None:
+                messagebox.showwarning("提示", "剪贴板中没有图片\n请先截图或复制图片到剪贴板")
+                return
+            # 保存为临时文件
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            img.save(tmp.name, "PNG")
+            tmp.close()
+            img_path = tmp.name
+        except ImportError:
+            messagebox.showerror("错误", "缺少 Pillow 库，无法从剪贴板获取图片")
+            return
+        except Exception as e:
+            messagebox.showerror("错误", f"获取剪贴板图片失败: {e}")
+            return
+
+        self._ocr_result_text.delete(1.0, tk.END)
+        self._ocr_result_text.insert(tk.END, f"正在识别剪贴板图片（模式: {mode}）...\n")
+        self.root.update()
+
+        try:
+            if mode == "latex":
+                from mcp.tools import LatexOCRTool
+                tool = LatexOCRTool(base_dir=Path(img_path).parent)
+                result = tool.execute_structured(image_path=img_path)
+                if result.success:
+                    self._ocr_result_text.delete(1.0, tk.END)
+                    self._ocr_result_text.insert(tk.END, result.message)
+                    latex = result.data.get("latex", "") if result.data else ""
+                    if latex:
+                        self._research_text.delete(1.0, tk.END)
+                        self._research_text.insert(1.0, latex)
+                else:
+                    self._ocr_result_text.delete(1.0, tk.END)
+                    self._ocr_result_text.insert(tk.END, f"❌ 识别失败: {result.error}")
+            else:
+                from mcp.tools import OCRTool
+                tool = OCRTool(base_dir=Path(img_path).parent)
+                result = tool.execute_structured(
+                    image_path=img_path,
+                    mode=mode,
+                    language=lang,
+                    formula_score_threshold=threshold,
+                )
+                if result.success:
+                    self._ocr_result_text.delete(1.0, tk.END)
+                    self._ocr_result_text.insert(tk.END, result.message)
+                    text = result.data.get("text", "") if result.data else ""
+                    if text:
+                        self._research_text.delete(1.0, tk.END)
+                        self._research_text.insert(1.0, text)
+                        self._paper_info_label.config(text=f"📷 OCR: 剪贴板图片（{mode} 模式）")
+                else:
+                    self._ocr_result_text.delete(1.0, tk.END)
+                    self._ocr_result_text.insert(tk.END, f"❌ 识别失败: {result.error}")
+        except ImportError as e:
+            self._ocr_result_text.delete(1.0, tk.END)
+            self._ocr_result_text.insert(tk.END, f"❌ 模块未安装: {e}")
+        except Exception as e:
+            self._ocr_result_text.delete(1.0, tk.END)
+            self._ocr_result_text.insert(tk.END, f"❌ 识别出错: {e}")
+        finally:
+            # 清理临时文件
+            try:
+                Path(img_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
     def _clear_research_text(self):
         """清空文本"""
         self._research_text.delete(1.0, tk.END)
@@ -19634,10 +25650,10 @@ output: html_document
                      command=try_load_visualizer).pack(side=tk.LEFT, padx=5)
     
     def _show_web_crawler(self):
-        """显示网络爬虫界面"""
+        """显示网络搜索界面"""
         self._clear_content()
         self._highlight_nav("crawler")
-        self.nav_title.config(text="🌐 网络爬虫")
+        self.nav_title.config(text="🌐 网络搜索")
         self._update_overall_label()
         
         try:
@@ -19651,19 +25667,59 @@ output: html_document
             ttk.Label(hub_bar, text="将数据枢纽中的书签/网页URL导入爬虫", foreground="#999", font=("", 8)).pack(side=tk.LEFT, padx=5)
         except Exception as e:
             header = ttk.Label(self.content_frame, 
-                            text="🌐 WS2 网络爬虫系统",
+                            text="🌐 WS2 网络搜索系统",
                             font=("", 20, "bold"))
             header.pack(pady=(20, 10))
             
+            # 详细诊断信息
+            diagnostics = []
+            error_detail = str(e)
+            
+            # 检查 ws2_web_crawler.py 是否存在
+            crawler_file = Path(__file__).parent / "ws2_web_crawler.py"
+            if not crawler_file.exists():
+                diagnostics.append("❌ ws2_web_crawler.py 文件缺失")
+            
+            # 检查 WebAnalyze II 目录
+            webanalyze_dir = Path(__file__).parent / "WebAnalyze II"
+            if not webanalyze_dir.exists():
+                diagnostics.append("❌ WebAnalyze II/ 目录缺失")
+            else:
+                # 检查核心子模块
+                core_dir = webanalyze_dir / "core"
+                if core_dir.exists():
+                    required_modules = ["search_engine.py", "github_crawler.py", "page_analyzer.py", "resource_aggregator.py"]
+                    for mod in required_modules:
+                        if not (core_dir / mod).exists():
+                            diagnostics.append(f"❌ WebAnalyze II/core/{mod} 缺失")
+                else:
+                    diagnostics.append("❌ WebAnalyze II/core/ 目录缺失")
+            
+            # 检查 Python 依赖
+            import importlib.util
+            for pkg in ["aiohttp", "aiofiles", "bs4", "lxml", "requests"]:
+                if importlib.util.find_spec(pkg) is None:
+                    diagnostics.append(f"❌ Python 包缺失: {pkg}")
+            
+            # 检查 Playwright
+            if importlib.util.find_spec("playwright") is None:
+                diagnostics.append("⚠️ Playwright 未安装（可选依赖）")
+                diagnostics.append("   安装命令: pip install playwright && playwright install chromium")
+            
+            if not diagnostics:
+                diagnostics.append(f"⚠️ 加载失败（原因不明）")
+                diagnostics.append(f"   错误详情: {error_detail}")
+            
+            diag_text = "\n".join(diagnostics)
+            
             msg = ttk.Label(self.content_frame, 
                           text=f"⚠️ 爬虫模块加载失败\n\n"
-                               f"错误: {e}\n\n"
-                               "请确保以下文件存在：\n"
-                               "- ws2_web_crawler.py\n"
-                               "- WebAnalyze II/ 目录\n\n"
-                               "如需使用爬虫功能，请安装依赖库：\n"
-                               "pip install aiohttp beautifulsoup4 lxml requests python-dateutil",
-                          justify=tk.CENTER)
+                               f"诊断结果：\n{diag_text}\n\n"
+                               "修复建议：\n"
+                               "1. 确保 WebAnalyze II/ 目录完整（含 core/ 子目录）\n"
+                               "2. 安装依赖: pip install aiohttp beautifulsoup4 lxml requests python-dateutil\n"
+                               "3. 可选: pip install playwright && playwright install chromium",
+                          justify=tk.LEFT, font=("", 10))
             msg.pack(pady=20)
             
             btn_frame = ttk.Frame(self.content_frame)
@@ -20422,10 +26478,11 @@ output: html_document
         
         def open_assistant():
             try:
-                from mcp.agent_assistant import AgentAssistantWindow
-                assistant_window = AgentAssistantWindow(
+                from mcp.agent_assistant import get_or_create_agent_window
+                assistant_window = get_or_create_agent_window(
                     self.root, BASE, self.system,
-                    self.project_mgr, self.task_board_mgr
+                    self.project_mgr, self.task_board_mgr,
+                    course_tracker=self
                 )
                 assistant_window.show()
             except Exception as e:
@@ -20435,6 +26492,12 @@ output: html_document
         
         ttk.Button(quick_frame, text="🤖 打开AI助手",
                   command=open_assistant, style="Accent.TButton", width=20).pack(side=tk.LEFT, padx=(0, 10))
+        
+        def open_api_config():
+            self._open_api_config_dialog()
+        
+        ttk.Button(quick_frame, text="🔒 API 配置",
+                  command=open_api_config, width=14).pack(side=tk.LEFT, padx=(0, 10))
         
         def open_config():
             try:
@@ -20447,6 +26510,9 @@ output: html_document
         
         ttk.Button(quick_frame, text="⚙️ 配置助手",
                   command=open_config, width=20).pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(quick_frame, textvariable=self._server_quick_text,
+                  command=self._wake_server, width=20).pack(side=tk.LEFT, padx=(0, 10))
         
         ttk.Label(quick_frame,
                 text="💡 提示：也可以点击导航栏左侧的「🤖」按钮随时打开",
@@ -20486,8 +26552,9 @@ output: html_document
                       command=try_load_hub).pack(side=tk.LEFT, padx=5)
 
     def _show_course_simulation_page(self):
-        for w in self.content_frame.winfo_children():
-            w.destroy()
+        if not getattr(self, '_building_tab', False):
+            for w in self.content_frame.winfo_children():
+                w.destroy()
 
         try:
             from mcp.automation.course_simulation import (
@@ -20526,6 +26593,40 @@ output: html_document
                                      text=f"📅 第 {week_num} 周 ({date_range['start_md']} - {date_range['end_md']})",
                                      font=("Microsoft YaHei UI", 10), foreground="#64748b")
         week_info_label.pack(anchor=tk.W, pady=(2, 0))
+        
+        # 课程表选择器
+        selector_frame = ttk.Frame(top_bar)
+        selector_frame.pack(side=tk.RIGHT, padx=(0, 20))
+        
+        ttk.Label(selector_frame, text="课表：", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT, padx=(0, 4))
+        
+        all_timetables = sim.get_all_timetables()
+        timetable_options = []
+        timetable_ids = []
+        active_timetable_id = None
+        
+        for tid, tt in all_timetables.items():
+            timetable_options.append(tt.name)
+            timetable_ids.append(tid)
+            if tt.enabled:
+                active_timetable_id = tid
+        
+        timetable_var = tk.StringVar()
+        if active_timetable_id and active_timetable_id in timetable_ids:
+            idx = timetable_ids.index(active_timetable_id)
+            timetable_var.set(timetable_options[idx])
+        
+        def on_timetable_change(event):
+            selected_idx = timetable_combo.current()
+            if selected_idx >= 0 and selected_idx < len(timetable_ids):
+                selected_id = timetable_ids[selected_idx]
+                sim.set_active_timetable(selected_id)
+                self._show_course_simulation_page()
+        
+        timetable_combo = ttk.Combobox(selector_frame, textvariable=timetable_var, 
+                                       values=timetable_options, state="readonly", width=20)
+        timetable_combo.pack(side=tk.LEFT, padx=(0, 8))
+        timetable_combo.bind("<<ComboboxSelected>>", on_timetable_change)
 
         status_frame = ttk.Frame(top_bar)
         status_frame.pack(side=tk.RIGHT)
@@ -20740,22 +26841,22 @@ output: html_document
                     break_fg = "#64748b"
                     
                     if "早读" in period_name:
-                        break_text = "🌅 早读时间"
+                        break_text = "🌅 早晨时间"
                         break_bg = "#ecfdf5"
                         break_fg = "#059669"
                         is_break = True
                     elif "午休" in period_name:
-                        break_text = "☀️ 午休"
+                        break_text = "☀️中午时间"
                         break_bg = "#fffbeb"
                         break_fg = "#d97706"
                         is_break = True
                     elif "傍晚" in period_name:
-                        break_text = "🌆 傍晚休息"
+                        break_text = "🌆 傍晚时间"
                         break_bg = "#fef2f2"
                         break_fg = "#dc2626"
                         is_break = True
                     elif "晚自习" in period_name or "夜间" in period_name:
-                        break_text = "🌙 晚间活动"
+                        break_text = "🌙 深夜时间"
                         break_bg = "#f5f3ff"
                         break_fg = "#7c3aed"
                         is_break = True
@@ -20779,9 +26880,15 @@ output: html_document
         ctrl_frame.pack(fill=tk.X, padx=10, pady=(4, 8))
 
         ttk.Button(ctrl_frame, text="🔄 刷新",
-                   command=self._show_course_simulation_page).pack(side=tk.LEFT, padx=3)
+                   command=lambda: self._switch_to_tab("coursesim", self._show_course_simulation_page)).pack(side=tk.LEFT, padx=3)
         ttk.Button(ctrl_frame, text="📥 从课程库同步",
                    command=self._sync_courses_to_timetable).pack(side=tk.LEFT, padx=3)
+        ttk.Separator(ctrl_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=8, fill=tk.Y)
+        ttk.Button(ctrl_frame, text="📤 导出课程表",
+                   command=self._export_timetable).pack(side=tk.LEFT, padx=3)
+        ttk.Button(ctrl_frame, text="📥 导入课程表",
+                   command=self._import_timetable).pack(side=tk.LEFT, padx=3)
+        ttk.Separator(ctrl_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=8, fill=tk.Y)
         ttk.Button(ctrl_frame, text="▶️ 进入课程模式",
                    command=self._enter_course_mode).pack(side=tk.LEFT, padx=3)
         ttk.Button(ctrl_frame, text="⏹️ 退出课程模式",
@@ -20912,6 +27019,17 @@ output: html_document
 
     def _enter_course_execution(self, slot):
         course_id = slot.course_id
+        course = self._get_course_detail(course_id)
+        if course:
+            real_id = course.get("note_id", course_id) if isinstance(course, dict) else getattr(course, 'note_id', course_id)
+            self._show_execution_mode(real_id)
+        else:
+            self._show_execution_mode(course_id)
+
+    def _enter_course_execution_by_id(self, course_id: str):
+        """根据课程ID直接进入执行模式"""
+        if not course_id:
+            return
         course = self._get_course_detail(course_id)
         if course:
             real_id = course.get("note_id", course_id) if isinstance(course, dict) else getattr(course, 'note_id', course_id)
@@ -21411,6 +27529,64 @@ output: html_document
         ttk.Button(btn_frame, text="同步", command=do_sync).pack(side=tk.RIGHT, padx=5)
         ttk.Button(btn_frame, text="取消", command=dlg.destroy).pack(side=tk.RIGHT)
 
+    def _export_timetable(self):
+        """导出课程表"""
+        if not hasattr(self, '_course_sim_engine'):
+            return
+        
+        from tkinter import filedialog
+        
+        tt = self._course_sim_engine.get_active_timetable()
+        if not tt:
+            messagebox.showinfo("提示", "没有可用的课程表")
+            return
+        
+        # 让用户选择导出位置
+        default_name = f"{tt.name or '课程表'}_{datetime.now().strftime('%Y%m%d')}.json"
+        file_path = filedialog.asksaveasfilename(
+            title="导出课程表",
+            defaultextension=".json",
+            initialfile=default_name,
+            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")]
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            if self._course_sim_engine.export_timetable(tt.timetable_id, file_path):
+                messagebox.showinfo("成功", f"课程表已成功导出到：\n{file_path}")
+            else:
+                messagebox.showerror("错误", "导出失败")
+        except Exception as e:
+            messagebox.showerror("错误", f"导出失败：{e}")
+
+    def _import_timetable(self):
+        """导入课程表"""
+        if not hasattr(self, '_course_sim_engine'):
+            return
+        
+        from tkinter import filedialog
+        
+        # 让用户选择导入文件
+        file_path = filedialog.askopenfilename(
+            title="导入课程表",
+            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")]
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            timetable = self._course_sim_engine.import_timetable(file_path)
+            if timetable:
+                messagebox.showinfo("成功", f"课程表已成功导入：\n{timetable.name}")
+                self._show_course_simulation_page()
+            else:
+                messagebox.showerror("错误", "导入失败，请检查文件格式")
+        except Exception as e:
+            messagebox.showerror("错误", f"导入失败：{e}")
+
     def _update_course_monitor(self):
         try:
             from mcp.automation.course_simulation import DAY_NAMES
@@ -21594,6 +27770,8 @@ output: html_document
             assistant = pm.get_assistant(pid)
             if not assistant:
                 assistant = pm.create_assistant(pid)
+                # 注册学习状态注入器（每次用户发消息时自动回调）
+                self._register_learning_state_injector(assistant)
                 assistant.show(parent=self.root)
             else:
                 try:
@@ -21602,10 +27780,105 @@ output: html_document
                 except Exception:
                     pm.close_assistant(pid)
                     assistant = pm.create_assistant(pid)
+                    self._register_learning_state_injector(assistant)
                     assistant.show(parent=self.root)
+
+            # 立即注入一次当前状态
+            self._inject_learning_state(assistant)
         except Exception as e:
             import logging
             logging.getLogger(__name__).exception("学习助手启动失败")
+
+    def _inject_learning_state(self, assistant):
+        """将当前学习状态注入到学习助手的 agent 上下文中"""
+        try:
+            if not assistant or not hasattr(assistant, '_agent') or not assistant._agent:
+                return
+
+            state = self.get_learning_state()
+            if not state.get("exec_mode_active"):
+                return
+
+            # 构建学习状态上下文
+            ctx_lines = ["【当前学习状态】"]
+            ctx_lines.append(f"- 正在学习: {state.get('course_title', state.get('course_id', '未知'))}")
+            if state.get('domain'):
+                ctx_lines.append(f"- 课程领域: {state['domain']}")
+            if state.get('current_lesson_number'):
+                ctx_lines.append(f"- 当前课时: 第 {state['current_lesson_number']} 节")
+            if state.get('timer_running'):
+                ctx_lines.append("- 计时器: 运行中")
+            if state.get('completed_count') is not None:
+                ctx_lines.append(f"- 进度: {state['completed_count']}/{state.get('total_lessons', '?')} 节 ({state.get('completion_pct', 0)}%)")
+
+            ctx = "\n".join(ctx_lines)
+
+            # 更新 agent 的 system prompt
+            agent = assistant._agent
+            if agent and agent.messages and agent.messages[0].get("role") == "system":
+                # 替换已有的学习状态段落
+                begin_marker = "<!-- BEGIN_LEARNING_STATE -->"
+                end_marker = "<!-- END_LEARNING_STATE -->"
+                new_block = f"{begin_marker}\n{ctx}\n{end_marker}"
+
+                system_content = agent.messages[0]["content"]
+                start_idx = system_content.find(begin_marker)
+                end_idx = system_content.find(end_marker)
+
+                if start_idx != -1 and end_idx != -1:
+                    agent.messages[0]["content"] = (
+                        system_content[:start_idx]
+                        + new_block
+                        + system_content[end_idx + len(end_marker):]
+                    )
+                else:
+                    agent.messages[0]["content"] += f"\n\n{new_block}"
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(f"注入学习状态失败: {e}")
+
+    def _register_learning_state_injector(self, assistant):
+        """注册学习状态注入器到 agent，每次用户发消息时自动注入最新状态"""
+        try:
+            if not assistant or not hasattr(assistant, '_agent') or not assistant._agent:
+                return
+
+            agent = assistant._agent
+
+            # 避免重复注册（使用标志）
+            if getattr(agent, '_learning_state_injector_registered', False):
+                return
+            agent._learning_state_injector_registered = True
+
+            # 创建注入器闭包（绑定到 self/CourseTracker 实例）
+            tracker = self
+
+            def _injector(agent_ref, user_input: str) -> str:
+                """每次 chat() 调用时回调，返回最新学习状态文本"""
+                try:
+                    state = tracker.get_learning_state()
+                    if not state.get("exec_mode_active"):
+                        return ""
+
+                    ctx_lines = ["<!-- BEGIN_LEARNING_STATE -->", "【当前学习状态】"]
+                    ctx_lines.append(f"- 正在学习: {state.get('course_title', state.get('course_id', '未知'))}")
+                    if state.get('domain'):
+                        ctx_lines.append(f"- 课程领域: {state['domain']}")
+                    if state.get('current_lesson_number'):
+                        ctx_lines.append(f"- 当前课时: 第 {state['current_lesson_number']} 节")
+                    if state.get('timer_running'):
+                        ctx_lines.append("- 计时器: 运行中")
+                    if state.get('completed_count') is not None:
+                        ctx_lines.append(f"- 进度: {state['completed_count']}/{state.get('total_lessons', '?')} 节 ({state.get('completion_pct', 0)}%)")
+                    ctx_lines.append("<!-- END_LEARNING_STATE -->")
+                    return "\n".join(ctx_lines)
+                except Exception:
+                    return ""
+
+            agent.register_context_injector(_injector)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(f"注册学习状态注入器失败: {e}")
 
     def _init_automation_system(self):
         try:
@@ -21652,6 +27925,7 @@ output: html_document
                 self._course_sim_engine.set_course_tracker(self)
                 self._course_sim_engine.set_popup_manager(self._popup_manager)
                 self._course_sim_engine.set_ws2_system(self.system)
+                self._course_sim_engine.set_event_bus(self._event_bus)
 
             self._event_bus.subscribe("automation.*", self._on_automation_event)
             self._event_bus.subscribe("workflow.completed", self._on_workflow_event)
@@ -21731,11 +28005,14 @@ output: html_document
             from mcp.automation.popup_manager import PopupManager
             pm = PopupManager.get_instance()
             if event.event_type == "course.slot_entered":
+                course_id = event.data.get("course_id", "")
+                course_name = event.data.get("course_name", "")
                 pm.push_to_assistant(
                     "learning_assistant",
                     "🔔 课程提醒",
-                    f"课程即将开始: {event.data.get('course_name', '')}"
+                    f"课程即将开始: {course_name}"
                 )
+                self.root.after(500, lambda cid=course_id: self._enter_course_execution_by_id(cid))
         except Exception:
             pass
 
@@ -21769,14 +28046,23 @@ output: html_document
                 tasks = []
                 if hasattr(self, 'task_board_mgr') and self.task_board_mgr:
                     for t in self.task_board_mgr.tasks:
-                        if getattr(t, 'status', '') != 'done':
+                        task_status = t.get('status', '') if isinstance(t, dict) else getattr(t, 'status', '')
+                        if task_status != 'done':
                             tasks.append(t)
                 if tasks:
                     summary_parts.append(f"📋 待办任务: {len(tasks)}项未完成")
                     for t in tasks[:5]:
-                        name = getattr(t, 'title', '') or getattr(t, 'name', str(t))
-                        status = getattr(t, 'status', 'pending')
-                        summary_parts.append(f"  • {name} [{status}]")
+                        if isinstance(t, dict):
+                            task_name = t.get('title', t.get('name', '未命名任务'))
+                        else:
+                            task_name = getattr(t, 'title', '') or getattr(t, 'name', str(t))
+                        task_status = t.get('status', '') if isinstance(t, dict) else getattr(t, 'status', 'pending')
+                        priority = t.get('priority', '') if isinstance(t, dict) else getattr(t, 'priority', '')
+                        if priority:
+                            priority_icon = "🔴" if priority in ["高", "高优先级", "high"] else "🟡" if priority in ["中", "medium"] else "🟢"
+                            summary_parts.append(f"  • {priority_icon} {task_name} [{task_status}]")
+                        else:
+                            summary_parts.append(f"  • {task_name} [{task_status}]")
                     if len(tasks) > 5:
                         summary_parts.append(f"  ... 还有{len(tasks) - 5}项")
             except Exception:
@@ -21844,6 +28130,208 @@ output: html_document
         except Exception:
             pass
 
+    def _open_api_config_dialog(self):
+        """打开 API 权限配置对话框"""
+        mgr = ApiConfigManager()
+        dialog = tk.Toplevel(self.root)
+        dialog.title("TS2 API 权限配置")
+        dialog.geometry("780x560")
+        dialog.resizable(True, True)
+        dialog.transient(self.root)
+
+        main_frame = ttk.Frame(dialog, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # ── 左侧: 工作区列表 ──
+        list_frame = ttk.LabelFrame(main_frame, text="工作区列表", width=280)
+        list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 8))
+        list_frame.pack_propagate(False)
+
+        listbox = tk.Listbox(list_frame, selectmode=tk.SINGLE, font=("Microsoft YaHei", 9))
+        listbox.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        def refresh_listbox():
+            listbox.delete(0, tk.END)
+            for i, ws in enumerate(mgr.get_workspaces()):
+                label = ws["name"]
+                flags = []
+                if ws.get("readable"): flags.append("R")
+                if ws.get("writable"): flags.append("W")
+                if ws.get("relaxed"): flags.append("★")
+                if flags:
+                    label += f"  [{','.join(flags)}]"
+                listbox.insert(tk.END, label)
+
+        refresh_listbox()
+
+        # ── 右侧: 详情面板 ──
+        detail_frame = ttk.LabelFrame(main_frame, text="工作区详情")
+        detail_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        detail_inner = ttk.Frame(detail_frame, padding=8)
+        detail_inner.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(detail_inner, text="显示名称:").grid(row=0, column=0, sticky="w", pady=2)
+        name_var = tk.StringVar()
+        name_entry = ttk.Entry(detail_inner, textvariable=name_var, width=40)
+        name_entry.grid(row=0, column=1, sticky="ew", pady=2, padx=(4, 0))
+
+        ttk.Label(detail_inner, text="路径:").grid(row=1, column=0, sticky="w", pady=2)
+        path_var = tk.StringVar()
+        path_entry = ttk.Entry(detail_inner, textvariable=path_var, width=40)
+        path_entry.grid(row=1, column=1, sticky="ew", pady=2, padx=(4, 0))
+
+        def browse_path():
+            import tkinter.filedialog
+            d = tkinter.filedialog.askdirectory(title="选择工作区目录")
+            if d:
+                path_var.set(d)
+
+        browse_btn = ttk.Button(detail_inner, text="浏览...", command=browse_path)
+        browse_btn.grid(row=1, column=2, padx=(4, 0))
+
+        readable_var = tk.BooleanVar(value=True)
+        writable_var = tk.BooleanVar(value=False)
+        relaxed_var = tk.BooleanVar(value=False)
+
+        readable_cb = ttk.Checkbutton(detail_inner, text="可读 (readable)", variable=readable_var)
+        readable_cb.grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+        writable_cb = ttk.Checkbutton(detail_inner, text="可写 (writable)", variable=writable_var)
+        writable_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
+        relaxed_cb = ttk.Checkbutton(detail_inner, text="宽松模式 (relaxed)", variable=relaxed_var)
+        relaxed_cb.grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
+
+        # ── 分隔线 ──
+        ttk.Separator(detail_inner, orient=tk.HORIZONTAL).grid(row=5, column=0, columnspan=3, sticky="ew", pady=6)
+
+        # ── 授权码（每个工作区独立） ──
+        ttk.Label(detail_inner, text="授权码:").grid(row=6, column=0, sticky="w", pady=2)
+        auth_code_var = tk.StringVar()
+        auth_code_entry = ttk.Entry(detail_inner, textvariable=auth_code_var, width=20, show="*")
+        auth_code_entry.grid(row=6, column=1, sticky="w", pady=2, padx=(4, 0))
+
+        # ── Token（全局） ──
+        ttk.Label(detail_inner, text="API Token:").grid(row=7, column=0, sticky="w", pady=2)
+        cur_token = mgr.get_api_token()
+        token_status_label = ttk.Label(detail_inner, text="✓ 已设置" if cur_token else "未设置", font=("", 9, "bold"))
+        token_status_label.grid(row=7, column=1, sticky="w", pady=2, padx=(4, 0))
+        def set_token_dialog():
+            d = tk.Toplevel(dialog)
+            d.title("设置 API Token")
+            d.geometry("360x160")
+            d.transient(dialog)
+            ttk.Label(d, text="输入 API Token（留空则清除）:").pack(pady=(12, 4))
+            var = tk.StringVar()
+            e = ttk.Entry(d, textvariable=var, width=34)
+            e.pack(padx=12, pady=4)
+            def do_set():
+                mgr.set_api_token(var.get())
+                token_status_label.config(text="✓ 已设置" if var.get() else "未设置")
+                d.destroy()
+                tkinter.messagebox.showinfo("已设置", "Token 已更新。", parent=dialog)
+            ttk.Button(d, text="确定", command=do_set).pack(pady=6)
+            e.focus_set()
+        def regen_token():
+            if not tkinter.messagebox.askyesno("确认重新生成", "重新生成 Token 后，旧的 Token 将失效。\n确定继续？", parent=dialog):
+                return
+            new_token = mgr.regenerate_token()
+            token_status_label.config(text="✓ 已设置" if new_token else "未设置")
+            tkinter.messagebox.showinfo("提示", "新 Token 已生成。", parent=dialog)
+        ttk.Button(detail_inner, text="设置...", command=set_token_dialog).grid(row=7, column=2, padx=(4, 0))
+        ttk.Button(detail_inner, text="重新生成", command=regen_token).grid(row=7, column=3, padx=(4, 0))
+
+        detail_inner.columnconfigure(1, weight=1)
+
+        # 选中工作区时加载详情
+        _selected_index = [None]
+
+        def on_listbox_select(event):
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            _selected_index[0] = idx
+            ws = mgr.get_workspaces()[idx]
+            name_var.set(ws.get("name", ""))
+            path_var.set(ws.get("path", ""))
+            readable_var.set(ws.get("readable", False))
+            writable_var.set(ws.get("writable", False))
+            relaxed_var.set(ws.get("relaxed", False))
+            auth_code_var.set(ws.get("auth_code", ""))
+
+        listbox.bind("<<ListboxSelect>>", on_listbox_select)
+
+        def save_selected():
+            idx = _selected_index[0]
+            if idx is None:
+                return
+            mgr.update_workspace(
+                idx,
+                name=name_var.get(),
+                path=path_var.get(),
+                readable=readable_var.get(),
+                writable=writable_var.get(),
+                relaxed=relaxed_var.get(),
+                auth_code=auth_code_var.get(),
+            )
+            refresh_listbox()
+
+        # ── 底部按钮区 ──
+        btn_frame = ttk.Frame(list_frame)
+        btn_frame.pack(fill=tk.X, padx=4, pady=4)
+
+        def add_workspace():
+            mgr.add_workspace(name="新工作区", path="", readable=True, writable=False, relaxed=False)
+            refresh_listbox()
+            listbox.selection_clear(0, tk.END)
+            listbox.selection_set(tk.END)
+            listbox.event_generate("<<ListboxSelect>>")
+
+        def remove_workspace():
+            idx = _selected_index[0]
+            if idx is None:
+                return
+            if not tkinter.messagebox.askyesno("确认删除", f"删除工作区「{mgr.get_workspaces()[idx]['name']}」？", parent=dialog):
+                return
+            mgr.remove_workspace(idx)
+            _selected_index[0] = None
+            name_var.set("")
+            path_var.set("")
+            refresh_listbox()
+
+        def save_all():
+            idx = _selected_index[0]
+            if idx is not None:
+                save_selected()
+            tkinter.messagebox.showinfo("已保存", "API 配置已保存。", parent=dialog)
+
+        def reset_config():
+            if not tkinter.messagebox.askyesno("确认重置", "恢复默认配置？\n（仅保留当前工作区为 TS2）", parent=dialog):
+                return
+            mgr.reset_defaults()
+            _selected_index[0] = None
+            name_var.set("")
+            path_var.set("")
+            refresh_listbox()
+            tkinter.messagebox.showinfo("已重置", "已恢复默认配置。", parent=dialog)
+
+        ttk.Button(btn_frame, text="+ 添加工作区", command=add_workspace).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="× 删除", command=remove_workspace).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="浏览...", command=browse_path).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="保存选中", command=save_selected).pack(side=tk.LEFT, padx=2)
+
+        # ── 底部按钮栏 ──
+        bottom_frame = ttk.Frame(dialog, padding=(10, 0, 10, 10))
+        bottom_frame.pack(fill=tk.X)
+        ttk.Button(bottom_frame, text="保存所有", command=save_all).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bottom_frame, text="恢复默认", command=reset_config).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bottom_frame, text="关闭", command=dialog.destroy).pack(side=tk.RIGHT, padx=2)
+
+        # 默认选中第一个
+        if mgr.get_workspaces():
+            listbox.selection_set(0)
+            listbox.event_generate("<<ListboxSelect>>")
+
     def _periodic_course_check(self):
         try:
             if hasattr(self, '_course_sim_engine'):
@@ -21853,24 +28341,168 @@ output: html_document
         self.root.after(60000, self._periodic_course_check)
 
 
+# ─── API 权限配置管理器 ────────────────────────────────────────
+CONFIG_DIR = Path.home() / ".ts2"
+CONFIG_FILE = CONFIG_DIR / "ts2_api_config.json"
+
+_PROJECT_ROOT = Path(__file__).parent.resolve()
+
+DEFAULT_CONFIG = {
+    "api_token": "",
+    "workspaces": [
+        {
+            "name": "TS2 (主要工作区)",
+            "path": str(_PROJECT_ROOT),
+            "auth_code": "",
+            "readable": True,
+            "writable": True,
+            "relaxed": True,
+        }
+    ],
+}
+
+def _generate_token(length=16):
+    import secrets
+    import string
+    chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(length))
+
+
+class ApiConfigManager:
+    """读写 ~/.ts2/ts2_api_config.json"""
+
+    def __init__(self):
+        self.config = {}
+        self._load()
+
+    def _load(self):
+        if CONFIG_FILE.exists():
+            self.config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        else:
+            self.config = copy.deepcopy(DEFAULT_CONFIG)
+            self._save()
+
+    def _save(self):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(
+            json.dumps(self.config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def get_workspaces(self):
+        return self.config.get("workspaces", [])
+
+    def add_workspace(self, name="", path="", readable=True, writable=False, relaxed=False, auth_code=""):
+        ws = self.config.setdefault("workspaces", [])
+        ws.append({
+            "name": name or f"工作区 {len(ws) + 1}",
+            "path": path.replace("/", "\\"),
+            "auth_code": auth_code,
+            "readable": readable,
+            "writable": writable,
+            "relaxed": relaxed,
+        })
+        self._save()
+
+    def update_workspace(self, index, **kw):
+        ws = self.config.setdefault("workspaces", [])
+        if 0 <= index < len(ws):
+            for k, v in kw.items():
+                ws[index][k] = v
+            ws[index]["path"] = ws[index]["path"].replace("/", "\\")
+            self._save()
+
+    def remove_workspace(self, index):
+        ws = self.config.setdefault("workspaces", [])
+        if 0 <= index < len(ws):
+            ws.pop(index)
+            self._save()
+
+    def get_api_token(self):
+        return self.config.get("api_token", "")
+
+    def set_api_token(self, token):
+        self.config["api_token"] = token
+        self._save()
+
+    def regenerate_token(self):
+        token = _generate_token()
+        self.config["api_token"] = token
+        self._save()
+        return token
+
+    def reset_defaults(self):
+        self.config = copy.deepcopy(DEFAULT_CONFIG)
+        self.config["workspaces"][0]["path"] = str(_PROJECT_ROOT)
+        self._save()
+
+
+def _resolve_data_path():
+    """解析课程数据文件路径，优先级：命令行参数 > 系统目录 > 程序目录"""
+    ts2_dir = TS2_USER_DIR
+
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+
+    user_json = ts2_dir / "courses_structured.json"
+    if user_json.exists():
+        return str(user_json)
+
+    legacy_json = LEGACY_DATA_DIR / "courses_structured.json"
+    if legacy_json.exists():
+        return str(legacy_json)
+
+    return str(user_json)
+
+
 def main():
-    default_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), "courses_structured.json")
+    import traceback
+    try:
+        print("📝 初始化模板文件...")
+        initialize_templates()
 
-    json_path = sys.argv[1] if len(sys.argv) > 1 else default_json
+        # ─── 任务清单弹窗（在完整初始化之前） ────────────────────────
+        print("📋 检查任务清单...")
+        tasks = show_task_checklist_dialog()
+        print(f"✅ 已创建 {len(tasks)} 个任务")
+        # ────────────────────────────────────────────────────────────
 
-    if not os.path.exists(json_path):
-        print(f"❌ 找不到数据文件: {json_path}")
-        print(f"用法: python {sys.argv[0]} <courses_structured.json>")
+        json_path = _resolve_data_path()
+
+        if not os.path.exists(json_path):
+            print(f"❌ 找不到数据文件: {json_path}")
+            print(f"用法: python {sys.argv[0]} <courses_structured.json>")
+            try:
+                import tkinter.messagebox
+                tkinter.messagebox.showerror("错误", f"找不到课程数据文件\n{json_path}")
+            except Exception:
+                pass
+            sys.exit(1)
+
+        print(f"📂 加载数据: {json_path}")
+        system = CourseSystem(json_path)
+        print(f"✅ 已加载 {len(system.courses)} 门课程")
+
+        root = tk.Tk()
+        app = CourseTrackerApp(root, system)
+        root.mainloop()
+
+    except Exception as e:
+        print(f"❌ 启动错误: {e}")
+        traceback.print_exc()
+        try:
+            import tkinter.messagebox
+            tkinter.messagebox.showerror("启动错误", f"程序启动失败:\n{str(e)}\n\n请查看控制台获取详情")
+        except Exception:
+            pass
         sys.exit(1)
-
-    print(f"📂 加载数据: {json_path}")
-    system = CourseSystem(json_path)
-    print(f"✅ 已加载 {len(system.courses)} 门课程")
-
-    root = tk.Tk()
-    app = CourseTrackerApp(root, system)
-    root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
