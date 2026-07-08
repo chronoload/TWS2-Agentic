@@ -1,0 +1,1342 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TWS2</title>
+<script>
+// 立即应用主题（避免闪烁）
+(function() {
+  var savedTheme = localStorage.getItem('ts2_static_theme');
+  if (savedTheme) {
+    document.documentElement.setAttribute('data-theme', savedTheme);
+  }
+})();
+</script>
+<link rel="stylesheet" href="/static/vditor/index.css">
+<script>
+// 立即应用主题并加载对应的 content-theme CSS
+(function() {
+  var savedTheme = localStorage.getItem('ts2_static_theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', savedTheme);
+  var link = document.createElement('link');
+  link.id = 'vditorContentTheme';
+  link.rel = 'stylesheet';
+  link.href = savedTheme === 'light'
+    ? '/static/vditor/css/content-theme/light.css'
+    : '/static/vditor/css/content-theme/dark.css';
+  document.head.appendChild(link);
+})();
+</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" data-name="opencode-xterm">
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ─── Auth Overlay ──────────────────────────────────────── -->
+<div id="authOverlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--bg-card,#1e1e2e);border-radius:12px;padding:32px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.5);text-align:center">
+    <h2 style="margin:0 0 8px;color:var(--fg,#e0e0e0)">🔒 TS2 远程访问</h2>
+    <p style="margin:0 0 16px;color:var(--fg-muted,#888);font-size:13px">请输入授权码和/或 API Token 以继续</p>
+    <input id="authCodeInput" type="password" placeholder="授权码" style="width:100%;padding:10px 14px;border:1px solid var(--border,#333);border-radius:8px;background:var(--bg,#252536);color:var(--fg,#e0e0e0);font-size:14px;outline:none;box-sizing:border-box;margin-bottom:8px">
+    <input id="authTokenInput" type="password" placeholder="API Token（如需）" style="width:100%;padding:10px 14px;border:1px solid var(--border,#333);border-radius:8px;background:var(--bg,#252536);color:var(--fg,#e0e0e0);font-size:14px;outline:none;box-sizing:border-box;margin-bottom:12px">
+    <div style="font-size:11px;color:var(--fg-muted,#666);margin-bottom:12px;text-align:left" id="authHint"></div>
+    <div style="display:flex;gap:8px">
+      <button onclick="doLogin()" style="flex:1;padding:10px;border:none;border-radius:8px;background:var(--accent,#4a9eff);color:#fff;font-size:14px;cursor:pointer">登录</button>
+      <button onclick="document.getElementById('authCodeInput').value='';document.getElementById('authTokenInput').value=''" style="padding:10px 16px;border:1px solid var(--border,#333);border-radius:8px;background:transparent;color:var(--fg-muted,#888);font-size:14px;cursor:pointer">清除</button>
+    </div>
+
+  </div>
+</div>
+
+<div class="app">
+  <!-- Frameless Window Title Bar (Electron only) -->
+  <div class="titlebar" id="titlebar" style="display:none">
+    <span class="titlebar-title">TS2</span>
+    <div class="titlebar-controls">
+      <button class="titlebar-btn" id="tbMinimize" title="最小化">─</button>
+      <button class="titlebar-btn" id="tbMaximize" title="最大化">□</button>
+      <button class="titlebar-btn titlebar-close" id="tbClose" title="关闭">✕</button>
+    </div>
+  </div>
+  <!-- Sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <span class="logo">TS2</span>
+      <span class="version">v2.0</span>
+      <span class="header-timer" id="headerTimer" onclick="cycleTimer()" oncontextmenu="resetTimer();return false" title="左键切换, 右键重置">―:―</span>
+      <span class="header-ampm" id="headerAmPm"></span>
+      <span class="header-clock" id="headerClock"></span>
+      <span class="mobile-close" id="mobileClose">✕</span>
+    </div>
+
+    <div class="lan-banner" id="lanBanner" style="display:none">
+      <span>📱</span>
+      <span>LAN: <span class="ip" id="lanIp"></span></span>
+      <span class="copy-btn" id="copyLanIp" title="复制">📋</span>
+    </div>
+
+    <!-- Nav Tabs -->
+    <div class="nav-tabs">
+      <div class="nav-tab" data-tab="files">
+        <span class="nav-icon">📁</span>
+        <span>文件</span>
+      </div>
+      <div class="nav-tab" data-tab="tasks">
+        <span class="nav-icon">📋</span>
+        <span>任务</span>
+      </div>
+      <div class="nav-tab" data-tab="bookmarks">
+        <span class="nav-icon">🔖</span>
+        <span>书签</span>
+      </div>
+      <div class="nav-tab" data-tab="projects">
+        <span class="nav-icon">🚀</span>
+        <span>项目</span>
+      </div>
+      <div class="nav-tab" data-tab="courses">
+        <span class="nav-icon">📚</span>
+        <span>课程</span>
+      </div>
+      <div class="nav-tab" data-tab="slides">
+        <span class="nav-icon">📝</span>
+        <span>笔记</span>
+      </div>
+      <div class="nav-tab" data-tab="resources">
+        <span class="nav-icon">📚</span>
+        <span>资源</span>
+      </div>
+      <div class="nav-tab" data-tab="agent">
+        <span class="nav-icon">🤖</span>
+        <span>Agent</span>
+      </div>
+      <div class="nav-tab" data-tab="stats">
+        <span class="nav-icon">📊</span>
+        <span>统计</span>
+      </div>
+      <div class="nav-tab" data-tab="settings">
+        <span class="nav-icon">⚙️</span>
+        <span>设置</span>
+      </div>
+    </div>
+
+    <!-- Workspace Switcher -->
+    <div class="workspace-bar" style="padding:6px 10px;border-top:1px solid var(--border,#333);display:flex;align-items:center;gap:4px;flex-shrink:0">
+      <span style="font-size:10px;color:var(--fg-muted,#888);white-space:nowrap">📁</span>
+      <select id="workspaceSelect" style="flex:1;padding:3px 4px;background:var(--bg,#252536);color:var(--fg,#e0e0e0);border:1px solid var(--border,#333);border-radius:4px;font-size:11px;cursor:pointer;min-width:0" onchange="switchWorkspace(this.value)">
+        <option value="">加载中...</option>
+      </select>
+      <span class="nav-timer" id="navTimer" onclick="cycleTimer()" oncontextmenu="resetTimer();return false" title="左键切换, 右键重置">―:―</span>
+    </div>
+
+    <!-- Files Panel -->
+    <div class="nav-panel active" id="panel-files">
+      <div class="sidebar-search">
+        <input type="text" id="searchInput" placeholder="搜索文件..." autocomplete="off">
+      </div>
+      <div class="file-breadcrumb" id="fileBreadcrumb" style="display:none">
+        <span class="file-breadcrumb-path" id="fileBreadcrumbPath"></span>
+        <button class="file-breadcrumb-new" id="fileNewBtn" title="在当前目录新建文件">+ 新建</button>
+      </div>
+      <div class="file-tree" id="fileTree">
+        <div class="tree-loading">加载中...</div>
+      </div>
+      <div class="upload-area" id="uploadArea" style="display:none">
+        <div class="icon">📤</div>
+        <div class="text">拖拽文件到此处上传</div>
+        <div class="hint">或点击选择文件</div>
+      </div>
+    </div>
+
+    <!-- Tasks Panel -->
+    <div class="nav-panel" id="panel-tasks">
+      <!-- 统计栏 -->
+      <div class="task-stats-bar">
+        <div class="task-stat">
+          <span class="ts-value" id="taskStatTotal">0</span>
+          <span class="ts-label">总任务</span>
+        </div>
+        <div class="task-stat task-stat-done">
+          <span class="ts-value" id="taskStatDone">0</span>
+          <span class="ts-label">已完成</span>
+        </div>
+        <div class="task-stat task-stat-overdue">
+          <span class="ts-value" id="taskStatOverdue">0</span>
+          <span class="ts-label">逾期</span>
+        </div>
+        <div class="task-stat task-stat-today">
+          <span class="ts-value" id="taskStatToday">0</span>
+          <span class="ts-label">今日到期</span>
+        </div>
+      </div>
+      <div style="padding:6px 8px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center">
+        <input type="date" id="taskDateFilter" style="flex:1;padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:11px" title="按日期筛选">
+        <button class="course-action-btn" id="taskClearFilter" style="font-size:10px">全部</button>
+      </div>
+      <div class="kanban" id="kanban">
+        <div class="kanban-column" data-status="待办">
+          <div class="kanban-column-header">
+            <span style="color:var(--cyan)">●</span> 待办 <span class="count" id="countTodo">0</span>
+            <button class="add-btn" data-status="待办" title="新建任务">＋</button>
+          </div>
+          <div class="kanban-column-body" id="kanbanTodo" data-status="待办"></div>
+        </div>
+        <div class="kanban-column" data-status="进行中">
+          <div class="kanban-column-header">
+            <span style="color:var(--yellow)">●</span> 进行中 <span class="count" id="countProgress">0</span>
+            <button class="add-btn" data-status="进行中" title="新建任务">＋</button>
+          </div>
+          <div class="kanban-column-body" id="kanbanProgress" data-status="进行中"></div>
+        </div>
+        <div class="kanban-column" data-status="已完成">
+          <div class="kanban-column-header">
+            <span style="color:var(--green)">●</span> 已完成 <span class="count" id="countDone">0</span>
+            <button class="add-btn" data-status="已完成" title="新建任务">＋</button>
+          </div>
+          <div class="kanban-column-body" id="kanbanDone" data-status="已完成"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bookmarks Panel -->
+    <div class="nav-panel" id="panel-bookmarks">
+      <div class="bookmarks-panel" id="bookmarksPanel">
+        <div class="bookmarks-search">
+          <input type="text" id="bookmarkSearch" placeholder="搜索书签..." autocomplete="off">
+          <button id="btnAddBookmark" title="添加书签" style="padding:4px 8px;background:var(--accent);color:#fff;border:none;border-radius:4px;font-size:12px;cursor:pointer;white-space:nowrap">➕ 添加</button>
+        </div>
+        <div class="bookmark-categories" id="bookmarkCategories"></div>
+        <div class="bookmarks-grid" id="bookmarksGrid"></div>
+      </div>
+    </div>
+
+    <!-- Projects Panel -->
+    <div class="nav-panel" id="panel-projects">
+      <div class="projects-panel" id="projectsPanel">
+        <div class="empty-state"><span class="empty-icon">🚀</span><span>加载中...</span></div>
+      </div>
+      <!-- 源码浏览器（已并入项目） -->
+      <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px;flex:1;display:flex;flex-direction:column;min-height:0">
+        <div onclick="toggleSrcBrowserInProjects()" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;margin-bottom:4px">
+          <div style="font-size:12px;font-weight:700;color:var(--fg)">💻 源码浏览器</div>
+          <span id="srcBrowserToggleIcon" style="font-size:10px;color:var(--fg-muted);transition:transform 0.2s">▼</span>
+        </div>
+        <div id="srcBrowserWrap" style="display:none;flex:1;min-height:0;overflow:hidden">
+          <div class="src-layout" style="height:100%">
+            <div class="src-sidebar">
+              <div class="src-toolbar" id="srcToolbar">
+                <input type="text" id="srcFilterInput" placeholder="搜索文件（递归）..." autocomplete="off">
+                <button class="src-action-btn" id="srcUploadBtn" title="上传到当前目录">📤 上传</button>
+                <button class="src-action-btn" id="srcClusterImportBtn" title="从其他实例导入">🔗 导入</button>
+              </div>
+              <div class="src-breadcrumb" id="srcBreadcrumb">
+                <button class="src-up-btn" id="srcUpBtn" style="display:none" title="上级目录">..</button>
+                <span class="src-path" id="srcPath">/</span>
+                <button class="src-new-btn" id="srcNewFileBtn" title="在当前目录新建文件">+ 新建</button>
+              </div>
+              <div class="src-dir-list" id="srcDirList">
+                <div class="empty-state"><span class="empty-icon">💻</span><span>点击展开加载</span></div>
+              </div>
+            </div>
+            <div class="src-content" id="srcContent">
+              <div class="empty-state"><span class="empty-icon">📄</span><span>选择文件查看源码</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Courses Panel -->
+    <div class="nav-panel" id="panel-courses">
+      <div class="courses-panel" id="coursesPanel">
+        <div class="course-actions" style="padding:8px 8px 0">
+          <button class="course-action-btn" id="courseCreateBtn">+ 新建课程</button>
+          <button class="course-action-btn" id="courseRefreshBtn">刷新</button>
+        </div>
+        <div id="coursesList">
+          <div class="empty-state"><span class="empty-icon">📚</span><span>加载中...</span></div>
+        </div>
+        <!-- 执行模式（已并入课程） -->
+        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">
+          <div style="font-size:12px;font-weight:700;color:var(--fg);margin-bottom:8px">⏱ 执行模式</div>
+          <div class="execution-panel" id="executionPanel">
+            <div class="exec-select-group">
+              <label>选择课程</label>
+              <select id="execCourseSelect"><option value="">-- 请选择课程 --</option></select>
+            </div>
+            <div class="exec-select-group">
+              <label>选择课时</label>
+              <select id="execLessonSelect"><option value="">-- 请先选择课程 --</option></select>
+            </div>
+            <div id="execLessonInfo" style="display:none"></div>
+            <div id="execLessonActions" style="display:none"></div>
+            <div class="exec-timer" id="execTimer" style="display:none">
+              <div class="timer-display" id="timerDisplay">00:00:00</div>
+              <div class="timer-controls">
+                <button class="timer-btn" id="timerStart">▶ 开始</button>
+                <button class="timer-btn" id="timerPause" style="display:none">⏸ 暂停</button>
+                <button class="timer-btn stop-btn" id="timerStop" style="display:none">⏹ 停止</button>
+              </div>
+            </div>
+            <button class="exec-complete-btn" id="execCompleteBtn" style="display:none">✅ 完成课时</button>
+            <div id="execWorkflowStats" style="margin-top:10px">
+              <div style="font-size:11px;color:var(--fg-muted);font-weight:600;margin-bottom:6px">📊 学习统计</div>
+              <div id="workflowStatsContent" class="stats-grid">
+                <div class="stat-card"><div class="stat-value" id="statFocusHours">0</div><div class="stat-label">专注时长(h)</div></div>
+                <div class="stat-card"><div class="stat-value" id="statCompleted">0</div><div class="stat-label">完成课时</div></div>
+                <div class="stat-card"><div class="stat-value" id="statNotes">0</div><div class="stat-label">笔记数</div></div>
+                <div class="stat-card"><div class="stat-value" id="statEntries">0</div><div class="stat-label">活动记录</div></div>
+              </div>
+            </div>
+            <div id="execWorkflowLog" style="margin-top:8px;max-height:200px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--fg-muted);font-weight:600;margin-bottom:4px">📝 最近活动</div>
+              <div id="workflowLogContent"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Agent Panel -->
+    <div class="nav-panel" id="panel-agent">
+      <div class="agent-panel" id="agentPanel">
+        <div class="agent-messages" id="agentMessages"></div>
+        <div class="agent-typing" id="agentTyping">正在输入...</div>
+        <div class="agent-session-bar" id="agentSessionBar">
+          <button class="agent-session-btn" onclick="showAgentCheckpoints()" title="检查点 — 每轮对话自动保存，可回退对话或文件">🔖</button>
+          <button class="agent-session-btn" onclick="showAgentSessions()" title="会话列表">📋</button>
+          <button class="agent-session-btn" onclick="createNewSession()" title="新建会话">➕</button>
+          <span class="agent-session-info" id="agentSessionInfo">新对话</span>
+          <span id="modelCapabilityBadge" style="display:none;font-size:9px;padding:1px 5px;border-radius:4px;background:var(--bg-tertiary);color:var(--fg-muted);margin-left:auto;white-space:nowrap" title="模型能力"></span>
+        </div>
+        <!-- 嵌入式 Swarm 子面板 -->
+        <div id="swarmEmbeddedPanel" style="display:none;border-top:1px solid var(--border);max-height:50%;overflow-y:auto;flex-shrink:0">
+          <div onclick="toggleSwarmEmbedded()" style="display:flex;align-items:center;justify-content:space-between;padding:4px 10px;background:var(--bg-secondary);cursor:pointer;user-select:none">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px">🐝</span>
+              <span style="font-size:11px;font-weight:600;color:var(--fg)">Swarm</span>
+              <span id="swarmModeBadge" style="font-size:9px;padding:1px 6px;border-radius:4px;background:var(--bg-tertiary);color:var(--fg-muted)">单次模式</span>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <button onclick="event.stopPropagation();swarmRefresh()" style="background:var(--bg-tertiary);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:1px 8px;font-size:10px;cursor:pointer">刷新</button>
+              <span id="swarmEmbeddedToggle" style="font-size:10px;color:var(--fg-muted)">▶</span>
+            </div>
+          </div>
+          <div id="swarmEmbeddedBody" style="padding:6px 8px;display:none;flex-direction:column;gap:6px">
+            <!-- 集群模式控制 -->
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 6px;background:var(--bg-tertiary);border-radius:4px">
+              <span style="font-size:10px;color:var(--fg-muted)">集群模式(&gt;4并行)</span>
+              <div style="display:flex;gap:4px">
+                <button id="swarmEnableBtn" onclick="swarmEnableCluster()" style="background:#f59e0b;color:#000;border:none;border-radius:3px;padding:1px 8px;font-size:9px;cursor:pointer">启用</button>
+                <button id="swarmDisableBtn" onclick="swarmDisableCluster()" style="background:var(--bg-tertiary);color:var(--fg-muted);border:1px solid var(--border);border-radius:3px;padding:1px 8px;font-size:9px;cursor:pointer;display:none">禁用</button>
+              </div>
+            </div>
+            <!-- 子 Agent 列表 -->
+            <div id="swarmAgentList" style="display:flex;flex-direction:column;gap:4px">
+              <div style="color:var(--fg-muted);font-size:11px;text-align:center;padding:10px">加载中...</div>
+            </div>
+            <!-- 后台任务 -->
+            <div style="border-top:1px solid var(--border);padding-top:6px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:10px;font-weight:600;color:var(--fg-muted)">后台任务</span>
+                <button onclick="swarmRefreshTasks()" style="background:transparent;color:var(--fg-muted);border:none;font-size:9px;cursor:pointer;padding:1px 4px">刷新</button>
+              </div>
+              <div id="swarmTaskList" style="display:flex;flex-direction:column;gap:3px">
+                <div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:6px">暂无后台任务</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="agent-input-area">
+          <div id="mediaPreviewBar" style="display:none;flex-wrap:wrap;gap:4px;padding:2px 4px;border-bottom:1px solid var(--border);max-height:80px;overflow-y:auto"></div>
+          <input type="text" id="agentInput" placeholder="输入消息... (可粘贴/拖拽图片或视频)" autocomplete="off">
+          <button id="agentSend">发送</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dashboard 树浮层（自由漂浮，独立于 .app） -->
+    <div class="dash-tree-overlay" id="dashTreeOverlay" data-label="🎯 树">
+      <div class="overlay-drag-handle" data-drag-target="dashTreeOverlay" title="拖动">⋮⋮</div>
+      <button class="overlay-collapse-btn" onclick="_toggleOverlay('dashTreeOverlay')" title="收起/展开">➖</button>
+      <div class="dash-section-title">
+        <span>🎯 Ideal → Goal → Plan</span>
+        <div class="dash-section-actions">
+          <button class="dash-btn dash-btn-primary" id="dashAddIdeal" title="新建 Ideal">➕ Ideal</button>
+          <button class="dash-btn-mini" id="dashRefreshTree" title="刷新">🔄</button>
+        </div>
+      </div>
+      <div class="dash-tree-list" id="dashTreeList">
+        <div class="dash-empty">暂无数据，点击刷新加载</div>
+      </div>
+    </div>
+
+    <!-- Dashboard 焦点浮层（自由漂浮，独立于 .app） -->
+    <div class="dash-focus-overlay" id="dashFocusOverlay" data-label="⚔️ 焦点">
+      <div class="overlay-drag-handle" data-drag-target="dashFocusOverlay" title="拖动">⋮⋮</div>
+      <button class="overlay-collapse-btn" onclick="_toggleOverlay('dashFocusOverlay')" title="收起/展开">➖</button>
+      <!-- ① 顶部信息栏 -->
+      <div class="focus-header" id="focusHeader">
+        <div class="focus-header-title" id="focusTitle">未选择 Plan</div>
+        <div class="focus-header-desc" id="focusPlanDesc"></div>
+        <div class="focus-header-meta" id="focusMeta">点击左侧 Plan 节点查看详情</div>
+      </div>
+
+      <!-- ② 任务微型看板 -->
+      <div class="focus-section">
+        <div class="focus-section-title">📋 任务看板</div>
+        <div class="focus-tasks-toolbar" id="focusTasksToolbar"></div>
+        <div class="focus-tasks" id="focusTasks">
+          <div class="dash-empty">选择 Plan 后显示任务</div>
+        </div>
+      </div>
+
+      <!-- ③ 约束与核验 -->
+      <div class="focus-section">
+        <div class="focus-section-title">⚖️ 约束与核验</div>
+        <div class="focus-constraints" id="focusConstraints">
+          <div class="dash-empty">无约束</div>
+        </div>
+      </div>
+
+      <!-- ④ 万有 RAG 注入预览 -->
+      <div class="focus-section">
+        <div class="focus-section-title">
+          <span>🌌 万有 RAG 注入预览</span>
+          <button class="dash-btn-mini" id="dashRefreshRag" title="重新检索">🔄</button>
+        </div>
+        <div class="focus-rag" id="focusRag">
+          <div class="dash-empty">选择 Plan 后显示 RAG 检索片段</div>
+        </div>
+      </div>
+
+      <!-- ⑤ Agent 决策点（受 I(P) 调控） -->
+      <div class="focus-section" id="focusDecisionSection">
+        <div class="focus-section-title">
+          <span>⚔️ 决策点</span>
+          <button class="dash-btn dash-btn-primary" id="dashGenDecision" title="调用 Generator 生成战术建议">⚡ 调用 Generator</button>
+        </div>
+        <div class="focus-decision" id="focusDecision">
+          <div class="dash-empty">选择一个 Plan 后点击"⚡ 调用 Generator"</div>
+        </div>
+      </div>
+
+      <!-- ⑥ 生命资源操作 -->
+      <div class="focus-section">
+        <div class="focus-section-title">🛌 生命资源操作</div>
+        <div class="focus-life-ops">
+          <input type="number" id="dashRecoverHours" placeholder="小时" min="0.1" max="8" step="0.1" value="1" title="休息时长">
+          <input type="number" id="dashRecoverQuality" placeholder="质量0~1" min="0" max="1" step="0.1" value="1" title="休息质量">
+          <button class="dash-btn" id="dashRecoverBtn">🛌 休息</button>
+          <button class="dash-btn-mini" id="dashMarkOpp">📌 标记机遇</button>
+          <button class="dash-btn-mini" id="dashViewSurplus">📊 查看盈余</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slides Panel -->
+    <div class="nav-panel" id="panel-slides">
+      <div style="padding:8px;overflow-y:auto;flex:1">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:12px;font-weight:700;color:var(--fg)">📝 分页笔记</span>
+          <!-- 源切换 -->
+          <div style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+            <button id="slidesSrcServer" onclick="slidesSwitchSource('server')" style="background:var(--accent);color:#fff;border:none;padding:3px 10px;font-size:11px;cursor:pointer">服务端</button>
+            <button id="slidesSrcLocal" onclick="slidesSwitchSource('local')" style="background:transparent;color:var(--fg-muted);border:none;padding:3px 10px;font-size:11px;cursor:pointer">本地</button>
+          </div>
+        </div>
+
+        <!-- 笔记列表（可折叠） -->
+        <div style="border:1px solid var(--border);border-radius:6px;margin-bottom:8px;overflow:hidden">
+          <div onclick="toggleSlidesNbList()" style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;cursor:pointer;background:var(--bg-secondary);user-select:none">
+            <span style="font-size:11px;color:var(--fg-muted)">笔记</span>
+            <span id="slidesNbToggleIcon" style="font-size:10px;color:var(--fg-muted);transition:transform 0.2s">▼</span>
+          </div>
+          <div id="slidesNbListWrap" style="display:none;padding:4px 6px;border-top:1px solid var(--border)">
+            <input type="text" id="slidesSearchInput" placeholder="搜索笔记..." oninput="slidesSearchNotes()" style="width:100%;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:11px;margin-bottom:4px;box-sizing:border-box;outline:none">
+            <div id="slidesNotebookList"></div>
+            <div style="display:flex;gap:4px;padding:4px 0">
+              <button class="btn-action btn-outline" onclick="slidesNewNotebook()" style="flex:1;font-size:10px;padding:3px 6px">+ 新建</button>
+              <button class="btn-action btn-outline" onclick="slidesLoadNotebookList()" style="flex:1;font-size:10px;padding:3px 6px">🔄 刷新</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 当前笔记操作 -->
+        <div id="slidesCurrentNB" style="display:none">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <span style="font-size:10px;color:var(--fg-muted)">当前笔记</span>
+            <button onclick="slidesHideCurrentNB()" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:12px;padding:2px 4px" title="关闭">✕</button>
+          </div>
+          <input type="text" id="slidesNotebookTitle" placeholder="笔记标题" style="width:100%;padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:12px;margin-bottom:6px;box-sizing:border-box">
+          <div style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap">
+            <button id="slidesBtnSave" class="btn-action btn-secondary" onclick="slidesDoSave()" style="font-size:11px;padding:4px 8px">💾 保存</button>
+            <button id="slidesBtnLoad" class="btn-action btn-secondary" onclick="slidesDoLoad()" style="font-size:11px;padding:4px 8px">📥 加载</button>
+            <button class="btn-action btn-secondary" onclick="slidesExportMD()" style="font-size:11px;padding:4px 8px">📄 MD</button>
+            <button class="btn-action btn-secondary" onclick="slidesExportJSON()" style="font-size:11px;padding:4px 8px">📦 JSON</button>
+            <button class="btn-action btn-secondary" onclick="document.getElementById('slidesImportFile').click()" style="font-size:11px;padding:4px 8px">📤 导入</button>
+            <input type="file" id="slidesImportFile" accept=".json,.md,.markdown,.rmd,.rmarkdown,.mdx,.txt" style="display:none" onchange="slidesImportFile(event)">
+          </div>
+          <!-- 本地模式导入导出 -->
+          <div id="slidesLocalActions" style="display:none;margin-bottom:8px">
+            <div style="display:flex;gap:4px;flex-wrap:wrap">
+              <button class="btn-action btn-outline" onclick="slidesImportFromServer()" id="slidesImportBtn" style="font-size:10px;padding:3px 8px">↓ 从服务端导入</button>
+              <button class="btn-action btn-outline" onclick="slidesExportToServer()" id="slidesExportBtn" style="font-size:10px;padding:3px 8px">↑ 导出到服务端</button>
+              <span id="slidesLocalStats" style="font-size:10px;color:var(--fg-muted);align-self:center"></span>
+              <span id="slidesImportExportMsg" style="font-size:10px;color:var(--accent);align-self:center"></span>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:11px;color:var(--fg-muted)">大纲</span>
+            <button onclick="slidesToggleOutline()" id="slidesOutlineToggle" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:10px;padding:2px">▼</button>
+          </div>
+          <div id="slidesOutlineWrap">
+            <div id="slidesOutline"></div>
+          </div>
+        </div>
+        <!-- 思维导图（已并入笔记） -->
+        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">
+          <div style="font-size:12px;font-weight:700;color:var(--fg);margin-bottom:4px">🧠 思维导图 (.kmind)</div>
+          <div style="font-size:11px;color:var(--fg-muted);line-height:1.5">思维导图文件以 <code style="background:var(--bg-tertiary);padding:1px 5px;border-radius:3px;font-size:10px">.kmind</code> 格式保存，双击文件树中的 <code style="background:var(--bg-tertiary);padding:1px 5px;border-radius:3px;font-size:10px">.kmind</code> 文件在编辑器中打开。</div>
+          <button onclick="kmindCreateNew()" style="padding:8px 12px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;transition:opacity 0.15s;margin-top:6px" onmouseover="this.style.opacity=0.85" onmouseout="this.style.opacity=1">+ 新建思维导图</button>
+          <div id="kmindRecentList" style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px">
+            <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin-bottom:6px">最近打开的导图</div>
+            <div id="kmindRecentItems" style="font-size:11px;color:var(--fg-dim)">暂无</div>
+          </div>
+        </div>
+      </div>
+      </div>
+
+    <!-- Resources Panel -->
+    <div class="nav-panel" id="panel-resources">
+      <div style="padding:8px;overflow-y:auto;flex:1;display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <input type="text" id="resourceSearchInput" placeholder="搜索资源..." autocomplete="off" style="flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px">
+          <button id="resourceRefreshBtn" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">刷新</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <select id="resourceCourseFilter" style="flex:1;padding:5px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);font-size:11px">
+            <option value="">全部课程</option>
+          </select>
+          <select id="resourceLessonFilter" style="flex:1;padding:5px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);font-size:11px">
+            <option value="">全部课时</option>
+          </select>
+        </div>
+        <div id="resourceList" style="flex:1;overflow-y:auto"></div>
+      </div>
+    </div>
+
+    <!-- Stats Panel -->
+    <div class="nav-panel" id="panel-stats">
+      <div style="padding:8px;overflow-y:auto;flex:1">
+        <div style="font-size:12px;font-weight:700;color:var(--fg);margin-bottom:8px">📊 学习统计总览</div>
+        <div id="statsOverview" class="stats-grid">
+          <div class="stat-card"><div class="stat-value" id="statTotalCourses">0</div><div class="stat-label">课程总数</div></div>
+          <div class="stat-card"><div class="stat-value" id="statTotalHours">0</div><div class="stat-label">总学时</div></div>
+          <div class="stat-card"><div class="stat-value" id="statTotalLessons">0</div><div class="stat-label">课时总数</div></div>
+          <div class="stat-card"><div class="stat-value" id="statCompletionRate">0%</div><div class="stat-label">完成率</div></div>
+        </div>
+        <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin:10px 0 6px">学科领域分布</div>
+        <div id="domainDistribution"></div>
+        <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin:10px 0 6px">📅 学习热力图（近30天）</div>
+        <div id="activityHeatmap" style="display:flex;flex-wrap:wrap;gap:2px"></div>
+        <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin:10px 0 6px">⏱ 专注时长统计</div>
+        <div id="focusStats" class="stats-grid">
+          <div class="stat-card"><div class="stat-value" id="statWFFocusHours">0</div><div class="stat-label">总专注(h)</div></div>
+          <div class="stat-card"><div class="stat-value" id="statWFCompleted">0</div><div class="stat-label">完成课时</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Panel -->
+    <div class="nav-panel" id="panel-settings">
+      <div style="padding:12px;overflow-y:auto;flex:1">
+        <!-- 外观设置 -->
+        <div style="margin-bottom:20px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px">
+          <div style="font-size:12px;font-weight:700;color:var(--fg);margin-bottom:10px">🎨 外观</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:var(--fg)">白天模式</div>
+              <div style="font-size:10px;color:var(--fg-muted);margin-top:2px">使用浅色主题（默认黑夜模式）</div>
+            </div>
+            <label class="theme-toggle">
+              <input type="checkbox" id="themeToggleInput" onchange="toggleTheme()">
+              <span class="theme-toggle-slider"></span>
+            </label>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:var(--fg)">随时间渐变</div>
+              <div style="font-size:10px;color:var(--fg-muted);margin-top:2px">根据当前时间自动变换配色</div>
+            </div>
+            <label class="theme-toggle">
+              <input type="checkbox" id="gradientToggleInput" onchange="toggleGradientTheme()">
+              <span class="theme-toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 护眼休息 -->
+        <div style="margin-bottom:20px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px">
+          <div style="font-size:12px;font-weight:700;color:var(--fg);margin-bottom:10px">👁 护眼休息</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:var(--fg)">定时提醒</div>
+              <div style="font-size:10px;color:var(--fg-muted);margin-top:2px">每隔一段时间黑屏提醒休息</div>
+            </div>
+            <label class="theme-toggle">
+              <input type="checkbox" id="eyeRestToggle" onchange="toggleEyeRest()">
+              <span class="theme-toggle-slider"></span>
+            </label>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <div style="flex:1">
+              <div style="font-size:10px;color:var(--fg-muted);margin-bottom:4px">间隔时间</div>
+              <select id="eyeRestInterval" onchange="restartEyeRest()" style="width:100%;padding:4px 6px;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px">
+                <option value="20">20 分钟</option>
+                <option value="30" selected>30 分钟</option>
+                <option value="45">45 分钟</option>
+                <option value="60">60 分钟</option>
+              </select>
+            </div>
+            <div style="flex:1">
+              <div style="font-size:10px;color:var(--fg-muted);margin-bottom:4px">黑屏时长</div>
+              <select id="eyeRestDuration" onchange="restartEyeRest()" style="width:100%;padding:4px 6px;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px">
+                <option value="15">15 秒</option>
+                <option value="20" selected>20 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60">60 秒</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div style="font-size:12px;font-weight:700;color:var(--fg);margin-bottom:12px">🌐 公网穿透</div>
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:12px">通过隧道将本服务暴露到公网，适用于与手机不在同一局域网时访问</div>
+        
+        <!-- 隧道类型选择 -->
+        <div style="margin-bottom:12px">
+          <div style="font-size:11px;color:var(--fg-muted);margin-bottom:6px">隧道类型</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            <button class="tunnel-type-btn active" data-type="localtunnel" onclick="setTunnelType('localtunnel')">localtunnel</button>
+            <button class="tunnel-type-btn" data-type="serveo" onclick="setTunnelType('serveo')">serveo.net</button>
+            <button class="tunnel-type-btn" data-type="bore" onclick="setTunnelType('bore')">bore.pub</button>
+            <button class="tunnel-type-btn" data-type="frp" onclick="setTunnelType('frp')">frp</button>
+            <button class="tunnel-type-btn" data-type="cloudflare" onclick="setTunnelType('cloudflare')">Cloudflare</button>
+          </div>
+          <div id="tunnelTypeHint" style="font-size:10px;color:var(--fg-dim);margin-top:4px">使用 npx localtunnel，访问 https://xxx.loca.lt（推荐，最稳定）</div>
+        </div>
+
+        <!-- 状态显示 -->
+        <div style="margin-bottom:12px;padding:10px;background:var(--bg-secondary);border-radius:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:11px;color:var(--fg-muted)">状态</span>
+            <span id="tunnelStatus" style="font-size:11px;padding:2px 8px;border-radius:10px;background:var(--fg-dim);color:var(--bg)">未启动</span>
+          </div>
+          <div id="tunnelUrlRow" style="display:none;margin-bottom:6px">
+            <span style="font-size:11px;color:var(--fg-muted)">公网地址</span>
+            <a id="tunnelUrl" href="#" target="_blank" style="font-size:11px;color:var(--accent);margin-left:8px;word-break:break-all"></a>
+          </div>
+          <div id="tunnelErrorRow" style="display:none">
+            <span style="font-size:11px;color:var(--red)">错误</span>
+            <span id="tunnelError" style="font-size:10px;color:var(--red);margin-left:8px"></span>
+          </div>
+        </div>
+
+        <!-- 操作按钮 -->
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <button class="btn-action" id="btnTunnelStart" onclick="startTunnel()">启动隧道</button>
+          <button class="btn-action btn-secondary" id="btnTunnelStop" onclick="stopTunnel()" disabled>停止隧道</button>
+          <button class="btn-action btn-outline" onclick="loadTunnelStatus()">刷新状态</button>
+        </div>
+
+        <!-- localtunnel 配置 -->
+        <div id="tunnelConfigLocaltunnel" class="tunnel-config">
+          <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin-bottom:8px">localtunnel 配置</div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">选择本地实例</label>
+            <select id="tunnelLocalPort" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+              <option value="6906">端口 6906 (当前实例)</option>
+            </select>
+          </div>
+          <button onclick="scanLocalInstances()" style="padding:4px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:11px;cursor:pointer">↻ 刷新实例列表</button>
+        </div>
+
+        <!-- serveo 配置 -->
+        <div id="tunnelConfigServeo" class="tunnel-config" style="display:none">
+          <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin-bottom:8px">serveo 配置</div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">本地端口</label>
+            <input type="number" id="serveoLocalPort" value="6906" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">子域名（可选）</label>
+            <input type="text" id="serveoSubdomain" placeholder="留空则随机分配" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+        </div>
+
+        <!-- bore 配置 -->
+        <div id="tunnelConfigBore" class="tunnel-config" style="display:none">
+          <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin-bottom:8px">bore 配置</div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">本地端口</label>
+            <input type="number" id="boreLocalPort" value="6906" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+        </div>
+
+        <!-- frp 配置 -->
+        <div id="tunnelConfigFrp" class="tunnel-config" style="display:none">
+          <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin-bottom:8px">frp 配置（需VPS）</div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">服务器地址</label>
+            <input type="text" id="frpServerAddr" placeholder="VPS 公网 IP" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">服务器端口</label>
+            <input type="number" id="frpServerPort" value="7000" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">认证令牌</label>
+            <input type="password" id="frpToken" placeholder="frps token" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">本地端口</label>
+            <input type="number" id="frpLocalPort" value="6906" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">远程端口</label>
+            <input type="number" id="frpRemotePort" value="6906" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+        </div>
+
+        <!-- Cloudflare Tunnel 配置 -->
+        <div id="tunnelConfigCloudflare" class="tunnel-config" style="display:none">
+          <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin-bottom:8px">Cloudflare Tunnel 配置</div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">Tunnel Token</label>
+            <input type="password" id="cfToken" placeholder="eyJh..." style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">域名（可选）</label>
+            <input type="text" id="cfDomain" placeholder="ts2.your-domain.com" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">本地端口</label>
+            <input type="number" id="cfLocalPort" value="6906" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+          </div>
+          <div style="margin-bottom:8px">
+            <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/tunnel-guide/" target="_blank" style="font-size:11px;color:var(--accent)">查看 Cloudflare Tunnel 配置指南</a>
+          </div>
+          <div style="font-size:10px;color:var(--fg-dim)">
+            安装 cloudflared: Windows: winget install Cloudflare.cloudflared
+          </div>
+        </div>
+
+        <!-- 编辑器自动补全 -->
+        <div style="font-size:12px;font-weight:700;color:var(--fg);margin:16px 0 12px">✏️ 编辑器自动补全</div>
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px">输入触发字符弹出补全列表（需重新打开文件生效）</div>
+
+        <div style="padding:10px;background:var(--bg-secondary);border-radius:6px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">
+            <div><span style="font-size:12px;color:var(--fg)">LaTeX 公式补全</span><div style="font-size:10px;color:var(--fg-dim)">输入 \ 触发</div></div>
+            <label class="sync-toggle"><input type="checkbox" id="acLatex" onchange="saveAcToggle()"><span class="sync-toggle-slider"></span></label>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">
+            <div><span style="font-size:12px;color:var(--fg)">代码片段补全</span><div style="font-size:10px;color:var(--fg-dim)">输入 ! 触发</div></div>
+            <label class="sync-toggle"><input type="checkbox" id="acSnippets" onchange="saveAcToggle()"><span class="sync-toggle-slider"></span></label>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0">
+            <div><span style="font-size:12px;color:var(--fg)">关键词字典补全</span><div style="font-size:10px;color:var(--fg-dim)">输入 @ 触发中文，& 触发英文</div></div>
+            <label class="sync-toggle"><input type="checkbox" id="acDicts" onchange="saveAcToggle()"><span class="sync-toggle-slider"></span></label>
+          </div>
+        </div>
+
+        <!-- 字典管理 -->
+        <div id="acDictPanel" style="padding:10px;background:var(--bg-secondary);border-radius:6px;margin-bottom:8px">
+          <div style="font-size:11px;font-weight:600;color:var(--fg-muted);margin-bottom:8px">关键词字典</div>
+          <div id="acDictList"></div>
+          <div style="display:flex;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+            <input id="acNewDictName" class="tunnel-input" style="flex:1;font-size:11px;padding:4px 8px" placeholder="新字典名称" onkeydown="if(event.key==='Enter')addAcDict()">
+            <button class="btn-action" style="padding:4px 10px;font-size:11px" onclick="addAcDict()">添加</button>
+          </div>
+          <button class="btn-action btn-outline" style="margin-top:6px;font-size:10px;padding:3px 8px" onclick="resetAcDicts()">恢复默认</button>
+        </div>
+
+        <!-- 数据同步 -->
+        <div style="font-size:12px;font-weight:700;color:var(--fg);margin:16px 0 12px">🔄 数据同步</div>
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px">同步任务和书签到其他设备</div>
+
+        <!-- 上次同步时间 -->
+        <div style="margin-bottom:8px;padding:10px;background:var(--bg-secondary);border-radius:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:11px;color:var(--fg-muted)">上次同步</span>
+            <span id="syncLastTime" style="font-size:11px;color:var(--fg-dim)">从未同步</span>
+          </div>
+          <div id="syncResultRow" style="display:none">
+            <div style="font-size:11px;color:var(--fg-muted);margin-bottom:4px">同步结果</div>
+            <div id="syncResultDetail" style="font-size:10px;color:var(--fg-dim);line-height:1.6"></div>
+          </div>
+        </div>
+
+        <!-- 同步按钮 -->
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <button class="btn-action" id="btnSyncNow" onclick="syncData()">立即同步</button>
+        </div>
+
+        <!-- 自动同步开关 -->
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0">
+          <span style="font-size:11px;color:var(--fg-muted)">自动同步（每5分钟）</span>
+          <label class="sync-toggle">
+            <input type="checkbox" id="autoSyncToggle" onchange="toggleAutoSync(this.checked)">
+            <span class="sync-toggle-slider"></span>
+          </label>
+        </div>
+
+        <!-- 关键路径检测 -->
+        <div style="font-size:12px;font-weight:700;color:var(--fg);margin:16px 0 12px">📊 关键路径检测</div>
+        <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px">基于任务依赖关系和持续时间，计算项目关键路径（CPM）</div>
+        <button class="btn-action" id="btnCriticalPath" onclick="doCriticalPath()" style="margin-bottom:8px">分析关键路径</button>
+        <div id="cpResultBox" style="display:none;padding:10px;background:var(--bg-secondary);border-radius:6px;margin-bottom:8px">
+          <div id="cpResultDetail" style="font-size:10px;color:var(--fg-dim);line-height:1.6"></div>
+        </div>
+        <div id="cpTaskList" style="display:none"></div>
+
+        <!-- 服务器连接（监听刷新入口） -->
+        <div style="font-size:12px;font-weight:700;color:var(--fg);margin:16px 0 12px">🔗 服务器连接</div>
+        <div style="margin-bottom:8px;padding:10px;background:var(--bg-secondary);border-radius:6px">
+          <div style="margin-bottom:8px">
+            <label style="display:block;font-size:11px;color:var(--fg-muted);margin-bottom:4px">自定义服务器 URL</label>
+            <div style="display:flex;gap:6px">
+              <input type="url" id="serverUrlInput" placeholder="http://127.0.0.1:6906" style="flex:1;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px;font-family:monospace" onchange="onServerUrlChange()">
+              <button class="btn-action" style="padding:4px 10px;font-size:11px" onclick="saveServerUrl()">应用</button>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:11px;color:var(--fg-muted)">当前地址</span>
+            <span id="serverUrlDisplay" style="font-size:11px;font-family:monospace;color:var(--fg)">—</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:11px;color:var(--fg-muted)">WebSocket</span>
+            <span id="settingsWsStatus" style="font-size:11px;padding:2px 8px;border-radius:10px;background:var(--fg-dim);color:var(--bg)">检查中...</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:11px;color:var(--fg-muted)">后端版本</span>
+            <span id="serverVersionDisplay" style="font-size:11px;color:var(--fg-dim)">—</span>
+          </div>
+          <div id="serverExtraRow" style="display:none;margin-bottom:6px">
+            <span style="font-size:11px;color:var(--fg-muted)">局域网 IP</span>
+            <span id="serverLanIpDisplay" style="font-size:11px;color:var(--fg-dim)"></span>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn-action" onclick="refreshServerInfo()">⟳ 监听刷新</button>
+          <button class="btn-action btn-outline" onclick="reconnectWebSocket()">重连 WebSocket</button>
+        </div>
+      </div>
+    </div>
+
+    <input type="file" id="fileInput" multiple style="display:none">
+  </div>
+
+  <!-- Resize Handle -->
+  <div class="resize-handle" id="resizeHandle"></div>
+
+  <!-- Main Area -->
+  <div class="main">
+    <div class="toolbar" id="toolbar">
+      <span class="mobile-menu" id="mobileMenu">☰</span>
+      <div class="path-bar" id="pathBar">
+        <span class="crumb" data-path="">~</span>
+        <button class="path-new-btn" id="btnNewFile" title="新建文件 (Ctrl+N)">+ 新建</button>
+      </div>
+      <button class="btn" id="btnNewDir" title="新建目录">📁<span class="btn-label"> 目录</span></button>
+      <button class="btn save-btn" id="btnSave" title="保存 (Ctrl+S)">💾<span class="btn-label"> 保存</span></button>
+      <button class="btn" id="btnKnitPdf" title="编译 Rmd → PDF" style="display:none">📄<span class="btn-label"> PDF</span></button>
+      <button class="btn" id="btnKnitHtml" title="编译 Rmd → HTML" style="display:none">🌐<span class="btn-label"> HTML</span></button>
+      <button class="btn" id="btnKnitDocx" title="编译 Rmd → DOCX" style="display:none">📝<span class="btn-label"> DOCX</span></button>
+      <div class="btn-group" style="position:relative;display:inline-block">
+        <button class="btn" id="btnOpenWith" title="选择打开方式">📂<span class="btn-label"> 打开</span></button>
+        <div id="openWithDropdown" class="dropdown-menu" style="display:none;position:absolute;top:100%;left:0;z-index:1000;background:var(--bg);border:1px solid var(--border);border-radius:6px;min-width:180px;box-shadow:0 4px 12px rgba(0,0,0,0.15)">
+          <div class="dropdown-item" data-ide="jupyter" onclick="openWith('jupyter')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px">📓 JupyterLab</div>
+          <div class="dropdown-item" data-ide="monaco" onclick="openWith('monaco')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px">⚡ Monaco Editor</div>
+          <div class="dropdown-item" data-ide="builtin" onclick="openWith('builtin')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px">📝 内置编辑器</div>
+          <div class="dropdown-item" data-ide="external" onclick="openWith('external')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px">💻 外部编辑器</div>
+          <div class="dropdown-item" data-ide="vscode" onclick="openWith('vscode')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px">💻 VS Code</div>
+          <div class="dropdown-item" data-ide="cursor" onclick="openWith('cursor')" style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px">🖥️ Cursor</div>
+        </div>
+      </div>
+      <button class="btn" id="btnUpload" title="上传文件">📤<span class="btn-label"> 上传</span></button>
+      <button class="btn" id="btnDownload" title="下载文件">📥<span class="btn-label"> 下载</span></button>
+      <button class="btn" id="btnSync" title="同步">🔄<span class="btn-label"> 同步</span></button>
+      <button class="btn" id="btnEditorToggle" title="切换编辑器">📝<span class="btn-label"> 原生</span></button>
+      <button class="btn" id="btnSplitRight" title="向右分屏" onclick="splitPane('right')">⬛<span class="btn-label"> 分屏</span></button>
+      <button class="btn" id="btnSplitAgent" title="分屏打开Agent" onclick="splitPane('agent')">🤖<span class="btn-label"> Agent</span></button>
+      <button class="btn" id="btnTerminal" title="终端 (Ctrl+`)" onclick="toggleTerminal()">⬛<span class="btn-label"> 终端</span></button>
+    </div>
+
+    <div class="editor-area" id="editorArea">
+      <div class="editor-container" id="editorContainer">
+        <div style="display:flex;align-items:stretch;border-bottom:1px solid var(--border)">
+          <div class="editor-tabs" id="editorTabs" style="flex:1"></div>
+          <div style="position:relative;display:flex;align-items:center;padding:0 4px">
+            <button onclick="openBrowser()" title="打开浏览器" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">🌐</button>
+            <button id="recentFilesBtn" title="最近打开的文件" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">🕐</button>
+            <div id="recentFilesDropdown" style="display:none;position:absolute;right:0;top:100%;width:260px;max-height:300px;overflow-y:auto;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:50;padding:4px"></div>
+          </div>
+        </div>
+        <div class="editor-wrapper" id="editorWrapper">
+          <div class="welcome" id="welcomeScreen" style="overflow-y:auto">
+          <div class="welcome-top">
+            <div class="welcome-calendar" id="welcomeCalendar"></div>
+            <div class="welcome-center">
+              <div class="logo-large">TS2</div>
+              <div class="subtitle">Local File Sync Server</div>
+               <div class="shortcuts">
+                <div class="shortcut"><kbd>Ctrl+N</kbd> 新建文件</div>
+                <div class="shortcut"><kbd>Ctrl+S</kbd> 保存</div>
+                <div class="shortcut"><kbd>Ctrl+O</kbd> 打开文件</div>
+                <div class="shortcut" style="cursor:pointer;transition:0.15s" onclick="openBrowser()" title="打开内置浏览器"><kbd>🌐</kbd> 浏览器</div>
+              </div>
+            </div>
+            <div class="welcome-clock-wrapper">
+              <div class="welcome-date" id="welcomeDate">
+                <div class="cal-ring"></div>
+                <div class="cal-body">
+                  <div class="cal-left">
+                    <div class="cal-month" id="calMonth"></div>
+                    <div class="cal-weekday" id="calWeekday"></div>
+                  </div>
+                  <div class="cal-divider"></div>
+                  <div class="cal-right">
+                    <div class="cal-day" id="calDay"></div>
+                  </div>
+                </div>
+              </div>
+              <canvas id="welcomeClock" width="180" height="180"></canvas>
+            </div>
+          </div>
+            <!-- 课程概览 -->
+            <div id="welcomeCoursesSection" style="margin-top:16px;width:100%;max-width:860px;flex-shrink:0">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <div style="font-size:13px;font-weight:700;color:var(--fg)">📚 我的课程</div>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span id="welcomeTtStatus" style="font-size:10px;color:var(--fg-muted);display:none"></span>
+                  <select id="welcomeTtSelector" style="display:none;padding:2px 6px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font-size:10px;cursor:pointer" onchange="switchTimetable(this.value)"></select>
+                  <button onclick="switchNavTab('courses')" style="font-size:11px;color:var(--accent);background:none;border:none;cursor:pointer;padding:2px 6px">管理课程 →</button>
+                </div>
+              </div>
+              <div id="welcomeCoursesList" style="display:flex;gap:8px;flex-wrap:wrap;max-height:200px;overflow-y:auto;padding:2px 0">
+                <div style="color:var(--fg-dim);font-size:12px">加载中...</div>
+              </div>
+            </div>
+            <div class="welcome-columns" style="display:flex;gap:24px;width:100%;max-width:860px;align-items:flex-start;flex-shrink:0">
+              <div class="welcome-left-col" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:12px">
+                <div id="welcomeRecentFiles" style="max-height:400px;overflow-y:auto">
+                  <div style="font-size:12px;color:var(--fg-dim);margin-bottom:8px;padding:0 4px">最近打开</div>
+                  <div id="welcomeRecentList" style="display:flex;flex-direction:column;gap:2px">
+                    <div id="welcomeRecentEmpty" style="color:var(--fg-dim);font-size:12px;padding:8px 4px">暂无最近打开的文件</div>
+                  </div>
+                </div>
+              </div>
+              <div id="welcomePushPanel" style="flex:1;min-width:0;max-height:400px;overflow-y:auto">
+                <div style="font-size:12px;color:var(--fg-dim);margin-bottom:8px;padding:0 4px">📌 待办提醒</div>
+                <div id="welcomePushContent">
+                  <div id="welcomePushEmpty" style="color:var(--fg-dim);font-size:12px;padding:8px 4px">加载中...</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="vditor" style="display:none"></div>
+          <textarea id="plainEditor" style="display:none"></textarea>
+          <div id="pdfViewer" class="pdf-viewer" style="display:none">
+            <div class="pdf-toolbar">
+              <button class="pdf-nav-btn pdf-back-btn" id="pdfCloseBtn" title="关闭 PDF">← 返回</button>
+              <span id="pdfPageInfo">第 1 页 / 共 0 页</span>
+              <div class="pdf-nav">
+                <button class="pdf-nav-btn" id="pdfPrevBtn" disabled>◀</button>
+                <input type="number" id="pdfPageInput" value="1" min="1" max="1">
+                <button class="pdf-nav-btn" id="pdfNextBtn" disabled>▶</button>
+              </div>
+              <button class="pdf-nav-btn" id="pdfZoomOut">🔍-</button>
+              <span id="pdfZoomLevel">100%</span>
+              <button class="pdf-nav-btn" id="pdfZoomIn">🔍+</button>
+              <button class="pdf-nav-btn" id="pdfDualBtn" title="双页视图">📖</button>
+              <button class="pdf-nav-btn" id="pdfOutlineBtn" title="目录">📑 目录</button>
+              <button class="pdf-nav-btn" id="pdfIndexBtn" title="建立索引" style="color:var(--accent);border-color:var(--accent)">建立索引</button>
+              <button class="pdf-nav-btn" id="pdfAiBtn" title="AI 问答" style="background:var(--accent);color:#fff;border-color:var(--accent)">AI问答</button>
+            </div>
+            <div style="display:flex;flex:1;overflow:hidden">
+            <div id="pdfOutlinePanel" style="display:none;flex-direction:column;width:260px;min-width:180px;max-width:30vw;border-right:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0;overflow-y:auto">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg)">
+                <span style="font-size:12px;font-weight:600;color:var(--fg)">目录</span>
+                <button id="pdfOutlineCloseBtn" style="background:transparent;border:none;color:var(--fg-muted);font-size:14px;cursor:pointer;padding:2px 6px;border-radius:4px;line-height:1">✕</button>
+              </div>
+              <div id="pdfOutlineContent" style="padding:4px 0;font-size:12px"></div>
+            </div>
+            <div class="pdf-canvas-container" id="pdfCanvasContainer">
+              <canvas id="pdfCanvas"></canvas>
+              <canvas id="pdfCanvas2" style="display:none"></canvas>
+              <div id="pdfTextLayer" style="position:absolute;top:0;left:0;pointer-events:none;user-select:text;-webkit-user-select:text;"></div>
+            </div>
+            <!-- AI 问答侧边栏 -->
+            <div id="pdfAiPanel" style="display:none;flex-direction:column;width:380px;min-width:320px;max-width:50vw;border-left:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg)">
+                <span style="font-size:14px;font-weight:600;color:var(--fg)">AI 问答</span>
+                <button id="pdfAiCloseBtn" style="background:transparent;border:none;color:var(--fg-muted);font-size:16px;cursor:pointer;padding:2px 6px;border-radius:4px;line-height:1">✕</button>
+              </div>
+              <div id="pdfAiMessages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:12px"></div>
+              <div style="display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--border);background:var(--bg)">
+                <textarea id="pdfAiInput" placeholder="输入问题，回车发送..." rows="2" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg);font-size:13px;resize:none;font-family:inherit;line-height:1.5;outline:none"></textarea>
+                <button id="pdfAiSendBtn" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;align-self:flex-end">发送</button>
+              </div>
+            </div>
+            </div>
+          </div>
+          <!-- Slides Editor -->
+          <div id="slidesEditorView" style="display:none;flex-direction:column">
+            <div style="padding:4px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;background:var(--bg)">
+              <input type="text" id="slidesPageTitle" placeholder="页面标题（可选）" style="flex:1;padding:4px 8px;border:1px solid transparent;border-radius:4px;background:transparent;color:var(--fg);font-size:14px;font-weight:500">
+            </div>
+            <div id="slidesVditor" style="flex:1;min-height:0;overflow:auto"></div>
+            <div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:6px 16px;border-top:1px solid var(--border);background:var(--bg-secondary)">
+              <button class="btn-action btn-outline" onclick="slidesPrev()" id="slidesPrevBtn" style="font-size:11px;padding:4px 10px">◀ 上一页</button>
+              <span style="font-size:13px"><span id="slidesCurrentNum" style="font-weight:700;color:var(--accent);font-size:16px">1</span><span style="color:var(--fg-muted)"> / </span><span id="slidesTotalNum" style="color:var(--fg-muted)">1</span></span>
+              <button class="btn-action" onclick="slidesNext()" id="slidesNextBtn" style="font-size:11px;padding:4px 10px">下一页 ▶</button>
+              <button class="btn-action btn-outline" onclick="slidesAddPage()" style="font-size:11px;padding:4px 10px;border-style:dashed">+ 新页</button>
+              <span id="slidesSaveStatus" style="font-size:11px;color:#4ade80"></span>
+            </div>
+          </div>
+          <div id="kmindEditorView" style="display:none;flex-direction:column;background:var(--bg)">
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 12px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0">
+              <span style="font-size:12px;font-weight:700;color:var(--fg)">🧠 思维导图</span>
+              <button class="btn-action" onclick="kmindSave()" style="font-size:11px;padding:3px 10px">💾 保存</button>
+              <button class="btn-action btn-outline" onclick="kmindExportPNG()" style="font-size:11px;padding:3px 10px">🖼 导出PNG</button>
+              <span id="kmindSaveStatus" style="font-size:11px;color:#4ade80;margin-left:auto"></span>
+            </div>
+            <div id="kmindIframeWrap" style="flex:1;position:relative;overflow:hidden">
+            </div>
+          </div>
+          <div id="jupyterEditorView" style="display:none;flex-direction:column;background:var(--bg)">
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 12px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0">
+              <span style="font-size:12px;font-weight:700;color:var(--fg)">📓 JupyterLab</span>
+              <span id="jupyterStatus" style="font-size:11px;color:var(--fg-muted);margin-left:auto"></span>
+            </div>
+            <div id="jupyterIframeWrap" style="flex:1;position:relative;overflow:hidden">
+            </div>
+          </div>
+          <div id="monacoEditorView" style="display:none;flex-direction:column;background:var(--bg)">
+            <div style="display:flex;align-items:center;gap:6px;padding:2px 8px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0;min-height:28px">
+              <button id="monacoRunBtn" onclick="execMonacoCode()" style="background:#238636;color:#fff;border:none;border-radius:4px;padding:2px 10px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px">▶ <span style="font-weight:400;font-size:10px">运行</span></button>
+              <button id="monacoStopBtn" onclick="stopMonacoCode()" style="display:none;background:#da3633;color:#fff;border:none;border-radius:4px;padding:2px 10px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px">■ <span style="font-weight:400;font-size:10px">停止</span></button>
+              <button id="monacoRunTerminalBtn" onclick="runInTerminal()" title="在终端中运行 (Ctrl+Shift+Enter)" style="background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px">⬇ <span style="font-weight:400;font-size:10px">终端</span></button>
+              <span id="monacoExecStatus" style="font-size:10px;color:var(--fg-muted);min-width:40px"></span>
+              <span style="font-size:9px;color:var(--fg-dim);margin-left:auto">Ctrl+Enter · Ctrl+Shift+Enter ⬇</span>
+            </div>
+            <div id="monacoEditorWrap" style="flex:1;position:relative;overflow:hidden">
+            </div>
+            <div class="monaco-statusbar" id="monacoStatusBar">
+              <span id="monacoCursorPos">Ln 1, Col 1</span>
+              <span id="monacoLangStatus"></span>
+              <span class="right">
+                <span id="monacoFilePath" style="color:var(--fg-dim);max-width:300px;overflow:hidden;text-overflow:ellipsis"></span>
+              </span>
+            </div>
+            <div id="monacoOutput" style="display:none;max-height:160px;overflow-y:auto;border-top:1px solid var(--border);background:#0d1117;font-family:'JetBrains Mono','Fira Code',Consolas,monospace;font-size:12px;line-height:1.5;padding:6px 10px;white-space:pre-wrap;word-break:break-all;color:#e6edf3"></div>
+          </div>
+          <div id="browserView" style="display:none;flex-direction:column;background:var(--bg)">
+            <div style="display:flex;align-items:center;gap:4px;padding:4px 8px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0">
+              <button onclick="browserGoBack()" title="后退" style="background:none;border:none;color:var(--fg);cursor:pointer;font-size:14px;padding:2px 4px;line-height:1">◀</button>
+              <button onclick="browserGoForward()" title="前进" style="background:none;border:none;color:var(--fg);cursor:pointer;font-size:14px;padding:2px 4px;line-height:1">▶</button>
+              <button onclick="browserRefresh()" title="刷新" style="background:none;border:none;color:var(--fg);cursor:pointer;font-size:14px;padding:2px 4px;line-height:1">⟳</button>
+              <input id="browserUrlInput" type="text" style="flex:1;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:12px;color:var(--fg);outline:none"
+                placeholder="输入网址..." onkeydown="if(event.key==='Enter') navigateBrowser(this.value)">
+            </div>
+            <iframe id="browserFrame" style="flex:1;border:none;background:#fff"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Terminal Panel ─── -->
+    <div class="terminal-panel" id="terminalPanel">
+      <div class="terminal-resize-handle" id="terminalResizeHandle"></div>
+      <div class="terminal-header">
+        <span>终端</span>
+        <div>
+          <button id="btnTerminalNew" title="新建终端" onclick="initTerminal()">+</button>
+          <button id="btnTerminalKill" title="杀掉会话" onclick="killTerminal()">✕</button>
+          <button id="btnTerminalReconnect" title="重新连接" onclick="initTerminal()">↻</button>
+          <button title="隐藏( Ctrl+` )" onclick="toggleTerminal()">_</button>
+        </div>
+      </div>
+      <div class="terminal-body" id="terminalBody"></div>
+    </div>
+
+    <div class="statusbar">
+      <div class="left">
+        <span id="statusPath">就绪</span>
+        <span id="statusInfo"></span>
+      </div>
+      <div class="right">
+        <span id="statusSync">空闲</span>
+        <span id="statusWs">
+          <span class="indicator disconnected" id="wsIndicator"></span>
+          WebSocket
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Context Menu -->
+<div class="context-menu" id="contextMenu">
+  <div class="context-menu-item" data-action="open">📂 打开</div>
+  <div class="context-menu-item" data-action="rename">✏️ 重命名</div>
+  <div class="context-menu-item" data-action="duplicate">📋 复制</div>
+  <div class="context-menu-item" data-action="download">📥 下载</div>
+  <div class="context-menu-sep"></div>
+  <div class="context-menu-item" data-action="addResource" id="ctxAddResource" style="display:none">📎 添加为课程资源</div>
+  <div class="context-menu-sep" id="ctxAddResourceSep" style="display:none"></div>
+  <div class="context-menu-item" data-action="openWith" id="ctxOpenWith" style="display:none">📂 用...打开</div>
+  <div class="context-menu-item" data-action="externalEdit" id="ctxExternalEdit" style="display:none">💻 外部编辑器打开</div>
+  <div class="context-menu-item" data-action="delete" style="color:var(--red)">🗑️ 删除</div>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal" id="modalBox">
+    <h3 id="modalTitle">新建文件</h3>
+    <div id="modalBody">
+      <input type="text" id="modalInput" placeholder="输入名称...">
+      <select id="modalDirSelect" style="display:none"></select>
+    </div>
+    <div class="actions">
+      <button class="btn" id="modalCancel">取消</button>
+      <button class="btn primary" id="modalConfirm">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- IDE Picker Modal -->
+<div class="modal-overlay" id="idePickerOverlay" style="display:none">
+  <div class="modal" id="idePickerBox" style="max-width:420px">
+    <h3>选择打开方式</h3>
+    <div id="idePickerBody" style="padding:10px 0">
+      <div class="ide-option" data-ide="jupyter" onclick="openWith('jupyter')" style="padding:12px;cursor:pointer;display:flex;align-items:center;gap:10px;border-radius:8px;margin:4px 0">
+        <span style="font-size:24px">📓</span>
+        <div><strong>JupyterLab</strong><br><small style="color:var(--text-dim)">Python / 数据科学 / Notebook</small></div>
+      </div>
+      <div class="ide-option" data-ide="monaco" onclick="openWith('monaco')" style="padding:12px;cursor:pointer;display:flex;align-items:center;gap:10px;border-radius:8px;margin:4px 0">
+        <span style="font-size:24px">⚡</span>
+        <div><strong>Monaco Editor</strong><br><small style="color:var(--text-dim)">代码编辑器 / 语法高亮 / 智能提示</small></div>
+      </div>
+      <div class="ide-option" data-ide="builtin" onclick="openWith('builtin')" style="padding:12px;cursor:pointer;display:flex;align-items:center;gap:10px;border-radius:8px;margin:4px 0">
+        <span style="font-size:24px">📝</span>
+        <div><strong>内置编辑器</strong><br><small style="color:var(--text-dim)">Vditor / 纯文本 / Markdown</small></div>
+      </div>
+      <div class="ide-option" data-ide="external" onclick="openWith('external')" style="padding:12px;cursor:pointer;display:flex;align-items:center;gap:10px;border-radius:8px;margin:4px 0">
+        <span style="font-size:24px">💻</span>
+        <div><strong>外部编辑器</strong><br><small style="color:var(--text-dim)">系统默认应用打开</small></div>
+      </div>
+      <div class="ide-option" data-ide="vscode" onclick="openWith('vscode')" style="padding:12px;cursor:pointer;display:flex;align-items:center;gap:10px;border-radius:8px;margin:4px 0">
+        <span style="font-size:24px">🔷</span>
+        <div><strong>VS Code</strong><br><small style="color:var(--text-dim)">vscode://file/{path}</small></div>
+      </div>
+      <div class="ide-option" data-ide="cursor" onclick="openWith('cursor')" style="padding:12px;cursor:pointer;display:flex;align-items:center;gap:10px;border-radius:8px;margin:4px 0">
+        <span style="font-size:24px">🖥️</span>
+        <div><strong>Cursor</strong><br><small style="color:var(--text-dim)">cursor://file/{path}</small></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="document.getElementById('idePickerOverlay').style.display='none'">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- Task Modal -->
+<div class="modal-overlay" id="taskModalOverlay">
+  <div class="modal" id="taskModalBox">
+    <h3 id="taskModalTitle">新建任务</h3>
+    <div class="task-modal-body" id="taskModalBody">
+      <label>标题</label>
+      <input type="text" id="taskModalTitleInput" placeholder="任务标题...">
+      <label>描述</label>
+      <textarea id="taskModalDesc" rows="2" placeholder="任务描述（可选）"></textarea>
+      <div class="modal-row">
+        <div class="modal-field">
+          <label>优先级</label>
+          <select id="taskModalPriority">
+            <option value="低">低</option>
+            <option value="中" selected>中</option>
+            <option value="高">高</option>
+          </select>
+        </div>
+        <div class="modal-field">
+          <label>循环</label>
+          <select id="taskModalRecurrence">
+            <option value="不循环">不循环</option>
+            <option value="每天">每天</option>
+            <option value="每周">每周</option>
+            <option value="每月">每月</option>
+            <option value="工作日">工作日</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-row">
+        <div class="modal-field">
+          <label>截止日期</label>
+          <input type="date" id="taskModalDueDate">
+        </div>
+        <div class="modal-field">
+          <label>开始时间</label>
+          <input type="datetime-local" id="taskModalStartTime">
+        </div>
+      </div>
+      <div class="modal-row">
+        <div class="modal-field">
+          <label>时长（分钟）</label>
+          <input type="number" id="taskModalDuration" value="60" min="1">
+        </div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="taskModalCancel">取消</button>
+      <button class="btn primary" id="taskModalConfirm">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Transfer Panel -->
+<div class="transfer-panel" id="transferPanel">
+  <div class="panel-header">
+    <span>📤 传输列表</span>
+    <span class="copy-btn" id="closeTransferPanel" style="cursor:pointer">✕</span>
+  </div>
+  <div class="panel-body" id="transferList"></div>
+</div>
+
+<!-- 健康警告横幅（页面级，所有浮层之上） -->
+<div class="health-banner" id="healthBanner">
+  <span id="healthBannerText">⚠️ 生命硬约束触发：体能透支 / 注意力耗尽，已强制冻结新任务启动。请先休息。</span>
+  <button class="rest-btn" onclick="recoverDashAttention();document.getElementById('healthBanner').classList.remove('active')">🛌 休息</button>
+</div>
+
+<!-- 快捷键帮助浮层 -->
+<div class="shortcut-help-overlay" id="shortcutHelpOverlay" onclick="if(event.target===this)closeShortcutHelp()">
+  <div class="shortcut-help-box">
+    <h2>⌨️ 键盘快捷键</h2>
+    <div class="shortcut-help-grid">
+      <kbd>J</kbd><span class="sh-desc">下一项（树视图 / 列表）</span>
+      <kbd>K</kbd><span class="sh-desc">上一项</span>
+      <kbd>↓</kbd><span class="sh-desc">下一项（同 J）</span>
+      <kbd>↑</kbd><span class="sh-desc">上一项（同 K）</span>
+      <kbd>Enter</kbd><span class="sh-desc">采纳当前高亮项 / 进入详情</span>
+      <kbd>Space</kbd><span class="sh-desc">切换折叠 / 展开</span>
+      <kbd>Esc</kbd><span class="sh-desc">关闭面板 / 取消</span>
+      <kbd>R</kbd><span class="sh-desc">启动休息</span>
+      <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd><span class="sh-desc">选中对应选项 A/B/C/D</span>
+      <kbd>?</kbd><span class="sh-desc">打开此帮助浮层</span>
+      <kbd>D</kbd><span class="sh-desc">归档当前选中 Plan（需二次确认）</span>
+      <kbd>N</kbd><span class="sh-desc">新建 Plan / Task</span>
+      <kbd>G</kbd><span class="sh-desc">在当前决策点生成新选项</span>
+      <kbd>F</kbd><span class="sh-desc">标记当前时段为机遇窗口</span>
+      <kbd>M</kbd><span class="sh-desc">修订契约（打开自定义框）</span>
+      <kbd>Tab</kbd><span class="sh-desc">在三栏间切换焦点</span>
+      <kbd>Ctrl+S</kbd><span class="sh-desc">保存当前文件</span>
+    </div>
+    <div class="shortcut-help-close"><button onclick="closeShortcutHelp()">关闭</button></div>
+  </div>
+</div>
+
+<!-- 🧭 HUD 浮层（自由漂浮，挂 body 顶层，独立于 .app；仅 dashboard 激活时显示） -->
+<div class="hud-overlay" id="hudOverlay" data-label="🧭 HUD">
+  <div class="overlay-drag-handle" data-drag-target="hudOverlay" title="拖动">⋮⋮</div>
+  <button class="overlay-collapse-btn" onclick="_toggleOverlay('hudOverlay')" title="收起/展开">➖</button>
+  <div class="hud-cells">
+    <button class="hud-agent-btn" id="hudAgentBtn" title="一键调用 Generator 生成建议">⚡ Agent</button>
+    <div class="hud-cell" data-metric="life" id="hudLife" title="生命资源">
+      <div class="hud-cell-icon">⏳</div>
+      <div class="hud-cell-body">
+        <div class="hud-cell-label">生命资源</div>
+        <div class="hud-cell-value" id="hudLifeValue">— / —</div>
+        <div class="hud-cell-sub" id="hudLifeSub">注意力 — · 体能 —</div>
+        <div class="hud-cell-meta" id="hudLifeMeta" style="font-size:8px;color:var(--fg-dim);line-height:1;margin-top:1px;white-space:nowrap"></div>
+      </div>
+    </div>
+    <div class="hud-cell" data-metric="cognitive" id="hudCognitive" title="认知层级">
+      <div class="hud-cell-icon">🧠</div>
+      <div class="hud-cell-body">
+        <div class="hud-cell-label">认知层级</div>
+        <div class="hud-cell-value" id="hudCogValue">—</div>
+        <div class="hud-cell-sub" id="hudCogSub">无活动 Plan</div>
+      </div>
+    </div>
+    <div class="hud-cell" data-metric="intensity" id="hudIntensity" title="天使介入度 I(P)">
+      <div class="hud-cell-icon">🧑‍🏫</div>
+      <div class="hud-cell-body">
+        <div class="hud-cell-label">天使介入度</div>
+        <div class="hud-cell-value" id="hudIntValue">—</div>
+        <div class="hud-intensity-bar"><div class="hud-intensity-fill" id="hudIntFill"></div></div>
+      </div>
+    </div>
+    <div class="hud-cell" data-metric="verify" id="hudVerify" title="核验率">
+      <div class="hud-cell-icon">✅</div>
+      <div class="hud-cell-body">
+        <div class="hud-cell-label">核验率</div>
+        <div class="hud-cell-value" id="hudVerifyValue">—</div>
+        <div class="hud-cell-sub" id="hudVerifySub">无记录</div>
+      </div>
+    </div>
+    <div class="hud-cell" data-metric="opportunity" id="hudOpp" title="机遇">
+      <div class="hud-cell-icon">🌌</div>
+      <div class="hud-cell-body">
+        <div class="hud-cell-label">机遇</div>
+        <div class="hud-cell-value" id="hudOppValue">0</div>
+        <div class="hud-cell-sub" id="hudOppSub">无活动窗口</div>
+      </div>
+    </div>
+    <div class="hud-cell" data-metric="message" id="hudMsg" title="消息">
+      <div class="hud-cell-icon">📡</div>
+      <div class="hud-cell-body">
+        <div class="hud-cell-label">消息</div>
+        <div class="hud-cell-value" id="hudMsgValue">0</div>
+        <div class="hud-cell-sub" id="hudMsgSub">无新消息</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 📡 副驾驶日志浮层（自由漂浮，挂 body 顶层，独立于 .app；仅 dashboard 激活时显示） -->
+<div class="copilot-overlay" id="copilotLog" data-label="📡 日志">
+  <div class="overlay-drag-handle" data-drag-target="copilotLog" title="拖动">⋮⋮</div>
+  <button class="overlay-collapse-btn" onclick="_toggleOverlay('copilotLog')" title="收起/展开">➖</button>
+  <div class="copilot-log-header" id="copilotLogHeader">
+    <span class="copilot-log-summary" id="copilotLogSummary">📡 副驾驶日志（点击展开）</span>
+    <span class="copilot-log-tags">
+      <span class="copilot-tag" data-tag="system">⚖️ 系统 <em id="copilotCountSystem">0</em></span>
+      <span class="copilot-tag" data-tag="agent">🤝 Agent <em id="copilotCountAgent">0</em></span>
+      <span class="copilot-tag" data-tag="rag">🌌 RAG <em id="copilotCountRag">0</em></span>
+      <span class="copilot-tag" data-tag="life">⏳ 生命 <em id="copilotCountLife">0</em></span>
+      <span class="copilot-tag" data-tag="opportunity">🌌 机遇 <em id="copilotCountOpp">0</em></span>
+    </span>
+  </div>
+  <div class="copilot-log-list" id="copilotLogList" style="display:none"></div>
+</div>
+
+<div id="eyeRestOverlay" style="display:none;position:fixed;inset:0;z-index:999999;background:#000;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:var(--font-sans);cursor:pointer">
+  <div style="font-size:72px;font-weight:200;margin-bottom:20px;font-variant-numeric:tabular-nums" id="eyeRestCountdown">20</div>
+  <div style="font-size:18px;opacity:0.6;margin-bottom:40px">👁 该休息一下了</div>
+  <div style="font-size:13px;opacity:0.3;position:absolute;bottom:40px">点击任意位置跳过</div>
+</div>
+
+<script id="vditorScriptTag" src="/static/vditor/index.min.js" defer></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
