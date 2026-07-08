@@ -1,0 +1,204 @@
+/* ═══════════════════════════════════════════════════════
+   主题系统：light（白天） / dark（黑夜）
+   通过 html[data-theme="light"] 或 html[data-theme="dark"] 切换
+   默认 dark 模式
+   ═══════════════════════════════════════════════════════ */
+
+/* ─── 黑夜模式（默认） ─── */
+:root,
+html[data-theme="dark"] {
+  --bg: #1a1b26;
+  --bg-secondary: #24283b;
+  --bg-tertiary: #1a1b26;
+  --bg-elevated: #24283b;
+  --fg: #c0caf5;
+  --fg-muted: #565f89;
+  --fg-dim: #565f89;
+  --accent: #7aa2f7;
+  --accent-hover: #89b4fa;
+  --accent-rgb: 122, 162, 247;
+  --border: #414868;
+  --card: #24283b;
+  --danger: #f7768e;
+  --danger-rgb: 247, 118, 142;
+  --success: #9ece6a;
+  --success-rgb: 158, 206, 106;
+  --warning: #e0af68;
+  --editor-bg: #1a1b26;
+  --toolbar-bg: #24283b;
+  --toolbar-item: #565f89;
+  --toolbar-item-hover: #c0caf5;
+  --outline-bg: #24283b;
+  --outline-item: #565f89;
+  --outline-item-hover-bg: #1a1b26;
+  --outline-item-hover-fg: #c0caf5;
+  --outline-active-bg: rgba(122, 162, 247, 0.12);
+  --outline-active-fg: #7aa2f7;
+  --dropdown-bg: #24283b;
+  --dropdown-item: #565f89;
+  --dropdown-item-hover-bg: #1a1b26;
+  --dropdown-item-hover-fg: #c0caf5;
+  --input-bg: #1a1b26;
+  --input-fg: #c0caf5;
+  --input-border: #414868;
+  --header-bg: #24283b;
+  --btn-bg: #1a1b26;
+  --btn-fg: #c0caf5;
+  --btn-border: #565f89;
+  --btn-hover-bg: #414868;
+  --btn-hover-fg: #ffffff;
+  --btn-hover-border: #7aa2f7;
+  --shadow-color: rgba(0,0,0,0.3);
+}
+
+/* ─── 白天模式 ─── */
+html[data-theme="light"] {
+  --bg: #f5f5f0;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e8e8e4;
+  --bg-elevated: #ffffff;
+  --fg: #2c2c2c;
+  --fg-muted: #737373;
+  --fg-dim: #999999;
+  --accent: #4f73d1;
+  --accent-hover: #3b5fc0;
+  --accent-rgb: 79, 115, 209;
+  --border: #d4d4d0;
+  --card: #ffffff;
+  --danger: #d32f2f;
+  --danger-rgb: 211, 47, 47;
+  --success: #2e7d32;
+  --success-rgb: 46, 125, 50;
+  --warning: #e65100;
+  --editor-bg: #ffffff;
+  --toolbar-bg: #f0f0ec;
+  --toolbar-item: #999999;
+  --toolbar-item-hover: #2c2c2c;
+  --outline-bg: #f0f0ec;
+  --outline-item: #999999;
+  --outline-item-hover-bg: #e8e8e4;
+  --outline-item-hover-fg: #2c2c2c;
+  --outline-active-bg: rgba(79, 115, 209, 0.12);
+  --outline-active-fg: #4f73d1;
+  --dropdown-bg: #ffffff;
+  --dropdown-item: #737373;
+  --dropdown-item-hover-bg: #e8e8e4;
+  --dropdown-item-hover-fg: #2c2c2c;
+  --input-bg: #ffffff;
+  --input-fg: #2c2c2c;
+  --input-border: #d4d4d0;
+  --header-bg: #ffffff;
+  --btn-bg: #ffffff;
+  --btn-fg: #555555;
+  --btn-border: #b0b0ac;
+  --btn-hover-bg: #e8e8e4;
+  --btn-hover-fg: #2c2c2c;
+  --btn-hover-border: #4f73d1;
+  --shadow-color: rgba(0,0,0,0.12);
+}
+
+/* ─── AMOLED 纯黑模式（叠加在 dark 之上） ─── */
+html.theme-black {
+  --bg: #000000;
+  --bg-secondary: #0a0a0a;
+  --bg-tertiary: #000000;
+  --bg-elevated: #0a0a0a;
+  --border: #1a1a1a;
+  --card: #0a0a0a;
+  --input-bg: #000000;
+  --editor-bg: #000000;
+  --toolbar-bg: #0a0a0a;
+  --dropdown-bg: #0a0a0a;
+  --outline-bg: #0a0a0a;
+  --header-bg: #0a0a0a;
+  --btn-bg: #000000;
+  --shadow-color: rgba(0,0,0,0.6);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  height: 100%;
+}
+
+.view {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.view-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 48px;
+  padding: 0 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.view-header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.view-body {
+  flex: 1;
+  padding: 16px;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+  background: var(--accent);
+  color: var(--bg);
+  transition: background 0.2s;
+}
+
+button:hover {
+  background: var(--accent-hover);
+}
+
+input, textarea, select {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+}
