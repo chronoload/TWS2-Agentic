@@ -130,6 +130,15 @@ class AutomationPersistence:
                 CREATE INDEX IF NOT EXISTS idx_logs_created
                     ON automation_logs(created_at);
             """)
+            
+            # 数据库迁移
+            self._migrate_db(conn)
+    
+    def _migrate_db(self, conn):
+        """添加缺失的列"""
+        # 目前 automation_tasks 和 automation_runs 的列已经完整
+        # 这里预留用于未来扩展
+        pass
 
     def save_task(self, task: AutomationTask):
         now = datetime.now().isoformat()

@@ -160,6 +160,16 @@ class TimetablePersistence:
         self.db_path = os.path.join(db_dir, "timetables.json")
         self._lock = threading.RLock()
 
+    def _resolve_db_path(self):
+        """查找数据文件路径，优先系统目录，回退旧位置"""
+        if os.path.exists(self.db_path):
+            return self.db_path
+        legacy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "timetables.json")
+        legacy_path = os.path.normpath(legacy_path)
+        if os.path.exists(legacy_path):
+            return legacy_path
+        return self.db_path
+
     def save(self, timetables: Dict[str, Timetable]):
         with self._lock:
             data = {}
@@ -170,15 +180,69 @@ class TimetablePersistence:
 
     def load(self) -> Dict[str, Timetable]:
         with self._lock:
-            if not os.path.exists(self.db_path):
+            db_path = self._resolve_db_path()
+            if not os.path.exists(db_path):
                 return {}
             try:
-                with open(self.db_path, "r", encoding="utf-8") as f:
+                with open(db_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 return {tid: Timetable.from_dict(d) for tid, d in data.items()}
             except Exception:
                 logger.debug("Failed to load timetables", exc_info=True)
                 return {}
+
+    def export_timetable(self, timetable_id: str, export_path: str) -> bool:
+        """导出指定课程表到文件"""
+        with self._lock:
+            try:
+                timetables = self.load()
+                if timetable_id not in timetables:
+                    return False
+                timetable = timetables[timetable_id]
+                export_data = timetable.to_dict()
+                with open(export_path, "w", encoding="utf-8") as f:
+                    json.dump(export_data, f, ensure_ascii=False, indent=2)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to export timetable: {e}", exc_info=True)
+                return False
+
+    def import_timetable(self, import_path: str) -> Optional[Timetable]:
+        """从文件导入课程表"""
+        with self._lock:
+            try:
+                with open(import_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                timetable = Timetable.from_dict(data)
+                if not timetable.timetable_id:
+                    timetable.timetable_id = f"tt_{uuid.uuid4().hex[:8]}"
+                timetables = self.load()
+                # 避免ID冲突
+                if timetable.timetable_id in timetables:
+                    timetable.timetable_id = f"tt_{uuid.uuid4().hex[:8]}"
+                # 将新导入的课程表设为启用，其他设为禁用
+                timetable.enabled = True
+                for tt in timetables.values():
+                    tt.enabled = False
+                timetables[timetable.timetable_id] = timetable
+                self.save(timetables)
+                return timetable
+            except Exception as e:
+                logger.error(f"Failed to import timetable: {e}", exc_info=True)
+                return None
+
+    def export_all_timetables(self, export_path: str) -> bool:
+        """导出所有课程表到文件"""
+        with self._lock:
+            try:
+                timetables = self.load()
+                export_data = {tid: tt.to_dict() for tid, tt in timetables.items()}
+                with open(export_path, "w", encoding="utf-8") as f:
+                    json.dump(export_data, f, ensure_ascii=False, indent=2)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to export all timetables: {e}", exc_info=True)
+                return False
 
 
 class CourseSimulationEngine:
@@ -205,6 +269,7 @@ class CourseSimulationEngine:
         self._agent = agent
         self._llm = llm
         self._ws2_system = ws2_system  # WS2系统引用
+        self._event_bus = None  # 事件总线引用
 
     def _load_timetables(self):
         loaded = self._persistence.load()
@@ -252,6 +317,10 @@ class CourseSimulationEngine:
     def set_llm(self, llm):
         with self._lock:
             self._llm = llm
+
+    def set_event_bus(self, event_bus):
+        with self._lock:
+            self._event_bus = event_bus
 
     def add_timetable(self, timetable: Timetable) -> str:
         with self._lock:
@@ -306,6 +375,16 @@ class CourseSimulationEngine:
             if self._timetables:
                 return next(iter(self._timetables.values()))
             return None
+    
+    def set_active_timetable(self, timetable_id: str) -> bool:
+        """设置指定ID的课程表为当前启用的课程表"""
+        with self._lock:
+            if timetable_id not in self._timetables:
+                return False
+            for tt in self._timetables.values():
+                tt.enabled = (tt.timetable_id == timetable_id)
+            self._save_timetables()
+            return True
 
     def get_slot_at(self, day: int, period_idx: int) -> Optional[TimetableSlot]:
         with self._lock:
@@ -327,6 +406,26 @@ class CourseSimulationEngine:
                 key = f"{slot.day_of_week}_{slot.period_idx}"
                 result[key] = slot
             return result
+
+    def get_all_timetables(self) -> Dict[str, Timetable]:
+        with self._lock:
+            return self._timetables.copy()
+
+    def export_timetable(self, timetable_id: str, export_path: str) -> bool:
+        """导出指定课程表"""
+        return self._persistence.export_timetable(timetable_id, export_path)
+
+    def import_timetable(self, import_path: str) -> Optional[Timetable]:
+        """导入课程表"""
+        timetable = self._persistence.import_timetable(import_path)
+        if timetable:
+            # 重新加载课程表到内存
+            self._load_timetables()
+        return timetable
+
+    def export_all_timetables(self, export_path: str) -> bool:
+        """导出所有课程表"""
+        return self._persistence.export_all_timetables(export_path)
 
     def get_current_slot(self) -> Optional[TimetableSlot]:
         with self._lock:
@@ -476,6 +575,17 @@ class CourseSimulationEngine:
             self._update_elapsed_time()
             logger.info("Entered course mode: %s (%s)", slot.course_name, slot.slot_id)
 
+            if self._event_bus:
+                self._event_bus.publish("course.slot_entered", {
+                    "course_id": slot.course_id,
+                    "course_name": slot.course_name,
+                    "slot_id": slot.slot_id,
+                    "start_time": slot.start_time,
+                    "end_time": slot.end_time,
+                    "location": slot.location,
+                    "teacher": slot.teacher,
+                })
+
     def exit_course_mode(self) -> None:
         with self._lock:
             self._exit_course_mode_unlocked()
@@ -609,18 +719,8 @@ class CourseSimulationEngine:
         if self._root is None:
             return
 
-        # 注册课程系统工具到Agent
-        if self._agent:
-            try:
-                from .course_tools import register_course_tools
-                register_course_tools(
-                    self._agent, 
-                    course_sim_engine=self,
-                    ws2_system=self._ws2_system,
-                    course_tracker=self._course_tracker
-                )
-            except Exception as e:
-                logger.warning(f"注册课程系统工具失败: {e}")
+        # 课程系统工具已经在ws2_tools.py中统一管理
+        # Agent会通过get_ws2_tools函数自动获取到课程系统工具
 
         self._teacher_window = tk.Toplevel(self._root)
         self._teacher_window.title(f"教师模型 - {slot.course_name}")
@@ -703,7 +803,7 @@ class CourseSimulationEngine:
         input_frame = ttk.Frame(main_frame)
         input_frame.pack(fill=tk.X, pady=(5, 0))
 
-        self._teacher_input_widget = ttk.Entry(input_frame, font=("Microsoft YaHei UI", 10))
+        self._teacher_input_widget = ttk.Entry(input_frame, font=("Microsoft YaHei UI", 10), width=80)
         self._teacher_input_widget.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         self._teacher_input_widget.bind("<Return>", self._on_teacher_send)
 
@@ -792,11 +892,160 @@ class CourseSimulationEngine:
             return
         try:
             self._teacher_chat_widget.configure(state=tk.NORMAL)
-            self._teacher_chat_widget.insert(tk.END, f"[{role}] {content}\n\n")
+            
+            # 尝试解析并格式化JSON
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, dict):
+                    # 格式化字典数据
+                    formatted = self._format_dict_for_display(parsed)
+                    self._teacher_chat_widget.insert(tk.END, f"[{role}] {formatted}\n\n")
+                elif isinstance(parsed, list):
+                    # 格式化列表数据
+                    formatted = self._format_list_for_display(parsed)
+                    self._teacher_chat_widget.insert(tk.END, f"[{role}] {formatted}\n\n")
+                else:
+                    self._teacher_chat_widget.insert(tk.END, f"[{role}] {content}\n\n")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                # 不是有效的JSON，原样显示
+                self._teacher_chat_widget.insert(tk.END, f"[{role}] {content}\n\n")
+            
             self._teacher_chat_widget.configure(state=tk.DISABLED)
             self._teacher_chat_widget.see(tk.END)
         except Exception:
             pass
+    
+    def _format_dict_for_display(self, data: dict) -> str:
+        """将字典格式化为易读的文本"""
+        if not data:
+            return "【空数据】"
+        
+        lines = []
+        
+        # 检查是否是待办任务或状态数据
+        if any(key in data for key in ["tasks", "todos", "task_list", "items", "summary", "status"]):
+            lines.append("📊 数据概览")
+            lines.append("-" * 40)
+            
+            for key, value in data.items():
+                if key in ["tasks", "todos", "task_list", "items"] and isinstance(value, list):
+                    lines.append(f"\n📋 {key.title()} ({len(value)}项):")
+                    for idx, item in enumerate(value, 1):
+                        if isinstance(item, dict):
+                            task_line = self._format_task_for_display(item, idx)
+                            lines.append(task_line)
+                        else:
+                            lines.append(f"  {idx}. {str(item)}")
+                elif key in ["summary", "status"]:
+                    if isinstance(value, dict):
+                        lines.append(f"\n📊 {key.title()}:")
+                        for k, v in value.items():
+                            lines.append(f"  • {k}: {v}")
+                    else:
+                        lines.append(f"\n📊 {key.title()}: {value}")
+                else:
+                    lines.append(f"\n📋 {key}: {value}")
+            
+            lines.append("\n" + "-" * 40)
+        elif any(key in data for key in ["title", "name", "status", "priority", "due_date", "description", "id"]):
+            # 单个任务或项目
+            lines.append(self._format_task_for_display(data, None))
+        else:
+            # 普通字典
+            lines.append("📋 数据:")
+            for key, value in data.items():
+                key_display = {
+                    "success": "✅成功",
+                    "error": "❌错误",
+                    "data": "📊数据",
+                    "results": "📋结果",
+                    "message": "💬消息",
+                    "count": "🔢数量",
+                    "title": "📝标题",
+                    "content": "📄内容",
+                    "id": "🆔编号",
+                    "name": "📛名称",
+                    "description": "📝描述",
+                    "priority": "⚡优先级",
+                    "status": "📊状态",
+                    "due_date": "📅截止日期",
+                }.get(key.lower(), key)
+                
+                if isinstance(value, dict):
+                    lines.append(f"\n  {key_display}:")
+                    for k, v in value.items():
+                        lines.append(f"    • {k}: {v}")
+                elif isinstance(value, list):
+                    lines.append(f"\n  {key_display}: [{len(value)}项]")
+                else:
+                    lines.append(f"\n  {key_display}: {value}")
+        
+        return "\n".join(lines)
+    
+    def _format_list_for_display(self, data: list) -> str:
+        """将列表格式化为易读的文本"""
+        if not data:
+            return "【空列表】"
+        
+        lines = []
+        lines.append(f"📋 列表 ({len(data)}项):")
+        lines.append("-" * 40)
+        
+        for idx, item in enumerate(data, 1):
+            if isinstance(item, dict):
+                if any(key in item for key in ["title", "name", "status", "priority"]):
+                    # 任务类数据
+                    task_line = self._format_task_for_display(item, idx)
+                    lines.append(task_line)
+                else:
+                    # 普通字典项
+                    title = item.get("title", item.get("name", f"项目{idx}"))
+                    lines.append(f"{idx}. {title}")
+            else:
+                lines.append(f"{idx}. {str(item)}")
+        
+        lines.append("-" * 40)
+        return "\n".join(lines)
+    
+    def _format_task_for_display(self, item: dict, index: int = None) -> str:
+        """将任务格式化为易读的文本"""
+        parts = []
+        
+        if index is not None:
+            parts.append(f"{index}. ")
+        
+        # 图标
+        status = (item.get("status") or "").lower()
+        status_icon = "✅" if status in ["done", "completed", "已完成", "完成"] else "⏳" if status in ["in_progress", "doing", "进行中"] else "📋"
+        parts.append(f"{status_icon} ")
+        
+        # 标题
+        title = item.get("title", item.get("name", "未命名"))
+        parts.append(title)
+        
+        # 元数据
+        meta_parts = []
+        if item.get("priority"):
+            priority = str(item["priority"]).lower()
+            priority_display = "🔴高" if priority in ["high", "高", "1"] else "🟡中" if priority in ["medium", "中", "2"] else "🟢低"
+            meta_parts.append(priority_display)
+        if item.get("status"):
+            meta_parts.append(f"状态:{item['status']}")
+        if item.get("due_date"):
+            meta_parts.append(f"📅{item['due_date']}")
+        
+        if meta_parts:
+            parts.append(f" ({', '.join(meta_parts)})")
+        
+        # 描述
+        if item.get("description") and str(item["description"]).strip():
+            desc = str(item["description"])
+            if len(desc) > 80:
+                parts.append(f"\n     📝 {desc[:80]}...")
+            else:
+                parts.append(f"\n     📝 {desc}")
+        
+        return "".join(parts)
 
     def _update_elapsed_time(self) -> None:
         if self._elapsed_start is None or self._root is None:

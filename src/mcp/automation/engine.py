@@ -16,6 +16,12 @@ from .persistence import AutomationPersistence, AutomationTask, AutomationRun, M
 from .triggers import TriggerType, create_trigger, EventTrigger
 from .event_bus import EventBus, Event
 
+try:
+    from ..runtime import RunManager, RunRecord, RunStatus, RunJournal, JournalEventType
+    HAS_RUNTIME = True
+except ImportError:
+    HAS_RUNTIME = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,6 +65,10 @@ class AutomationEngine:
         self._event_sub_id: Optional[str] = None
         self._model_provider = None
         self._workflow_engine = None
+        self._run_manager = RunManager() if HAS_RUNTIME else None
+        self._run_journal = RunJournal(
+            journal_dir=str(db_path.parent / "journal")
+        ) if HAS_RUNTIME else None
         self._load_triggers()
 
     @classmethod
@@ -337,16 +347,13 @@ class AutomationEngine:
         if not prompt:
             raise ValueError("Model task requires 'prompt' in action_config")
 
-        kwargs = {"prompt": prompt}
-        if model:
-            kwargs["model"] = model
-
-        if hasattr(self._model_provider, "chat"):
-            return self._model_provider.chat(**kwargs)
-        elif hasattr(self._model_provider, "complete"):
-            return self._model_provider.complete(**kwargs)
+        if hasattr(self._model_provider, "generate"):
+            return self._model_provider.generate(prompt)
+        elif hasattr(self._model_provider, "chat"):
+            messages = [{"role": "user", "content": prompt}]
+            return self._model_provider.chat(messages)
         elif callable(self._model_provider):
-            return self._model_provider(**kwargs)
+            return self._model_provider(prompt=prompt, model=model)
         else:
             raise RuntimeError("Model provider has no callable interface")
 

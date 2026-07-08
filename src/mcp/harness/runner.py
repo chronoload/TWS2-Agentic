@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 from .events import EventStream, EventType
 from .turn import Turn, TurnResult, TurnStatus
 from .hooks import HookPipeline, HookResult, HookDecision
-from .approval import ApprovalManager, ApprovalDecision, ApprovalMode
+from .approval import ApprovalManager, ApprovalDecision, ApprovalMode, get_global_approval_manager
 from .session_store import SessionStore
 
 
@@ -13,15 +13,24 @@ class HarnessRunner:
         llm=None,
         tool_registry=None,
         approval_mode=ApprovalMode.SUGGEST,
+        approval_manager=None,
         event_stream=None,
         hook_pipeline=None,
         session_store=None,
+        use_global_approval=True,
     ):
         self.llm = llm
         self.tool_registry = tool_registry or {}
         self.event_stream = event_stream or EventStream()
         self.hooks = hook_pipeline or HookPipeline()
-        self.approval = ApprovalManager(mode=approval_mode)
+        
+        if use_global_approval:
+            self.approval = get_global_approval_manager()
+        elif approval_manager is not None:
+            self.approval = approval_manager
+        else:
+            self.approval = ApprovalManager(mode=approval_mode)
+            
         self.sessions = session_store or SessionStore()
         self._active_turns: Dict[str, Turn] = {}
 
@@ -48,11 +57,18 @@ class HarnessRunner:
 
             self.event_stream.emit(EventType.LLM_RESPONSE, turn_id=turn.id, response=response)
 
-            content = getattr(response, "content", None) or response.get("content") if isinstance(response, dict) else getattr(response, "content", None)
-            reasoning_content = getattr(response, "reasoning_content", None) or (response.get("reasoning_content") if isinstance(response, dict) else None)
-            tool_calls = getattr(response, "tool_calls", None) or (response.get("tool_calls") if isinstance(response, dict) else None) or []
-            prompt_tokens = getattr(response, "prompt_tokens", 0) or (response.get("prompt_tokens", 0) if isinstance(response, dict) else 0)
-            completion_tokens = getattr(response, "completion_tokens", 0) or (response.get("completion_tokens", 0) if isinstance(response, dict) else 0)
+            if isinstance(response, dict):
+                content = response.get("content")
+                reasoning_content = response.get("reasoning_content")
+                tool_calls = response.get("tool_calls") or []
+                prompt_tokens = response.get("prompt_tokens", 0)
+                completion_tokens = response.get("completion_tokens", 0)
+            else:
+                content = getattr(response, "content", None)
+                reasoning_content = getattr(response, "reasoning_content", None)
+                tool_calls = getattr(response, "tool_calls", None) or []
+                prompt_tokens = getattr(response, "prompt_tokens", 0)
+                completion_tokens = getattr(response, "completion_tokens", 0)
 
             turn.result.prompt_tokens = prompt_tokens
             turn.result.completion_tokens = completion_tokens

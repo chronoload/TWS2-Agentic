@@ -29,6 +29,10 @@ class ApprovalRequest:
     _decision: Optional[ApprovalDecision] = None
     _event: threading.Event = field(default_factory=threading.Event)
 
+    def __post_init__(self):
+        if self.tool_input is None:
+            self.tool_input = {}
+
     def decide(self, decision: ApprovalDecision):
         self._decision = decision
         self._event.set()
@@ -53,6 +57,31 @@ class ApprovalManager:
     def on_request(self, callback: Callable):
         self._callbacks.append(callback)
 
+    def remove_request_callback(self, callback: Callable):
+        try:
+            self._callbacks.remove(callback)
+        except ValueError:
+            pass
+
+    def set_mode(self, mode: ApprovalMode):
+        with self._lock:
+            self._mode = mode
+
+    def get_mode(self) -> ApprovalMode:
+        return self._mode
+
+    def add_approved_tool(self, tool_name: str):
+        with self._lock:
+            self._always_approved.add(tool_name)
+
+    def remove_approved_tool(self, tool_name: str):
+        with self._lock:
+            self._always_approved.discard(tool_name)
+
+    def get_approved_tools(self) -> set:
+        with self._lock:
+            return set(self._always_approved)
+
     def request_approval(
         self,
         tool_name: str,
@@ -66,6 +95,7 @@ class ApprovalManager:
             return ApprovalDecision.DENY
         if self._mode == ApprovalMode.FULL_AUTO:
             return ApprovalDecision.APPROVE
+        
         request = ApprovalRequest(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -74,11 +104,18 @@ class ApprovalManager:
         )
         with self._lock:
             self._pending[request.id] = request
-        for callback in self._callbacks:
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[审批请求] {tool_name} - 回调数量: {len(self._callbacks)}")
+        
+        with self._lock:
+            callbacks = list(self._callbacks)
+        for callback in callbacks:
             try:
                 callback(request)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"审批回调执行失败: {e}")
         request.wait(timeout=300)
         with self._lock:
             self._pending.pop(request.id, None)
@@ -86,6 +123,12 @@ class ApprovalManager:
             return ApprovalDecision.DENY
         if request._decision == ApprovalDecision.ALWAYS_APPROVE:
             self._always_approved.add(tool_name)
+            try:
+                from ..config import get_config_manager
+                config_manager = get_config_manager()
+                config_manager.add_always_approved_tool(tool_name)
+            except Exception:
+                pass
             return ApprovalDecision.APPROVE
         return request._decision
 
@@ -100,5 +143,41 @@ class ApprovalManager:
             return list(self._pending.values())
 
     def reset_permissions(self):
-        self._always_approved.clear()
-        self._always_denied.clear()
+        with self._lock:
+            self._always_approved.clear()
+            self._always_denied.clear()
+
+
+_global_approval_manager: Optional[ApprovalManager] = None
+
+
+def get_global_approval_manager() -> ApprovalManager:
+    """获取全局共享的审批管理器实例"""
+    global _global_approval_manager
+    if _global_approval_manager is None:
+        _global_approval_manager = ApprovalManager()
+        
+        try:
+            from ..config import get_config_manager
+            config_manager = get_config_manager()
+            always_approved = config_manager.get_always_approved_tools()
+            for tool in always_approved:
+                _global_approval_manager._always_approved.add(tool)
+            
+            mode_str = config_manager.get_approval_mode()
+            mode_map = {
+                "suggest": ApprovalMode.SUGGEST,
+                "auto_edit": ApprovalMode.AUTO_EDIT,
+                "full_auto": ApprovalMode.FULL_AUTO,
+            }
+            _global_approval_manager._mode = mode_map.get(mode_str, ApprovalMode.SUGGEST)
+        except Exception:
+            pass
+    
+    return _global_approval_manager
+
+
+def reset_global_approval_manager():
+    """重置全局审批管理器"""
+    global _global_approval_manager
+    _global_approval_manager = None

@@ -6,7 +6,15 @@ from .triggers import (
     CronTrigger, IntervalTrigger, EventTrigger, CourseScheduleTrigger,
     create_trigger,
 )
-from .popup_manager import PopupManager, LearningAssistantPopup, SYSTEM_PROMPT
+
+try:
+    from .popup_manager import PopupManager, LearningAssistantPopup, SYSTEM_PROMPT
+    HAS_POPUP = True
+except ImportError:
+    HAS_POPUP = False
+    PopupManager = None
+    LearningAssistantPopup = None
+    SYSTEM_PROMPT = ""
 
 __all__ = [
     "AutomationEngine", "AutomationType", "TaskStatus", "get_automation_engine",
