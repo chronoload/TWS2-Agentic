@@ -431,7 +431,7 @@ class KGRAGEngine:
         if vector_results:
             parts.append("## 相关文档片段")
             for i, doc in enumerate(vector_results[:5], 1):
-                content = doc.get("content", "")[:500]
+                content = (doc.get("content") or "")[:500]
                 parts.append(f"### 片段 {i}")
                 parts.append(content)
                 parts.append("")

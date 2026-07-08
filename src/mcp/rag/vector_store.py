@@ -300,3 +300,114 @@ class SimpleVectorStore(VectorStore):
     def get_all_documents(self) -> List[Document]:
         """获取所有文档"""
         return [entry.document for entry in self.entries.values()]
+
+
+try:
+    import chromadb
+    HAS_CHROMADB = True
+except ImportError:
+    HAS_CHROMADB = False
+
+
+class ChromaVectorStore(VectorStore):
+    """基于 ChromaDB 的持久化向量存储"""
+
+    def __init__(self, persist_directory: Optional[Union[str, Path]] = None,
+                 collection_name: str = "ts2_documents"):
+        if not HAS_CHROMADB:
+            raise ImportError("chromadb 未安装，请运行: pip install chromadb")
+
+        self.persist_directory = str(persist_directory) if persist_directory else None
+        self.collection_name = collection_name
+
+        client_settings = chromadb.Settings(anonymized_telemetry=False)
+        if self.persist_directory:
+            self._client = chromadb.PersistentClient(path=self.persist_directory)
+        else:
+            self._client = chromadb.Client(client_settings)
+
+        self._collection = self._client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"}
+        )
+
+        self._embedding_fn = None
+        if HAS_SENTENCE_TRANSFORMERS:
+            self._embedding_fn = SentenceTransformer("all-MiniLM-L6-v2")
+
+    def _embed(self, texts: List[str]) -> Optional[List[List[float]]]:
+        if self._embedding_fn:
+            return self._embedding_fn.encode(texts, show_progress_bar=False).tolist()
+        return None
+
+    def add_documents(self, documents: List[Document]) -> List[str]:
+        ids = [doc.id for doc in documents]
+        texts = [doc.content for doc in documents]
+        metadatas = [doc.metadata for doc in documents]
+        embeddings = self._embed(texts)
+
+        kwargs = {"ids": ids, "documents": texts, "metadatas": metadatas}
+        if embeddings:
+            kwargs["embeddings"] = embeddings
+
+        self._collection.add(**kwargs)
+        return ids
+
+    def add_texts(self, texts: List[str], metadatas: Optional[List[Dict[str, Any]]] = None,
+                  ids: Optional[List[str]] = None) -> List[str]:
+        import uuid
+        if ids is None:
+            ids = [str(uuid.uuid4()) for _ in texts]
+        embeddings = self._embed(texts)
+
+        kwargs = {"ids": ids, "documents": texts, "metadatas": metadatas or [{}] * len(texts)}
+        if embeddings:
+            kwargs["embeddings"] = embeddings
+
+        self._collection.add(**kwargs)
+        return ids
+
+    def similarity_search(self, query: str, k: int = 4,
+                          filter_metadata: Optional[Dict[str, Any]] = None) -> List[Document]:
+        results = self.similarity_search_with_score(query, k, filter_metadata)
+        return [doc for doc, _ in results]
+
+    def similarity_search_with_score(self, query: str, k: int = 4,
+                                     filter_metadata: Optional[Dict[str, Any]] = None
+                                     ) -> List[Tuple[Document, float]]:
+        query_embedding = self._embed([query])
+        kwargs: Dict[str, Any] = {"n_results": k}
+        if query_embedding:
+            kwargs["query_embeddings"] = query_embedding
+        else:
+            kwargs["query_texts"] = [query]
+        if filter_metadata:
+            kwargs["where"] = filter_metadata
+
+        results = self._collection.query(**kwargs)
+
+        documents = []
+        if results and results["documents"] and results["documents"][0]:
+            for i, (text, metadata, distance) in enumerate(
+                zip(results["documents"][0], results["metadatas"][0], results["distances"][0])
+            ):
+                doc = Document(
+                    id=results["ids"][0][i],
+                    content=text,
+                    metadata=metadata,
+                )
+                documents.append((doc, 1.0 - distance))
+        return documents
+
+    def delete(self, ids: List[str]) -> None:
+        self._collection.delete(ids=ids)
+
+    def persist(self, path: Optional[Union[str, Path]] = None) -> None:
+        pass  # ChromaDB PersistentClient 自动持久化
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "ChromaVectorStore":
+        return cls(persist_directory=path)
+
+    def count(self) -> int:
+        return self._collection.count()

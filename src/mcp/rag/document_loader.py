@@ -160,14 +160,68 @@ class JSONDocumentLoader(DocumentLoader):
         return docs
 
 
+class PdfDocumentLoader(DocumentLoader):
+    """PDF文档加载器 — 使用 PyMuPDF (fitz)"""
+
+    def load(self, path: Union[str, Path]) -> List[Document]:
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            raise ImportError("PyMuPDF 未安装，请运行: pip install PyMuPDF")
+
+        path = Path(path)
+        doc = fitz.open(str(path))
+        documents = []
+
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text("text")
+            if not text.strip():
+                continue
+
+            page_doc = self.load_text(
+                text=text,
+                source=f"{str(path)}#page_{page_num + 1}",
+                metadata={
+                    "file_path": str(path),
+                    "file_name": path.name,
+                    "file_type": ".pdf",
+                    "page_number": page_num + 1,
+                    "total_pages": len(doc),
+                    "file_size": path.stat().st_size,
+                }
+            )
+            documents.append(page_doc)
+
+        doc.close()
+
+        if not documents:
+            documents.append(self.load_text(
+                text="[此 PDF 为扫描件，无可提取文本。需 OCR 支持。]",
+                source=str(path),
+                metadata={
+                    "file_path": str(path),
+                    "file_name": path.name,
+                    "file_type": ".pdf",
+                    "page_number": 0,
+                    "total_pages": 0,
+                    "is_scanned": True,
+                }
+            ))
+
+        return documents
+
+
 def get_loader_for_file(file_path: Union[str, Path]) -> DocumentLoader:
     """根据文件类型获取对应的加载器"""
     path = Path(file_path)
     suffix = path.suffix.lower()
-    
+
     if suffix == '.md':
         return MarkdownDocumentLoader()
     elif suffix == '.json':
         return JSONDocumentLoader()
+    elif suffix == '.pdf':
+        return PdfDocumentLoader()
     else:
         return TextDocumentLoader()
