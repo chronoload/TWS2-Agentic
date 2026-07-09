@@ -6,6 +6,7 @@
 ### 演示视频
 TS2-Agentic_(https://www.bilibili.com/video/BV1c7Gq66Ex7/?vd_source=263a088cf13d67fa3a899dd3bd107d0a)
 TS2-OpenSource 是一个集课程管理、学习追踪和 AI 辅助于一体的综合平台：
+<img width="2545" height="1401" alt="图片" src="https://github.com/user-attachments/assets/e47cf7ab-4ad2-488d-a0a8-8175214adae1" />
 
 - **课程管理**：结构化课程组织，顺序记录学习进度
 - **智能助手**：基于 MCP 协议的 AI 助手，支持多 LLM 提供商
