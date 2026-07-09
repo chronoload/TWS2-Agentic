@@ -1,11 +1,11 @@
-# TS2 - 课程教学管理系统 / AI Research Assistant
+# TWS2 - 课程教学管理系统 / AI Research Assistant
 
 一个功能强大的课程跟踪和进度管理系统，集成了 MCP (Model Context Protocol) 驱动的 AI 助手，支持可视化进度追踪、资源管理、数学公式渲染和本地知识库检索增强生成。
 
 ## 项目简介
 ### 演示视频
-TS2-Agentic_(https://www.bilibili.com/video/BV1c7Gq66Ex7/?vd_source=263a088cf13d67fa3a899dd3bd107d0a)
-TS2-OpenSource 是一个集课程管理、学习追踪和 AI 辅助于一体的综合平台：
+TWS2-Agentic_(https://www.bilibili.com/video/BV1c7Gq66Ex7/?vd_source=263a088cf13d67fa3a899dd3bd107d0a)
+TWS2-OpenSource 是一个集课程管理、学习追踪和 AI 辅助于一体的综合平台：
 <img width="2545" height="1401" alt="图片" src="https://github.com/user-attachments/assets/e47cf7ab-4ad2-488d-a0a8-8175214adae1" />
 
 - **课程管理**：结构化课程组织，顺序记录学习进度
