@@ -34,7 +34,7 @@ async function doLogin() {
       hideAuthDialog();
       location.reload();
     } else {
-      alert(data.msg || '授权码或 Token 错误，请重试');
+      modalAlert(data.msg || '授权码或 Token 错误，请重试');
     }
   }
 }
@@ -403,6 +403,7 @@ const state = {
   bookmarkFilter: '',
   projects: [],
   courses: [],
+  courseSearchQuery: '',
   courseProgress: {},
   courseDueReviews: {},
   courseResources: {},
@@ -523,7 +524,7 @@ const editorService = {
       window.open(API_BASE + '/api/file/download/' + encodedPath + '?preview=true', '_blank');
       return;
     }
-    // 代码/脚本文件 → Monaco Editor（单实例标签页 __monaco__）
+    // 代码/脚本文件 → Monaco Editor（每个文件独立标签页）
     var _codeExts = ['.py','.js','.ts','.jsx','.tsx','.r','.cpp','.c','.h','.java','.go','.rs','.rb','.php','.swift','.kt','.scala','.sh','.bash','.zsh','.ps1','.bat','.sql','.css','.scss','.less','.vue','.svelte','.yaml','.yml','.toml','.json','.xml','.tex','.gradle','.sbt','.pl','.pm','.lua','.hs','.clj','.ex','.erl'];
     if (_codeExts.includes(ext)) {
       var monoRes = await client.getFile(path);
@@ -534,21 +535,16 @@ const editorService = {
       }
       _monacoCurrentFile = path;
       _monacoFiles[path] = monoRes.data.content;
-      _monacoSrcFile = null;  // 非源码浏览器打开的文件
+      _monacoSrcFile = null;
       var monoName = path.split('/').pop();
-      var existingTab = state.openTabs.find(function(t) { return t.path === '__monaco__'; });
+      var existingTab = state.openTabs.find(function(t) { return t.path === path; });
       if (existingTab) {
-        existingTab.name = monoName;
-        existingTab._monacoPath = path;
         existingTab.modified = false;
-        // 更新标签名
-        var tabEl = document.querySelector('.tab[data-path="__monaco__"] .tab-label');
-        if (tabEl) tabEl.textContent = monoName;
-        this.switchTo('__monaco__');
+        this.switchTo(path);
       } else {
-        state.openTabs.push({ path: '__monaco__', name: monoName, modified: false, _isMonaco: true, _monacoPath: path });
-        addTab('__monaco__', monoName);
-        this.switchTo('__monaco__');
+        state.openTabs.push({ path: path, name: monoName, modified: false, _isMonaco: true });
+        addTab(path, monoName);
+        this.switchTo(path);
         this._addRecent(path, monoName);
       }
       // 初始化/加载 Monaco
@@ -556,10 +552,7 @@ const editorService = {
         document.getElementById('monacoEditorWrap').innerHTML = '';
         _initMonaco(document.getElementById('monacoEditorWrap'), monoRes.data.content, path);
       } else {
-        var tab = state.openTabs.find(function(t) { return t._isMonaco; });
-        if (tab && tab._monacoPath === path) {
-          _loadMonacoFile(path);
-        }
+        _loadMonacoFile(path);
       }
       showToast('已打开: ' + monoName, 'info');
       return;
@@ -621,11 +614,12 @@ const editorService = {
         prevTab._browserUrl = f.getAttribute('data-url') || inp.value || 'about:blank';
       }
     }
-    state.activeTab = path;
-    // 切走 Monaco 时保存当前内容
-    if (_monacoCurrentFile && _monacoEditor && path !== '__monaco__') {
-      _monacoFiles[_monacoCurrentFile] = _monacoEditor.getValue();
+    // 切走 Monaco 时保存当前内容（在更新 activeTab 之前）
+    if (_monacoCurrentFile && _monacoEditor) {
+      var prevTab = state.openTabs.find(function(t) { return t.path === state.activeTab; });
+      if (prevTab && prevTab._isMonaco) _monacoFiles[_monacoCurrentFile] = _monacoEditor.getValue();
     }
+    state.activeTab = path;
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.path === path));
     document.querySelectorAll('.tree-item').forEach(t => t.classList.toggle('active', t.dataset.path === path));
     updatePathBar(path);
@@ -696,7 +690,12 @@ const editorService = {
       document.getElementById('jupyterEditorView').style.display = 'none';
       document.getElementById('monacoEditorView').style.display = 'flex';
       document.getElementById('browserView').style.display = 'none';
-      if (_monacoEditor) setTimeout(function() { _monacoEditor.layout(); }, 50);
+      if (_monacoEditor) {
+        var uri = _monacoApi.Uri.file(path);
+        var cur = _monacoEditor.getModel();
+        if (!cur || cur.uri.toString() !== uri.toString()) _loadMonacoFile(path);
+        setTimeout(function() { _monacoEditor.layout(); }, 50);
+      }
       return;
     }
     if (tab && tab._isBrowser) {
@@ -722,6 +721,7 @@ const editorService = {
     state.recentFiles.unshift({ path, name, time: Date.now() });
     if (state.recentFiles.length > 20) state.recentFiles.length = 20;
     try { localStorage.setItem('ts2_recent_files', JSON.stringify(state.recentFiles)); } catch(e) {}
+    _saveSession();
   },
 
   /* 在分屏 pane 中打开文件 */
@@ -788,7 +788,8 @@ const editorService = {
     state['paneFileContents_' + paneId][path] = content;
     state['paneOriginalContents_' + paneId] = state['paneOriginalContents_' + paneId] || {};
     state['paneOriginalContents_' + paneId][path] = content;
-    tabs.push({ path, name, modified: false });
+    var isCode = _isCodeFile(path);
+    tabs.push({ path, name, modified: false, _isMonaco: isCode });
     state['paneTabs_' + paneId] = tabs;
 
     // 添加 tab 按钮
@@ -804,7 +805,7 @@ const editorService = {
   },
 
   switchInPane(path, paneId) {
-    // 保存前一个 pane 浏览器页签的状态
+    // 保存前一个 pane 标签页的状态
     var prevPath = state['paneActiveTab_' + paneId];
     if (prevPath) {
       var prevTab = (state['paneTabs_' + paneId] || []).find(function(t) { return t.path === prevPath; });
@@ -815,6 +816,13 @@ const editorService = {
           var val = inp.value.trim();
           if (val && !val.startsWith('http://') && !val.startsWith('https://')) val = 'https://' + val;
           prevTab._browserUrl = val;
+        }
+      } else if (prevTab && prevTab._isMonaco && state['paneMonaco_' + paneId]) {
+        state['paneFileContents_' + paneId][prevPath] = state['paneMonaco_' + paneId].getValue();
+      } else if (prevTab) {
+        var prevVditor = state['paneVditor_' + paneId];
+        if (prevVditor && state['paneVditorReady_' + paneId] && !prevTab._isPdf && !prevTab._isSlides) {
+          state['paneFileContents_' + paneId][prevPath] = prevVditor.getValue();
         }
       }
     }
@@ -856,11 +864,13 @@ const editorService = {
         if (frame && inp) {
           if (tab._browserUrl && tab._browserUrl !== frame.src) {
             frame.removeAttribute('srcdoc');
+            _setFrameSandbox(frame, true);
             frame.src = '/api/browser/proxy?url=' + encodeURIComponent(tab._browserUrl);
             inp.value = tab._browserUrl;
           } else if (!tab._browserUrl) {
             inp.value = '';
             frame.removeAttribute('src');
+            _setFrameSandbox(frame, false);
             _renderStartPageInPane(paneId);
           }
         }
@@ -883,10 +893,20 @@ const editorService = {
       _moveSlidesEditorToPane(paneId);
       // 切换笔记数据
       _slidesSwitchToNotebook(path);
+    } else if (tab && tab._isMonaco) {
+      var vditorEl = document.getElementById('paneVditor-' + paneId);
+      if (vditorEl) vditorEl.style.display = 'none';
+      var monacoEl = document.getElementById('paneMonaco-' + paneId);
+      if (monacoEl) monacoEl.style.display = '';
+      var pdfContainer = document.getElementById('panePdfContainer-' + paneId);
+      if (pdfContainer) pdfContainer.style.display = 'none';
+      var content = state['paneFileContents_' + paneId][path] || '';
+      _ensurePaneMonaco(paneId, content, path);
     } else {
-      // 显示 Vditor
       var vditorEl = document.getElementById('paneVditor-' + paneId);
       if (vditorEl) vditorEl.style.display = '';
+      var monacoEl = document.getElementById('paneMonaco-' + paneId);
+      if (monacoEl) monacoEl.style.display = 'none';
       var pdfContainer = document.getElementById('panePdfContainer-' + paneId);
       if (pdfContainer) pdfContainer.style.display = 'none';
       // 设置 Vditor 内容
@@ -896,8 +916,149 @@ const editorService = {
         vditorInstance.setValue(content);
       }
     }
+    _saveSession();
   }
 };
+
+// ─── 会话持久化（刷新恢复） ───────────────────────────────
+
+function _saveSession() {
+  try {
+    var panes = {};
+    Object.keys(state).forEach(function(key) {
+      if (key.startsWith('paneTabs_') && key !== 'paneTabs_0') {
+        var pid = key.substring(9);
+        var arr = state[key];
+        if (Array.isArray(arr) && arr.length) {
+          var normalTabs = arr.filter(function(t) { return !t._isSlides && !t._isBrowser; });
+          if (normalTabs.length) {
+            panes[pid] = {
+              tabs: normalTabs.map(function(tab) {
+                var obj = { path: tab.path, name: tab.name };
+                if (tab._isPdf) {
+                  var pp = state['panePdfPage_' + pid];
+                  if (pp) {
+                    obj.pdfState = {
+                      pageNum: pp,
+                      zoom: state['panePdfZoom_' + pid] || 1.0,
+                      dualPage: state['panePdfDualPage_' + pid] || false
+                    };
+                  }
+                }
+                return obj;
+              }),
+              activeTab: state['paneActiveTab_' + pid] || null
+            };
+          }
+        }
+      }
+    });
+    localStorage.setItem('ts2_session', JSON.stringify({
+      openTabs: state.openTabs.filter(function(t) { return !t._isSlides; }).map(function(t) {
+        var obj = { path: t.path, name: t.name };
+        if (t._isPdf && state.pdfViewState[t.path]) {
+          obj.pdfState = state.pdfViewState[t.path];
+        }
+        return obj;
+      }),
+      activeTab: state.activeTab,
+      panes: panes
+    }));
+  } catch(e) { console.warn('_saveSession error:', e); }
+}
+
+function _checkSessionRestore() {
+  var saved;
+  try { saved = JSON.parse(localStorage.getItem('ts2_session')); } catch(e) {}
+  if (!saved) return;
+  var hasTabs = saved.openTabs && saved.openTabs.length > 0;
+  var hasPanes = saved.panes && Object.keys(saved.panes).length > 0;
+  if (!hasTabs && !hasPanes) return;
+  var fileItems = [];
+  // 主编辑器标签页
+  saved.openTabs.forEach(function(t) {
+    var ext = t.path.includes('.') ? t.path.split('.').pop().toLowerCase() : '';
+    var icon = ['pdf'].includes(ext) ? '📄' : ['py','js','ts','jsx','tsx','go','rs','java','cpp','c','h','rb','php','swift','kt','r','sh','bash','css','scss','less','vue','svelte','json','xml','yaml','yml','toml','sql','tex','md'].includes(ext) ? '📝' : '📄';
+    fileItems.push('<div style="padding:3px 0;font-size:13px">📌 ' + icon + ' ' + escapeHtml(t.name) + '</div>');
+  });
+  // 分屏 pane 标签页
+  if (hasPanes) {
+    Object.keys(saved.panes).forEach(function(pid) {
+      var p = saved.panes[pid];
+      if (p && p.tabs) {
+        p.tabs.forEach(function(t) {
+          var ext = t.path.includes('.') ? t.path.split('.').pop().toLowerCase() : '';
+          var icon = ['pdf'].includes(ext) ? '📄' : ['py','js','ts','jsx','tsx','go','rs','java','cpp','c','h','rb','php','swift','kt','r','sh','bash','css','scss','less','vue','svelte','json','xml','yaml','yml','toml','sql','tex','md'].includes(ext) ? '📝' : '📄';
+          fileItems.push('<div style="padding:3px 0;font-size:13px;color:var(--fg-muted)">⬜ ' + icon + ' ' + escapeHtml(t.name) + '</div>');
+        });
+      }
+    });
+  }
+  if (!fileItems.length) return;
+  showHtmlModal('♻️ 恢复上次会话', '<div style="padding:12px"><p style="margin:0 0 12px;font-size:13px;color:var(--fg-muted)">检测到上次退出时打开的标签页：</p><div style="max-height:300px;overflow-y:auto;background:var(--bg);border-radius:6px;padding:8px 12px;border:1px solid var(--border);margin-bottom:12px">' + fileItems.join('') + '</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn-action" onclick="restoreSession()" style="padding:8px 20px">恢复</button><button class="btn" onclick="closeHtmlModal();clearSavedSession()" style="padding:8px 20px">忽略</button></div></div>', '480px');
+}
+
+function restoreSession() {
+  closeHtmlModal();
+  var saved;
+  try { saved = JSON.parse(localStorage.getItem('ts2_session')); } catch(e) {}
+  if (!saved || !saved.openTabs) return;
+  localStorage.removeItem('ts2_session');
+  var tabs = saved.openTabs;
+  var paneData = saved.panes || {};
+  var paneKeys = Object.keys(paneData);
+  var idx = 0;
+  function openNext() {
+    if (idx >= tabs.length) {
+      if (saved.activeTab && state.openTabs.find(function(t) { return t.path === saved.activeTab; })) {
+        switchToTab(saved.activeTab);
+      }
+      if (!paneKeys.length) return;
+      // 恢复分屏 pane
+      for (var pi = 0; pi < paneKeys.length; pi++) {
+        splitPane('editor', 'h');
+      }
+      setTimeout(function() {
+        var paneEls = document.querySelectorAll('#splitContainer > .pane[data-pane-id]:not([data-pane-id="0"])');
+        paneEls.forEach(function(el, i) {
+          if (i >= paneKeys.length) return;
+          var newPid = el.getAttribute('data-pane-id');
+          var data = paneData[paneKeys[i]];
+          if (!data || !data.tabs || !data.tabs.length) return;
+          var pIdx = 0;
+          function openPaneTab() {
+            if (pIdx >= data.tabs.length) {
+              if (data.activeTab) {
+                setActivePane(newPid);
+                setTimeout(function() { editorService.switchInPane(data.activeTab, newPid); }, 100);
+              }
+              return;
+            }
+            var tabData = data.tabs[pIdx++];
+            if (tabData.pdfState) {
+              state['panePdfPage_' + newPid] = tabData.pdfState.pageNum;
+              state['panePdfZoom_' + newPid] = tabData.pdfState.zoom;
+              state['panePdfDualPage_' + newPid] = tabData.pdfState.dualPage;
+            }
+            editorService.openInPane(tabData.path, newPid).then(openPaneTab);
+          }
+          openPaneTab();
+        });
+      }, 200);
+      return;
+    }
+    var tabData = tabs[idx++];
+    if (tabData.pdfState) {
+      state.pdfViewState[tabData.path] = tabData.pdfState;
+    }
+    openFile(tabData.path).then(openNext);
+  }
+  openNext();
+}
+
+function clearSavedSession() {
+  try { localStorage.removeItem('ts2_session'); } catch(e) {}
+}
 
 // ─── Vditor Editor ──────────────────────────────────────────
 
@@ -1069,8 +1230,8 @@ async function loadPdfInPane(path, paneId) {
   try {
     var pdf = await pdfjsLib.getDocument({ data: data }).promise;
     state['panePdfDoc_' + paneId] = pdf;
-    state['panePdfPage_' + paneId] = 1;
-    state['panePdfZoom_' + paneId] = 1.0;
+    if (!state['panePdfPage_' + paneId]) state['panePdfPage_' + paneId] = 1;
+    if (!state['panePdfZoom_' + paneId]) state['panePdfZoom_' + paneId] = 1.0;
     await renderPanePdfPage(paneId);
   } catch (e) {
     showToast('PDF 渲染失败: ' + e.message, 'error');
@@ -1152,9 +1313,14 @@ async function renderPanePdfPage(paneId) {
     pageNum + '-' + Math.min(pageNum + 1, pdf.numPages) + '/' + pdf.numPages :
     pageNum + '/' + pdf.numPages;
   var infoEl = document.getElementById('panePdfInfo-' + paneId);
-  if (infoEl) infoEl.textContent = infoText;
+  if (infoEl) {
+    infoEl.value = pageNum;
+    infoEl.max = pdf.numPages;
+  }
+  var totalEl = document.getElementById('panePdfTotal-' + paneId);
+  if (totalEl) totalEl.textContent = '/ ' + pdf.numPages;
   var zoomEl = document.getElementById('panePdfZoom-' + paneId);
-  if (zoomEl) zoomEl.textContent = Math.round(scale * 100) + '%';
+  if (zoomEl) zoomEl.textContent = Math.round(zoom * 100) + '%';
 }
 
 function panePdfNav(paneId, delta) {
@@ -1167,6 +1333,20 @@ function panePdfNav(paneId, delta) {
   if (next < 1 || next > pdf.numPages) return;
   state['panePdfPage_' + paneId] = next;
   renderPanePdfPage(paneId);
+  _saveSession();
+}
+
+function panePdfGoToPage(paneId, page) {
+  var pdf = state['panePdfDoc_' + paneId];
+  if (!pdf) return;
+  if (page < 1 || page > pdf.numPages || isNaN(page)) {
+    var infoEl = document.getElementById('panePdfInfo-' + paneId);
+    if (infoEl) infoEl.value = state['panePdfPage_' + paneId] || 1;
+    return;
+  }
+  state['panePdfPage_' + paneId] = page;
+  renderPanePdfPage(paneId);
+  _saveSession();
 }
 
 function panePdfZoom(paneId, delta) {
@@ -1174,6 +1354,7 @@ function panePdfZoom(paneId, delta) {
   var next = Math.max(0.3, Math.min(3.0, current + delta));
   state['panePdfZoom_' + paneId] = next;
   renderPanePdfPage(paneId);
+  _saveSession();
 }
 
 function togglePanePdfDual(paneId) {
@@ -1187,6 +1368,7 @@ function togglePanePdfDual(paneId) {
     }
   }
   renderPanePdfPage(paneId);
+  _saveSession();
 }
 
 // 分屏 PDF 目录
@@ -1284,6 +1466,7 @@ function hideEditor() {
   hidePdfViewer();
   document.getElementById('welcomeScreen').style.display = '';
   renderWelcomeRecentFiles();
+  renderWelcomeTaskSessions();
   document.getElementById('vditor').style.display = 'none';
   document.getElementById('plainEditor').style.display = 'none';
   document.getElementById('kmindEditorView').style.display = 'none';
@@ -1690,6 +1873,7 @@ async function _goToPdfPage(newPage) {
     document.getElementById('pdfZoomLevel').textContent = Math.round(state.pdfZoom * 100) + '%';
 
     _schedulePdfPreload();
+    _saveSession();
     return;
   }
 
@@ -1697,6 +1881,7 @@ async function _goToPdfPage(newPage) {
   state.pdfPageNum = newPage;
   if (state.pdfPath) state.pdfViewState[state.pdfPath] = { pageNum: state.pdfPageNum, zoom: state.pdfZoom, dualPage: dual };
   await renderPdfPage();
+  _saveSession();
 }
 
 let _pdfLoadGen = 0;
@@ -1776,7 +1961,7 @@ async function openKmind(path) {
 }
 
 async function kmindCreateNew() {
-  var kmindName = prompt('思维导图名称', '新思维导图');
+  var kmindName = await modalPrompt('思维导图名称', '新思维导图');
   if (!kmindName || !kmindName.trim()) return;
   kmindName = kmindName.trim();
   if (!kmindName.endsWith('.kmind')) kmindName += '.kmind';
@@ -2275,12 +2460,12 @@ function switchToTab(path) {
   editorService.switchTo(path);
 }
 
-function closeTab(path) {
+async function closeTab(path) {
   const idx = state.openTabs.findIndex(t => t.path === path);
   if (idx === -1) return;
 
   if (state.openTabs[idx].modified) {
-    if (!confirm(`"${state.openTabs[idx].name}" 有未保存的更改，确定关闭？`)) return;
+    if (!await modalConfirm(`"${state.openTabs[idx].name}" 有未保存的更改，确定关闭？`)) return;
   }
 
   const tab = state.openTabs[idx];
@@ -2316,13 +2501,23 @@ function closeTab(path) {
     document.getElementById('jupyterIframeWrap').innerHTML = '';
   }
   if (tab._isMonaco) {
-    // 保存当前内容到缓存
     if (_monacoCurrentFile && _monacoEditor) {
       _monacoFiles[_monacoCurrentFile] = _monacoEditor.getValue();
     }
-    document.getElementById('monacoEditorView').style.display = 'none';
-    document.getElementById('monacoEditorWrap').innerHTML = '';
-    if (_monacoEditor) { _monacoEditor.dispose(); _monacoEditor = null; _monacoReady = false; _monacoCurrentFile = null; }
+    delete _monacoFiles[path];
+    // dispose the model for this file
+    try {
+      var uri = _monacoApi.Uri.file(path);
+      var model = _monacoApi.editor.getModel(uri);
+      if (model) model.dispose();
+    } catch(e) {}
+    // if no more Monaco tabs, destroy the editor
+    var remaining = state.openTabs.filter(function(t) { return t._isMonaco; });
+    if (remaining.length === 0) {
+      document.getElementById('monacoEditorView').style.display = 'none';
+      document.getElementById('monacoEditorWrap').innerHTML = '';
+      if (_monacoEditor) { _monacoEditor.dispose(); _monacoEditor = null; _monacoReady = false; _monacoCurrentFile = null; }
+    }
   }
   if (tab._isBrowser) {
     document.getElementById('browserView').style.display = 'none';
@@ -2342,6 +2537,7 @@ function closeTab(path) {
       document.getElementById('statusPath').textContent = '就绪';
     }
   }
+  _saveSession();
 }
 
 function markTabModified(path, modified) {
@@ -2364,27 +2560,29 @@ async function saveCurrentFile() {
 
   const path = state.activeTab;
   // Monaco 标签页：从实例取值
-  if (path === '__monaco__' && _monacoEditor && _monacoCurrentFile) {
-    const content = _monacoEditor.getValue();
-    let res;
-    // 源码浏览器打开的文件，直接用源码 API 保存
-    if (_monacoSrcFile) {
-      res = await client.api('/api/data/projects/writeFile', { path: _monacoCurrentFile, content });
-    } else {
-      res = await client.putFile(_monacoCurrentFile, content);
-      if (res.code !== 0) {
+  if (_monacoEditor && _monacoCurrentFile && state.activeTab === path) {
+    var monoTab = state.openTabs.find(function(t) { return t.path === path; });
+    if (monoTab && monoTab._isMonaco) {
+      const content = _monacoEditor.getValue();
+      let res;
+      if (_monacoSrcFile) {
         res = await client.api('/api/data/projects/writeFile', { path: _monacoCurrentFile, content });
+      } else {
+        res = await client.putFile(_monacoCurrentFile, content);
+        if (res.code !== 0) {
+          res = await client.api('/api/data/projects/writeFile', { path: _monacoCurrentFile, content });
+        }
       }
+      if (res.code === 0) {
+        _monacoFiles[_monacoCurrentFile] = content;
+        markTabModified(path, false);
+        showToast('已保存: ' + _monacoCurrentFile.split('/').pop(), 'success');
+        await refreshTree();
+      } else {
+        showToast('保存失败: ' + (res.msg || ''), 'error');
+      }
+      return;
     }
-    if (res.code === 0) {
-      _monacoFiles[_monacoCurrentFile] = content;
-      markTabModified(path, false);
-      showToast('已保存: ' + _monacoCurrentFile.split('/').pop(), 'success');
-      await refreshTree();
-    } else {
-      showToast('保存失败: ' + (res.msg || ''), 'error');
-    }
-    return;
   }
   const content = getEditorContent();
 
@@ -2412,7 +2610,9 @@ async function savePaneFile(paneId) {
   if (tab && tab._isPdf) { showToast('PDF 文件无法编辑保存', 'error'); return; }
 
   var vditorInstance = state['paneVditor_' + paneId];
-  var content = (vditorInstance && state['paneVditorReady_' + paneId])
+  var content = (tab && tab._isMonaco && state['paneMonaco_' + paneId])
+    ? state['paneMonaco_' + paneId].getValue()
+    : (vditorInstance && state['paneVditorReady_' + paneId])
     ? vditorInstance.getValue()
     : (state['paneFileContents_' + paneId][activePath] || '');
 
@@ -2636,7 +2836,7 @@ function renderKanbanColumn(containerId, tasks, status) {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const taskId = btn.dataset.taskId;
-      if (confirm('确定删除此任务？')) {
+      if (await modalConfirm('确定删除此任务？')) {
         const res = await client.deleteTask(taskId);
         if (res.code === 0) {
           showToast('任务已删除', 'success');
@@ -3062,7 +3262,7 @@ async function doSourceAuth() {
     await loadSource();
     showToast('源码浏览器已授权', 'success');
   } else {
-    alert('源码授权码错误');
+    modalAlert('源码授权码错误');
   }
 }
 
@@ -3196,8 +3396,8 @@ function showSrcContextMenu(event, el) {
     items.push({ sep: true });
   }
 
-  items.push({ icon: '📝', label: '重命名', action: () => {
-    const newName = prompt('新名称:', name);
+  items.push({ icon: '📝', label: '重命名', action: async () => {
+    var newName = await modalPrompt('新名称:', name);
     if (newName && newName !== name) {
       const dir = entryPath.substring(0, entryPath.lastIndexOf('/'));
       const newPath = dir + '/' + newName;
@@ -3208,8 +3408,8 @@ function showSrcContextMenu(event, el) {
     }
   }});
 
-  items.push({ icon: '🗑️', label: '删除', action: () => {
-    if (confirm(`确定删除 "${name}"？此操作不可撤销。`)) {
+  items.push({ icon: '🗑️', label: '删除', action: async () => {
+    if (await modalConfirm(`确定删除 "${name}"？此操作不可撤销。`)) {
       client.removeFile(entryPath).then(res => {
         if (res.code === 0) { showToast('已删除', 'success'); srcLoadDir(state.srcCurrentPath || ''); }
         else showToast('删除失败', 'error');
@@ -3317,18 +3517,14 @@ async function srcOpenInEditor(path) {
   _monacoCurrentFile = path;
   _monacoFiles[path] = content;
 
-  var existingTab = state.openTabs.find(function(t) { return t.path === '__monaco__'; });
+  var existingTab = state.openTabs.find(function(t) { return t.path === path; });
   if (existingTab) {
-    existingTab.name = monoName;
-    existingTab._monacoPath = path;
     existingTab.modified = false;
-    var tabEl = document.querySelector('.tab[data-path="__monaco__"] .tab-label');
-    if (tabEl) tabEl.textContent = monoName;
-    editorService.switchTo('__monaco__');
+    editorService.switchTo(path);
   } else {
-    state.openTabs.push({ path: '__monaco__', name: monoName, modified: false, _isMonaco: true, _monacoPath: path });
-    addTab('__monaco__', monoName);
-    editorService.switchTo('__monaco__');
+    state.openTabs.push({ path: path, name: monoName, modified: false, _isMonaco: true });
+    addTab(path, monoName);
+    editorService.switchTo(path);
   }
 
   if (!_monacoEditor) {
@@ -3542,6 +3738,192 @@ function renderWelcomeRecentFiles() {
       await editorService.open(item.dataset.path);
     });
   });
+}
+
+// ─── Task Sessions ──────────────────────────────────────────
+
+/** 从 localStorage 加载已保存的任务会话列表 */
+function _loadTaskSessions() {
+  try {
+    return JSON.parse(localStorage.getItem('ts2_task_sessions') || '{}');
+  } catch(e) { return {}; }
+}
+
+function _saveTaskSessions(sessions) {
+  try { localStorage.setItem('ts2_task_sessions', JSON.stringify(sessions)); } catch(e) {}
+}
+
+function renderWelcomeTaskSessions() {
+  const list = document.getElementById('welcomeTaskSessionsList');
+  if (!list) return;
+  var sessions = _loadTaskSessions();
+  var keys = Object.keys(sessions);
+  if (!keys.length) {
+    list.innerHTML = '<div id="welcomeTaskSessionsEmpty" style="color:var(--fg-dim);font-size:12px;padding:8px 4px">暂无保存的任务</div>';
+    return;
+  }
+  list.innerHTML = keys.map(function(name) {
+    var s = sessions[name];
+    var count = (s.tabs ? s.tabs.length : 0) + (s.panes ? Object.keys(s.panes).reduce(function(a, k) { return a + (s.panes[k].tabs ? s.panes[k].tabs.length : 0); }, 0) : 0);
+    var time = s.savedAt ? timeAgo(s.savedAt) : '';
+    return '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;font-size:12px;transition:background 0.15s" onmouseover="this.style.background=\'var(--bg-tertiary)\'" onmouseout="this.style.background=\'\'">' +
+      '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);cursor:pointer" title="' + escapeHtml(name) + ' (' + count + ' 个标签页)" onclick="restoreTaskSession(\'' + escapeHtml(name) + '\')">📋 ' + escapeHtml(name) + '</span>' +
+      '<span style="font-size:9px;color:var(--fg-dim);white-space:nowrap">' + count + ' 页</span>' +
+      '<span style="font-size:9px;color:var(--fg-dim);white-space:nowrap">' + time + '</span>' +
+      '<button onclick="deleteTaskSession(\'' + escapeHtml(name) + '\')" style="background:none;border:none;cursor:pointer;color:var(--fg-dim);font-size:12px;padding:0 2px;line-height:1" title="删除">✕</button>' +
+      '</div>';
+  }).join('');
+}
+
+async function promptSaveTaskSession() {
+  var name = await modalPrompt('为当前任务状态命名：');
+  if (!name || !name.trim()) return;
+  name = name.trim();
+  var hasMain = state.openTabs.some(function(t) { return !t._isSlides; });
+  var panes = {};
+  Object.keys(state).forEach(function(key) {
+    if (key.startsWith('paneTabs_') && key !== 'paneTabs_0') {
+      var pid = key.substring(9);
+      var pidTabs = state[key];
+      if (Array.isArray(pidTabs) && pidTabs.length) {
+        var normalTabs = pidTabs.filter(function(t) { return !t._isSlides && !t._isBrowser; });
+        if (normalTabs.length) {
+          panes[pid] = {
+            tabs: normalTabs.map(function(t) {
+              var obj = { path: t.path, name: t.name };
+              if (t._isPdf) {
+                var pp = state['panePdfPage_' + pid];
+                if (pp) {
+                  obj.pdfState = {
+                    pageNum: pp,
+                    zoom: state['panePdfZoom_' + pid] || 1.0,
+                    dualPage: state['panePdfDualPage_' + pid] || false
+                  };
+                }
+              }
+              return obj;
+            }),
+            activeTab: state['paneActiveTab_' + pid] || null
+          };
+        }
+      }
+    }
+  });
+  if (!hasMain && !Object.keys(panes).length) {
+    showToast('没有打开的标签页，无法保存', 'error');
+    return;
+  }
+  var sessions = _loadTaskSessions();
+  sessions[name] = {
+    tabs: state.openTabs.filter(function(t) { return !t._isSlides; }).map(function(t) {
+      var obj = { path: t.path, name: t.name };
+      if (t._isPdf && state.pdfViewState[t.path]) {
+        obj.pdfState = state.pdfViewState[t.path];
+      }
+      return obj;
+    }),
+    activeTab: state.activeTab,
+    panes: panes,
+    savedAt: Date.now()
+  };
+  _saveTaskSessions(sessions);
+  renderWelcomeTaskSessions();
+  showToast('任务已保存: ' + name, 'info');
+}
+
+function restoreTaskSession(name) {
+  var sessions = _loadTaskSessions();
+  var session = sessions[name];
+  if (!session || (!session.tabs || !session.tabs.length) && (!session.panes || !Object.keys(session.panes).length)) {
+    showToast('任务数据为空', 'error');
+    return;
+  }
+  // 先关闭所有当前分屏 pane（保留主编辑器）
+  if (_splitActive) {
+    var allPaneEls = document.querySelectorAll('#splitContainer > .pane[data-pane-id]:not([data-pane-id="0"])');
+    allPaneEls.forEach(function(el) {
+      var pid = el.getAttribute('data-pane-id');
+      if (pid) closePane(pid, true);
+    });
+  }
+  var tabs = session.tabs || [];
+  var paneData = session.panes || {};
+  var paneKeys = Object.keys(paneData);
+  var idx = 0;
+  function openNext() {
+    if (idx < tabs.length) {
+      var tabData = tabs[idx++];
+      if (tabData.pdfState) {
+        state.pdfViewState[tabData.path] = tabData.pdfState;
+      }
+      openFile(tabData.path).then(openNext);
+      return;
+    }
+    // 主标签页都打开后，切换到 activeTab
+    if (session.activeTab && state.openTabs.find(function(t) { return t.path === session.activeTab; })) {
+      switchToTab(session.activeTab);
+    }
+    // 恢复分屏
+    if (!paneKeys.length) {
+      showToast('已恢复任务: ' + name, 'info');
+      return;
+    }
+    // 创建所有分屏 pane
+    for (var pi = 0; pi < paneKeys.length; pi++) {
+      splitPane('editor', 'h');
+    }
+    // 等待 DOM 渲染，然后打开每个 pane 的标签
+    setTimeout(function() {
+      var paneEls = document.querySelectorAll('#splitContainer > .pane[data-pane-id]:not([data-pane-id="0"])');
+      var totalPending = 0;
+      var completedPanes = 0;
+      paneEls.forEach(function(el, i) {
+        if (i >= paneKeys.length) return;
+        var newPid = el.getAttribute('data-pane-id');
+        var data = paneData[paneKeys[i]];
+        if (!data || !data.tabs || !data.tabs.length) {
+          completedPanes++;
+          if (completedPanes >= totalPending) showToast('已恢复任务: ' + name, 'info');
+          return;
+        }
+        totalPending++;
+        var pIdx = 0;
+        function openPaneTab() {
+          if (pIdx >= data.tabs.length) {
+            if (data.activeTab) {
+              // 切换到对应 pane 的 activeTab
+              setActivePane(newPid);
+              setTimeout(function() {
+                editorService.switchInPane(data.activeTab, newPid);
+              }, 100);
+            }
+            completedPanes++;
+            if (completedPanes >= totalPending) showToast('已恢复任务: ' + name, 'info');
+            return;
+          }
+          var tabData = data.tabs[pIdx++];
+          if (tabData.pdfState) {
+            state['panePdfPage_' + newPid] = tabData.pdfState.pageNum;
+            state['panePdfZoom_' + newPid] = tabData.pdfState.zoom;
+            state['panePdfDualPage_' + newPid] = tabData.pdfState.dualPage;
+          }
+          editorService.openInPane(tabData.path, newPid).then(openPaneTab);
+        }
+        openPaneTab();
+      });
+      if (!totalPending) showToast('已恢复任务: ' + name, 'info');
+    }, 200);
+  }
+  openNext();
+}
+
+async function deleteTaskSession(name) {
+  if (!await modalConfirm('确定删除任务 "' + name + '" ？')) return;
+  var sessions = _loadTaskSessions();
+  delete sessions[name];
+  _saveTaskSessions(sessions);
+  renderWelcomeTaskSessions();
+  showToast('已删除: ' + name, 'info');
 }
 
 async function loadCourses() {
@@ -3943,6 +4325,11 @@ function togglePushPanel() {
   if (recentCol) recentCol.style.flex = state.pushVisible ? '1' : '1';
 }
 
+function onCourseSearch(val) {
+  state.courseSearchQuery = val.trim().toLowerCase();
+  renderCourses();
+}
+
 function renderCourses() {
   const panel = document.getElementById('coursesList');
 
@@ -3951,7 +4338,16 @@ function renderCourses() {
     return;
   }
 
-  panel.innerHTML = state.courses.map(course => {
+  var filtered = state.courses;
+  if (state.courseSearchQuery) {
+    filtered = state.courses.filter(function(c) {
+      var title = (c.course_title || c.title || c.name || '').toLowerCase();
+      var domain = (c.domain || '').toLowerCase();
+      return title.indexOf(state.courseSearchQuery) !== -1 || domain.indexOf(state.courseSearchQuery) !== -1;
+    });
+  }
+
+  panel.innerHTML = filtered.map(course => {
     const courseId = course.note_id || course.id || course._id || course.filename || '';
     const title = course.course_title || course.title || course.name || '未命名课程';
     const totalHours = course.total_hours || 0;
@@ -3966,7 +4362,7 @@ function renderCourses() {
     const resources = state.courseResources[courseId] || [];
 
     return `
-      <div class="course-card ${isExpanded ? 'expanded' : ''}" data-course-id="${courseId}">
+      <div class="course-card ${isExpanded ? 'expanded' : ''}" data-course-id="${courseId}" onclick="execJumpToCourse('${escapeHtml(courseId)}', event)">
         <div class="course-header">
           <span class="course-title">${escapeHtml(title)}</span>
           <span class="course-hours">⏱ ${totalHours}h</span>
@@ -4070,6 +4466,17 @@ function toggleCourseExpand(courseId) {
   renderCourses();
 }
 
+function execJumpToCourse(courseId, event) {
+  if (event && event.target.closest('button, a, input, select, .lesson-check, .course-action-btn, .lesson-number')) return;
+  var select = document.getElementById('execCourseSelect');
+  if (!select) return;
+  select.value = courseId;
+  state.execCourseId = courseId;
+  select.dispatchEvent(new Event('change'));
+  var execPanel = document.getElementById('executionPanel');
+  if (execPanel) execPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 async function loadCourseDetails(courseId) {
   // 加载进度
   if (!state.courseProgress[courseId]) {
@@ -4098,7 +4505,7 @@ async function markReviewDone(courseId, lessonNumber) {
 }
 
 async function deleteCourse(courseId) {
-  if (!confirm('确定删除此课程？此操作不可撤销。')) return;
+  if (!await modalConfirm('确定删除此课程？此操作不可撤销。')) return;
   const res = await client.api('/api/data/courses/delete', { course_id: courseId });
   if (res.code === 0) {
     showToast('课程已删除', 'success');
@@ -4239,7 +4646,7 @@ function renderResourceModalRow(r, icon, label, courseId) {
 }
 
 async function removeCourseResourceConfirm(courseId, encodedResource) {
-  if (!confirm('确定删除此资源？')) return;
+  if (!await modalConfirm('确定删除此资源？')) return;
   const resource = JSON.parse(decodeURIComponent(encodedResource));
   const ok = await removeCourseResource(courseId, resource);
   if (ok) {
@@ -4284,9 +4691,9 @@ async function addCourseFileResource(courseId, lessonNumber) {
 }
 
 async function addCourseUrlResource(courseId, lessonNumber) {
-  const url = prompt('输入资源URL:');
+  const url = await modalPrompt('输入资源URL:');
   if (!url) return;
-  const label = prompt('标签 (可选):') || url;
+  const label = await modalPrompt('标签 (可选):') || url;
   const entry = {
     type: 'url',
     label: `🌐 ${label}`,
@@ -4370,7 +4777,6 @@ function generateNoteYaml(course, lessonNumber) {
   y += '    keep_md: false' + lb;
   y += '    extra_dependencies:' + lb;
   y += '      ctex: []' + lb;
-
   y += '      fancyhdr: []' + lb;
   y += '      lastpage: []' + lb;
   y += '      booktabs: []' + lb;
@@ -4429,6 +4835,7 @@ function generateNoteYaml(course, lessonNumber) {
   y += t + t + t + lb + lb;
 
   if (lessonNumber != null) {
+    // ─── 课时级笔记：按 KCTSW 递进组织 ───
     y += bs + 'newpage' + lb + lb;
     y += '# 课时 ' + lNum + '：' + esc(lTitle) + lb + lb;
     y += '## 中心问题' + lb + lb;
@@ -4436,27 +4843,33 @@ function generateNoteYaml(course, lessonNumber) {
     y += '**所属章节：**' + lb + lb;
     y += '**课时简介：**' + lb + lb;
     y += bs + 'newpage' + lb + lb;
-    y += '## 复习回顾' + lb + lb;
-    y += '> 学习本节课内容需要了解的预习知识：' + lb + lb;
+
+    // ─── 1. 知识（Knowledge） ───
+    y += '## 1. 知识（Knowledge）' + lb + lb;
+    y += '> 列出本节课所需的前置知识与基本事实。' + lb + lb;
     y += '---' + lb + lb;
-    y += '## 课程内容' + lb + lb;
-    y += '### 现实问题导引' + lb + lb;
-    y += '### 基本概念' + lb + lb;
+
+    // ─── 2. 概念（Concept） ───
+    y += '## 2. 概念（Concept）' + lb + lb;
+    y += '> 引入核心概念，解释其内涵与边界。' + lb + lb;
     y += ':::definition' + lb;
     y += '**概念名称**' + lb + lb;
     y += '> 概念的严格表述...' + lb + lb;
     y += '*注：此定义的适用范围是...*' + lb;
     y += ':::' + lb + lb;
+    y += '---' + lb + lb;
+
+    // ─── 3. 理论（Theory） ───
+    y += '## 3. 理论（Theory）' + lb + lb;
+    y += '> 陈述定理、公式或理论框架。' + lb + lb;
     y += ':::theorem' + lb;
     y += '**定理名称**' + lb + lb;
     y += '> 定理的完整表述...' + lb + lb;
     y += '*证明思路：*' + lb;
     y += ':::' + lb + lb;
     y += '### 公式与推导' + lb + lb;
-    y += ':::theorem' + lb + lb;
     y += '**基本公式：**' + lb + lb;
     y += '$$$$' + lb + lb;
-    y += ':::' + lb + lb;
     y += '**参数说明：**' + lb + lb;
     y += '| 符号  | 含义 | 单位 |' + lb;
     y += '| :---- | :--- | :--- |' + lb;
@@ -4470,28 +4883,6 @@ function generateNoteYaml(course, lessonNumber) {
     y += '&= ' + bs + 'text{结论}' + lb;
     y += bs + 'end{aligned}' + lb;
     y += '$$' + lb + lb;
-  y += ':::example' + lb;
-  y += '**R 演绎**' + lb + lb;
-  y += t + t + t + 'sr' + lb;
-  y += '# 计算有限集合的幂集大小' + lb;
-  y += 'A <- c(1, 2, 3)' + lb;
-  y += 'cat("|A| =", length(A), "\\n")' + lb;
-  y += 'cat("|P(A)| =", 2^length(A), "\\n")' + lb;
-  y += 'cat("2^|A| > |A| 对有限集成立:", 2^length(A) > length(A))' + lb;
-  y += t + t + t + lb + lb;
-  y += '**Python 演绎**' + lb + lb;
-  y += t + t + t + 'python' + lb;
-  y += '# 计算有限集合的幂集大小' + lb;
-  y += 'from itertools import chain, combinations' + lb + lb;
-  y += 'def powerset(iterable):' + lb;
-  y += '    s = list(iterable)' + lb;
-  y += '    return list(chain.from_iterable(combinations(s, r) for r in range(len(s)+1)))' + lb + lb;
-  y += 'A = [1, 2, 3]' + lb;
-  y += 'print(f"|A| = {len(A)}")' + lb;
-  y += 'print(f"|P(A)| = {len(powerset(A))}")' + lb;
-  y += 'print(f"2^|A| > |A| 对有限集成立: {2**len(A) > len(A)}")' + lb;
-  y += t + t + t + lb + lb;
-  y += ':::' + lb + lb;
     y += ':::corollary' + lb + lb;
     y += '> 由上述定理直接推出的结论...' + lb;
     y += ':::' + lb + lb;
@@ -4502,7 +4893,37 @@ function generateNoteYaml(course, lessonNumber) {
     y += '> 对上述内容的补充说明、注意事项或直观理解...' + lb;
     y += ':::' + lb + lb;
     y += '---' + lb + lb;
-    y += '## 典型例题' + lb + lb;
+
+    // ─── 4. 技能（Skill） ───
+    y += '## 4. 技能（Skill）' + lb + lb;
+    y += '> 给出具体方法、算法或操作步骤。' + lb + lb;
+    y += ':::example' + lb;
+    y += '**R 演绎**' + lb + lb;
+    y += t + t + t + 'sr' + lb;
+    y += '# 计算有限集合的幂集大小' + lb;
+    y += 'A <- c(1, 2, 3)' + lb;
+    y += 'cat("|A| =", length(A), "\\n")' + lb;
+    y += 'cat("|P(A)| =", 2^length(A), "\\n")' + lb;
+    y += 'cat("2^|A| > |A| 对有限集成立:", 2^length(A) > length(A))' + lb;
+    y += t + t + t + lb + lb;
+    y += '**Python 演绎（可选）**' + lb + lb;
+    y += t + t + t + 'python' + lb;
+    y += '# 计算有限集合的幂集大小' + lb;
+    y += 'from itertools import chain, combinations' + lb + lb;
+    y += 'def powerset(iterable):' + lb;
+    y += '    s = list(iterable)' + lb;
+    y += '    return list(chain.from_iterable(combinations(s, r) for r in range(len(s)+1)))' + lb + lb;
+    y += 'A = [1, 2, 3]' + lb;
+    y += 'print(f"|A| = {len(A)}")' + lb;
+    y += 'print(f"|P(A)| = {len(powerset(A))}")' + lb;
+    y += 'print(f"2^|A| > |A| 对有限集成立: {2**len(A) > len(A)}")' + lb;
+    y += t + t + t + lb + lb;
+    y += ':::' + lb + lb;
+    y += '---' + lb + lb;
+
+    // ─── 5. 工作流（Workflow） ───
+    y += '## 5. 工作流（Workflow）' + lb + lb;
+    y += '> 将上述技能整合为完整的工作流，解决实际问题。' + lb + lb;
     y += ':::problem' + lb;
     y += '**题目：** 描述例题内容...' + lb + lb;
     y += ':::' + lb + lb;
@@ -4518,6 +4939,8 @@ function generateNoteYaml(course, lessonNumber) {
     y += '**答案：**' + lb;
     y += ':::' + lb + lb;
     y += '---' + lb + lb;
+
+    // ─── 深入练习题 ───
     y += '## 深入练习题' + lb + lb;
     y += ':::exercise' + lb;
     y += '**练习 1：**' + lb + lb;
@@ -4528,11 +4951,14 @@ function generateNoteYaml(course, lessonNumber) {
     y += ':::' + lb + lb;
     y += '---' + lb + lb;
     y += '---' + lb + lb;
+
+    // ─── 参考文献 ───
     y += '## 参考文献' + lb + lb;
     y += '1. [教材名称](URL)，作者，年份' + lb;
     y += '2. [论文/视频标题](URL)，作者，年份' + lb;
     y += '3. [在线资源](URL)' + lb;
   } else {
+    // ─── 课程级笔记 ───
     y += '# ' + esc(title) + lb + lb;
     y += '## 课程概述' + lb + lb;
     y += esc(description) + lb + lb;
@@ -4543,6 +4969,15 @@ function generateNoteYaml(course, lessonNumber) {
       var lt = l.lesson_title || '';
       var lq = l.central_question || '';
       y += '- **课时 ' + ln + '**: ' + esc(lt) + (lq ? ' — ' + esc(lq) : '') + lb;
+    }
+    // ─── KCTSW 知识图谱表格 ───
+    y += lb + '## KCTSW 知识图谱' + lb + lb;
+    y += '| 课时 | 知识 | 概念 | 理论 | 技能 | 工作流 |' + lb;
+    y += '|:----:|:----:|:----:|:----:|:----:|:------:|' + lb;
+    for (var i = 0; i < (course.lessons || []).length; i++) {
+      var l = course.lessons[i];
+      var ln = l.lesson_number || l.number || 0;
+      y += '| ' + ln + ' | 待补充 | 待补充 | 待补充 | 待补充 | 待补充 |' + lb;
     }
     y += lb + '## 综合笔记' + lb + lb + lb + lb;
     y += '## 参考文献' + lb;
@@ -4632,6 +5067,7 @@ async function openWith(ide) {
       if (wait.code !== 0) { showToast(wait.msg || 'JupyterLab 启动超时', 'error'); return; }
       // 创建 tab
       state.openTabs.push({ path: jupyterPath, name: 'JupyterLab', modified: false, _isJupyter: true });
+      _saveSession();
       addTab(jupyterPath, 'JupyterLab');
       // 嵌入 iframe
       const wrap = document.getElementById('jupyterIframeWrap');
@@ -4655,17 +5091,14 @@ async function openWith(ide) {
       if (res.code !== 0 || !res.data) { showToast('读取文件失败', 'error'); return; }
       _monacoCurrentFile = filePath;
       _monacoFiles[filePath] = res.data.content;
-      const tab = state.openTabs.find(t => t.path === '__monaco__');
+      const tab = state.openTabs.find(t => t.path === filePath);
       if (tab) {
-        tab.name = filePath.split('/').pop();
-        tab._monacoPath = filePath;
         tab.modified = false;
-        document.querySelector('.tab[data-path="__monaco__"] .tab-label').textContent = filePath.split('/').pop();
-        editorService.switchTo('__monaco__');
+        editorService.switchTo(filePath);
       } else {
-        state.openTabs.push({ path: '__monaco__', name: filePath.split('/').pop(), modified: false, _isMonaco: true, _monacoPath: filePath });
-        addTab('__monaco__', filePath.split('/').pop());
-        editorService.switchTo('__monaco__');
+        state.openTabs.push({ path: filePath, name: filePath.split('/').pop(), modified: false, _isMonaco: true });
+        addTab(filePath, filePath.split('/').pop());
+        editorService.switchTo(filePath);
       }
       if (!_monacoEditor) {
         document.getElementById('monacoEditorWrap').innerHTML = '';
@@ -4829,7 +5262,7 @@ async function addLessonToCourse(courseId) {
   if (!course) return;
   const lessons = course.lessons || [];
   const nextNum = lessons.length > 0 ? Math.max(...lessons.map(l => l.lesson_number || 0)) + 1 : 1;
-  const title = prompt(`新课时标题 (将排为 #${nextNum}):`, `课时 ${nextNum}`);
+  const title = await modalPrompt(`新课时标题 (将排为 #${nextNum}):`, `课时 ${nextNum}`);
   if (!title) return;
   const res = await client.api('/api/data/courses/addLesson', {
     course_id: courseId,
@@ -4850,7 +5283,7 @@ async function insertLesson(courseId, afterLessonNumber) {
   if (!course) return;
   const lessons = course.lessons || [];
   const insertAt = afterLessonNumber + 1;
-  const title = prompt(`插入课时标题 (插入到 #${afterLessonNumber} 之后, 将排为 #${insertAt}):`, `课时 ${insertAt}`);
+  const title = await modalPrompt(`插入课时标题 (插入到 #${afterLessonNumber} 之后, 将排为 #${insertAt}):`, `课时 ${insertAt}`);
   if (!title) return;
   const res = await client.api('/api/data/courses/addLesson', {
     course_id: courseId,
@@ -4867,7 +5300,7 @@ async function insertLesson(courseId, afterLessonNumber) {
 }
 
 async function prependLesson(courseId) {
-  const title = prompt('新课时标题 (插入到开头, 将排为 #1):', '课时 1');
+  const title = await modalPrompt('新课时标题 (插入到开头, 将排为 #1):', '课时 1');
   if (!title) return;
   const res = await client.api('/api/data/courses/addLesson', {
     course_id: courseId,
@@ -4891,7 +5324,7 @@ async function _doDeleteLesson(courseId, lessonNumber) {
 }
 
 async function deleteLessonConfirm(courseId, lessonNumber, lessonTitle) {
-  if (!confirm(`确定删除课时 #${lessonNumber}「${lessonTitle || ''}」？后续课时将自动重排。`)) return;
+  if (!await modalConfirm(`确定删除课时 #${lessonNumber}「${lessonTitle || ''}」？后续课时将自动重排。`)) return;
   const res = await _doDeleteLesson(courseId, lessonNumber);
   if (res.code === 0) {
     showToast('课时已删除并重排', 'success');
@@ -4903,7 +5336,7 @@ async function deleteLessonConfirm(courseId, lessonNumber, lessonTitle) {
 }
 
 async function deleteLessonFromEdit(courseId, lessonNumber) {
-  if (!confirm(`确定删除课时 #${lessonNumber}？后续课时将自动重排。`)) return;
+  if (!await modalConfirm(`确定删除课时 #${lessonNumber}？后续课时将自动重排。`)) return;
   const res = await _doDeleteLesson(courseId, lessonNumber);
   if (res.code === 0) {
     showToast('课时已删除并重排', 'success');
@@ -4915,7 +5348,7 @@ async function deleteLessonFromEdit(courseId, lessonNumber) {
 }
 
 async function reorderLessons(courseId) {
-  if (!confirm('强制重新编号所有课时为 1,2,3…？')) return;
+  if (!await modalConfirm('强制重新编号所有课时为 1,2,3…？')) return;
   const res = await client.api('/api/data/courses/reorderLessons', { course_id: courseId });
   if (res.code === 0) {
     showToast('课时已重新编号', 'success');
@@ -5061,7 +5494,7 @@ async function saveLesson(courseId, lessonNumber) {
 document.getElementById('courseCreateBtn').addEventListener('click', () => {
   showModal('新建课程', '课程名称', async (title) => {
     if (!title) return;
-    const domain = prompt('学科领域 (如 PHYSICS, MATH):', 'UNKNOWN') || 'UNKNOWN';
+    const domain = await modalPrompt('学科领域 (如 PHYSICS, MATH):', 'UNKNOWN') || 'UNKNOWN';
     const res = await client.api('/api/data/courses/create', { title, domain });
     if (res.code === 0) {
       showToast('课程已创建', 'success');
@@ -6003,7 +6436,7 @@ function showCreateTaskForm(planId) {
 
 async function deleteEntity(type, id) {
   const labels = {ideal:'Ideal', goal:'Goal', plan:'Plan', task:'Task'};
-  if (!confirm(`确定删除此 ${labels[type]||type}？`)) return;
+  if (!await modalConfirm(`确定删除此 ${labels[type]||type}？`)) return;
   const fn = {ideal:client.saberDeleteIdeal, goal:client.saberDeleteGoal, plan:client.saberDeletePlan, task:client.saberDeleteTask}[type];
   if (!fn) return;
   const res = await fn.call(client, id);
@@ -6400,39 +6833,39 @@ async function updateTaskStatus(taskId, status) {
   if (res.code === 0) {
     await loadDashboard();
   } else {
-    alert(`状态更新失败: ${res.msg}`);
+    await modalAlert(`状态更新失败: ${res.msg}`);
   }
 }
 
 async function deliverTask(taskId) {
-  const artifacts = prompt('交付物路径（逗号分隔，可选）:');
-  const notes = prompt('交付备注（可选）:');
+  const artifacts = await modalPrompt('交付物路径（逗号分隔，可选）:');
+  const notes = await modalPrompt('交付备注（可选）:');
   const artifactsList = artifacts ? artifacts.split(',').map(s => s.trim()).filter(Boolean) : [];
   const res = await client.saberDeliverTask(taskId, artifactsList, notes || '');
   if (res.code === 0) {
     await loadDashboard();
   } else {
-    alert(`交付失败: ${res.msg}`);
+    await modalAlert(`交付失败: ${res.msg}`);
   }
 }
 
 async function startGitTracking(taskId) {
   const res = await client.saberStartGitTracking(taskId);
   if (res && res.code === 0) {
-    alert(`Git 追踪已启动` + (res.data.commit_sha ? `，起点: ${res.data.commit_sha}` : ''));
+    await modalAlert(`Git 追踪已启动` + (res.data.commit_sha ? `，起点: ${res.data.commit_sha}` : ''));
     await loadDashboard();
   } else {
-    alert(`Git 追踪失败: ${(res && res.msg) || '请求失败'}`);
+    await modalAlert(`Git 追踪失败: ${(res && res.msg) || '请求失败'}`);
   }
 }
 
 async function captureGitDiff(taskId) {
   const res = await client.saberCaptureGitDiff(taskId);
   if (res && res.code === 0) {
-    alert(`已捕获 Diff (${res.data.diff_length} 行)`);
+    await modalAlert(`已捕获 Diff (${res.data.diff_length} 行)`);
     await loadDashboard();
   } else {
-    alert(`Diff 捕获失败: ${(res && res.msg) || '请求失败'}`);
+    await modalAlert(`Diff 捕获失败: ${(res && res.msg) || '请求失败'}`);
   }
 }
 
@@ -6441,34 +6874,34 @@ async function editTask(taskId) {
   if (!plan) return;
   const task = (plan._tasks || plan.tasks || []).find(t => t.id === taskId);
   if (!task) return;
-  const title = prompt('任务标题:', task.title);
+  const title = await modalPrompt('任务标题:', task.title);
   if (!title) return;
-  const hours = prompt('预计小时:', task.estimated_hours || '1');
+  const hours = await modalPrompt('预计小时:', task.estimated_hours || '1');
   const res = await client.saberUpdateTask(taskId, { title, estimated_hours: parseFloat(hours) || 1 });
   if (res.code === 0) {
     await loadDashboard();
   } else {
-    alert(`编辑失败: ${res.msg}`);
+    await modalAlert(`编辑失败: ${res.msg}`);
   }
 }
 
 async function deleteTask(taskId) {
-  if (!confirm('确定删除此任务？')) return;
+  if (!await modalConfirm('确定删除此任务？')) return;
   const res = await client.saberDeleteTask(taskId);
   if (res.code === 0) {
     await loadDashboard();
   } else {
-    alert(`删除失败: ${res.msg}`);
+    await modalAlert(`删除失败: ${res.msg}`);
   }
 }
 
 async function createTaskForPlan() {
   const plan = state.dashboard.selectedPlan;
-  if (!plan) { alert('请先选择 Plan'); return; }
-  const title = prompt('新任务标题:');
+  if (!plan) { await modalAlert('请先选择 Plan'); return; }
+  const title = await modalPrompt('新任务标题:');
   if (!title) return;
-  const hours = prompt('预计小时:', '1');
-  const layer = prompt('认知层级 (K=知识 C=概念 T=理论 S=技能 W=工作流):', plan.cognitive_focus || 'T');
+  const hours = await modalPrompt('预计小时:', '1');
+  const layer = await modalPrompt('认知层级 (K=知识 C=概念 T=理论 S=技能 W=工作流):', plan.cognitive_focus || 'T');
   const res = await client.saberCreateTask(plan.id, {
     title, estimated_hours: parseFloat(hours) || 1,
     cognitive_layer: layer || 'T',
@@ -6478,7 +6911,7 @@ async function createTaskForPlan() {
   if (res.code === 0) {
     await loadDashboard();
   } else {
-    alert(`创建失败: ${res.msg}`);
+    await modalAlert(`创建失败: ${res.msg}`);
   }
 }
 
@@ -6497,19 +6930,19 @@ async function _dashLoadIntensity(planId) {
 async function generatePlansForGoal(goalId) {
   const res = await client.saberGeneratePlans(goalId);
   if (res.code !== 0) {
-    alert(`生成失败: ${res.msg}`);
+    await modalAlert(`生成失败: ${res.msg}`);
     return;
   }
   const suggestions = res.data?.suggestions || [];
   if (suggestions.length === 0) {
-    alert('LLM 未返回任何 Plan 建议');
+    await modalAlert('LLM 未返回任何 Plan 建议');
     return;
   }
   const lines = suggestions.map((s, i) =>
     `${i+1}. ${escapeHtml(s.title)} [${s.cognitive_focus || 'T'}] · ⚖ ${(s.priority_weight ?? 0.5).toFixed(2)}\n   ${escapeHtml(s.description || '')}`
   );
   const msg = `LLM 生成了 ${suggestions.length} 个 Plan 方案：\n\n${lines.join('\n\n')}\n\n输入编号创建对应 Plan（逗号分隔，如 1,2,3），或留空取消：`;
-  const input = prompt(msg);
+  const input = await modalPrompt(msg);
   if (!input) return;
   const indices = input.split(',').map(s => parseInt(s.trim()) - 1).filter(i => i >= 0 && i < suggestions.length);
   for (const idx of indices) {
@@ -6521,7 +6954,7 @@ async function generatePlansForGoal(goalId) {
       priority_weight: s.priority_weight ?? 0.5,
     });
     if (createRes.code !== 0) {
-      alert(`创建 Plan「${s.title}」失败: ${createRes.msg}`);
+      await modalAlert(`创建 Plan「${s.title}」失败: ${createRes.msg}`);
     }
   }
   await loadDashboard();
@@ -6688,8 +7121,8 @@ async function recoverDashAttention() {
 
 async function openAgentChat() {
   const plan = state.dashboard.selectedPlan;
-  if (!plan) { alert('请先选择 Plan'); return; }
-  const msg = prompt('💬 自由对话: 你想和 Agent 讨论什么？');
+  if (!plan) { await modalAlert('请先选择 Plan'); return; }
+  const msg = await modalPrompt('💬 自由对话: 你想和 Agent 讨论什么？');
   if (!msg) return;
   const res = await client.saberAgentChat(plan.id, msg);
   if (res && res.code === 0) {
@@ -6700,7 +7133,7 @@ async function openAgentChat() {
     if (focusDecision) focusDecision.appendChild(replyEl);
     _pushCopilotLog('agent', res.data.reply.substring(0, 100));
   } else {
-    alert(`对话失败: ${(res && res.msg) || '请求错误'}`);
+    await modalAlert(`对话失败: ${(res && res.msg) || '请求错误'}`);
   }
 }
 
@@ -7261,7 +7694,16 @@ async function sendAgentStream(text, attachments) {
                 // 分段模式：将已有文本固化为独立 assistant 消息，再创建独立 tool 消息
                 if (fullContent) {
                   updateLastAssistantMessage(fullContent);
-                } else {
+    } else if (tab && tab._isMonaco) {
+      var vditorEl = document.getElementById('paneVditor-' + paneId);
+      if (vditorEl) vditorEl.style.display = 'none';
+      var monacoEl = document.getElementById('paneMonaco-' + paneId);
+      if (monacoEl) monacoEl.style.display = '';
+      var pdfContainer = document.getElementById('panePdfContainer-' + paneId);
+      if (pdfContainer) pdfContainer.style.display = 'none';
+      var content = state['paneFileContents_' + paneId][path] || '';
+      _ensurePaneMonaco(paneId, content, path);
+    } else {
                   // 无文本，移除空的 assistant 消息
                   for (let j = state.agentMessages.length - 1; j >= 0; j--) {
                     if (state.agentMessages[j].role === 'assistant' && !state.agentMessages[j].content) {
@@ -8114,7 +8556,7 @@ async function swarmRunAgent() {
 }
 
 async function swarmEnableCluster() {
-  const reason = prompt('请输入启用 Swarm 集群模式的原因（如：大规模并行研究任务）：');
+  const reason = await modalPrompt('请输入启用 Swarm 集群模式的原因（如：大规模并行研究任务）：');
   if (!reason || !reason.trim()) {
     if (reason !== null) showToast('启用集群模式需要提供原因说明', 'error');
     return;
@@ -8138,7 +8580,7 @@ async function swarmEnableCluster() {
 }
 
 async function swarmDisableCluster() {
-  if (!confirm('确认禁用 Swarm 集群模式？正在运行的大规模并行任务将被取消。')) return;
+  if (!await modalConfirm('确认禁用 Swarm 集群模式？正在运行的大规模并行任务将被取消。')) return;
   try {
     const res = await fetch(`${API_BASE}/api/swarm/disable`, { method: 'POST' });
     const data = await res.json();
@@ -8524,6 +8966,43 @@ function closeHtmlModal() {
   modalBox.classList.remove('modal-wide');
 }
 
+// ─── Modal Prompt / Confirm（替代浏览器原生弹窗，兼容 Electron） ──
+
+var _modalResolve = null;
+
+function resolveModal(val) {
+  closeHtmlModal();
+  var r = _modalResolve;
+  _modalResolve = null;
+  if (r) r(val);
+}
+
+function modalConfirm(msg) {
+  return new Promise(function(resolve) {
+    _modalResolve = resolve;
+    showHtmlModal('确认', '<div style="padding:12px"><p style="margin:0 0 12px;font-size:13px;color:var(--fg-muted)">' + escapeHtml(msg) + '</p><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn-action" onclick="resolveModal(true)" style="padding:8px 20px" autofocus>确定</button><button class="btn" onclick="resolveModal(false)" style="padding:8px 20px">取消</button></div></div>');
+  });
+}
+
+function modalAlert(msg) {
+  return new Promise(function(resolve) {
+    _modalResolve = resolve;
+    showHtmlModal('提示', '<div style="padding:12px"><p style="margin:0 0 12px;font-size:13px;color:var(--fg-muted)">' + escapeHtml(msg) + '</p><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn-action" onclick="resolveModal(true)" style="padding:8px 20px" autofocus>确定</button></div></div>');
+  });
+}
+
+function modalPrompt(msg, defaultValue) {
+  return new Promise(function(resolve) {
+    _modalResolve = resolve;
+    var defVal = defaultValue || '';
+    showHtmlModal(msg, '<div style="padding:12px"><input id="modalPromptInput" type="text" value="' + escapeHtml(defVal) + '" placeholder="' + escapeHtml(msg) + '" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;font-family:monospace;box-sizing:border-box" autofocus><div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end"><button class="btn-action" onclick="resolveModal(document.getElementById(\'modalPromptInput\').value)" style="padding:8px 20px">确定</button><button class="btn" onclick="resolveModal(null)" style="padding:8px 20px">取消</button></div></div>');
+    setTimeout(function() {
+      var inp = document.getElementById('modalPromptInput');
+      if (inp) inp.focus();
+    }, 100);
+  });
+}
+
 function showModal(title, placeholder, callback, options = {}) {
   const overlay = document.getElementById('modalOverlay');
   const input = document.getElementById('modalInput');
@@ -8673,7 +9152,7 @@ document.querySelectorAll('.context-menu-item').forEach(item => {
         break;
 
       case 'delete':
-        if (confirm(`确定删除 "${target.name}"？`)) {
+        if (await modalConfirm(`确定删除 "${target.name}"？`)) {
           const res = await client.removeFile(target.path);
           if (res.code === 0) {
             showToast('已删除', 'success');
@@ -8892,6 +9371,7 @@ document.getElementById('pdfZoomIn').addEventListener('click', async () => {
   if (state.pdfPath) state.pdfViewState[state.pdfPath] = { pageNum: state.pdfPageNum, zoom: state.pdfZoom, dualPage: state.pdfDualPage };
   _clearPdfCache();
   await renderPdfPage();
+  _saveSession();
 });
 
 document.getElementById('pdfZoomOut').addEventListener('click', async () => {
@@ -8899,6 +9379,7 @@ document.getElementById('pdfZoomOut').addEventListener('click', async () => {
   if (state.pdfPath) state.pdfViewState[state.pdfPath] = { pageNum: state.pdfPageNum, zoom: state.pdfZoom, dualPage: state.pdfDualPage };
   _clearPdfCache();
   await renderPdfPage();
+  _saveSession();
 });
 
 document.getElementById('pdfDualBtn').addEventListener('click', async () => {
@@ -8911,6 +9392,7 @@ document.getElementById('pdfDualBtn').addEventListener('click', async () => {
   document.getElementById('pdfCanvasContainer').style.alignItems = state.pdfDualPage ? 'flex-start' : 'center';
   _clearPdfCache();
   await renderPdfPage();
+  _saveSession();
 });
 
 // 键盘翻页（主编辑器 PDF 和分屏 PDF）
@@ -9357,9 +9839,53 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
 let _paneCounter = 1;
 let _activePaneId = '0';
 var _splitActive = false;  // 是否处于分屏状态
+var _splitDirection = 'h'; // 分屏方向: 'h' 水平, 'v' 垂直
 let _agentPaneId = null;   // Agent 分屏所在的 paneId（复用 sidebar DOM）
 
-function splitPane(type) {
+function _onPaneMousedown(paneId, e) {
+  var el = e.target;
+  while (el && el !== e.currentTarget) {
+    if (el.classList && el.classList.contains('pane')) return;
+    el = el.parentElement;
+  }
+  setActivePane(paneId);
+}
+
+function _addPaneToContainer(container, type) {
+  var paneCount = container.querySelectorAll(':scope > .pane').length;
+  if (paneCount >= 4) { showToast('同方向最多4个分屏', 'error'); return null; }
+  var newPaneId = '' + (_paneCounter++);
+  var divider = document.createElement('div');
+  divider.className = 'split-divider divider-anim-in';
+  var pane = document.createElement('div');
+  pane.className = 'pane pane-anim-in';
+  pane.id = 'pane-' + newPaneId;
+  pane.setAttribute('data-pane-id', newPaneId);
+  pane.addEventListener('mousedown', function(e) { _onPaneMousedown(newPaneId, e); });
+  container.appendChild(divider);
+  container.appendChild(pane);
+  _initNewPane(pane, newPaneId, type);
+  var tabsEl = document.getElementById('editorTabs-' + newPaneId);
+  if (tabsEl) _setupPaneTabsDrop(tabsEl, newPaneId);
+  initDividerDrag(divider);
+  setActivePane(newPaneId);
+  requestAnimationFrame(function() {
+    pane.classList.remove('pane-anim-in');
+    divider.classList.remove('divider-anim-in');
+  });
+  setTimeout(_relayoutEditors, 280);
+  return newPaneId;
+}
+
+function _relayoutEditors() {
+  if (_monacoEditor && typeof _monacoEditor.layout === 'function') _monacoEditor.layout();
+  for (var key in state) {
+    if (key.startsWith('paneMonaco_') && state[key] && typeof state[key].layout === 'function') state[key].layout();
+  }
+}
+
+function splitPane(type, direction) {
+  direction = direction || 'h';
   var editorArea = document.getElementById('editorArea');
 
   if (!_splitActive) {
@@ -9367,36 +9893,89 @@ function splitPane(type) {
     var splitContainer = document.createElement('div');
     splitContainer.className = 'split-container';
     splitContainer.id = 'splitContainer';
+    splitContainer.dataset.direction = direction;
+    splitContainer.style.flexDirection = direction === 'v' ? 'column' : 'row';
 
     var mainPane = document.createElement('div');
     mainPane.className = 'pane active-pane';
     mainPane.id = 'pane-0';
     mainPane.setAttribute('data-pane-id', '0');
-    mainPane.addEventListener('mousedown', function() { setActivePane('0'); });
+    mainPane.addEventListener('mousedown', function(e) { _onPaneMousedown('0', e); });
+
+    // 给 pane-0 也建立标准 pane-header + pane-body 结构
+    mainPane.innerHTML =
+      '<div class="pane-header">' +
+        '<span class="pane-title" id="paneTitle-0">📄 编辑器</span>' +
+      '</div>' +
+      '<div class="pane-body" id="editorPaneBody-0"></div>';
 
     editorArea.insertBefore(splitContainer, editorContainer);
     splitContainer.appendChild(mainPane);
-    mainPane.appendChild(editorContainer);
+    document.getElementById('editorPaneBody-0').appendChild(editorContainer);
     _splitActive = true;
-  }
+    _splitDirection = direction;
+    _relayoutEditors();
 
-  var container = document.getElementById('splitContainer');
-  var panes = container.querySelectorAll('.pane');
-  if (panes.length >= 4) {
-    showToast('最多支持4个分屏', 'error');
+    _addPaneToContainer(document.getElementById('splitContainer'), type);
     return;
   }
 
-  var newPaneId = '' + (_paneCounter++);
-  var divider = document.createElement('div');
-  divider.className = 'split-divider divider-anim-in';
+  var targetId = _activePaneId || '0';
+  var targetEl = document.getElementById('pane-' + targetId);
+  if (!targetEl) { showToast('找不到目标分屏', 'error'); return; }
 
-  var pane = document.createElement('div');
-  pane.className = 'pane pane-anim-in';
-  pane.id = 'pane-' + newPaneId;
-  pane.setAttribute('data-pane-id', newPaneId);
-  pane.addEventListener('mousedown', function() { setActivePane(newPaneId); });
+  var container = _findSplitContainer(targetEl);
+  if (!container) { showToast('无法分割此分屏', 'error'); return; }
+  var containerDir = container.style.flexDirection === 'column' ? 'v' : 'h';
 
+  if (direction === containerDir) {
+    // 同方向：在同层追加（上限4个）
+    _addPaneToContainer(container, type);
+  } else {
+    // 反方向：检查是否已嵌套
+    if (container !== document.getElementById('splitContainer')) {
+      showToast('已达最大嵌套深度', 'error'); return;
+    }
+    if (targetEl.querySelector('.split-container')) {
+      showToast('该分屏已嵌套，不可继续分割', 'error'); return;
+    }
+    var oldBody = targetEl.querySelector('.pane-body');
+    if (!oldBody) { showToast('无法分割此分屏', 'error'); return; }
+
+    var outer = document.createElement('div');
+    outer.className = 'split-container';
+    outer.dataset.direction = direction;
+    outer.style.cssText = 'flex:1;display:flex;flex-direction:' + (direction === 'v' ? 'column' : 'row') + ';overflow:hidden;min-height:0';
+    var leftPane = document.createElement('div');
+    leftPane.className = 'pane-nested';
+    leftPane.style.cssText = 'flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0';
+    leftPane.appendChild(oldBody);
+    var divider = document.createElement('div');
+    divider.className = 'split-divider divider-anim-in';
+    var newPaneId = '' + (_paneCounter++);
+    var newPane = document.createElement('div');
+    newPane.className = 'pane pane-anim-in';
+    newPane.id = 'pane-' + newPaneId;
+    newPane.setAttribute('data-pane-id', newPaneId);
+    newPane.addEventListener('mousedown', function(e) { _onPaneMousedown(newPaneId, e); });
+
+    _initNewPane(newPane, newPaneId, type);
+    outer.appendChild(leftPane);
+    outer.appendChild(divider);
+    outer.appendChild(newPane);
+    targetEl.appendChild(outer);
+    initDividerDrag(divider);
+    setActivePane(newPaneId);
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        newPane.classList.remove('pane-anim-in');
+        divider.classList.remove('divider-anim-in');
+      });
+    });
+  }
+}
+
+function _initNewPane(pane, newPaneId, type) {
   if (type === 'agent') {
     _agentPaneId = newPaneId;
     var panelAgent = document.getElementById('panel-agent');
@@ -9406,10 +9985,10 @@ function splitPane(type) {
         '<button class="pane-close" onclick="closePane(\'' + newPaneId + '\')" title="关闭">✕</button>' +
       '</div>' +
       '<div class="pane-body" id="agentPaneBody-' + newPaneId + '"></div>';
-    container.appendChild(divider);
-    container.appendChild(pane);
-    var paneBody = document.getElementById('agentPaneBody-' + newPaneId);
-    paneBody.appendChild(panelAgent);
+    pane.style.flex = '1';
+    pane.style.overflow = 'hidden';
+    var newPaneBody = pane.querySelector('.pane-body');
+    newPaneBody.appendChild(panelAgent);
     panelAgent.classList.add('split-pane-content');
     panelAgent.style.flexDirection = 'column';
     panelAgent.style.height = '100%';
@@ -9427,10 +10006,12 @@ function splitPane(type) {
         '</div>' +
         '<div id="editorWrapper-' + newPaneId + '" style="flex:1;overflow:hidden;display:flex;flex-direction:column">' +
           '<div id="paneVditor-' + newPaneId + '" style="width:100%;height:100%"></div>' +
+          '<div id="paneMonaco-' + newPaneId + '" style="width:100%;height:100%;display:none"></div>' +
           '<div id="panePdfContainer-' + newPaneId + '" style="width:100%;height:100%;display:none;flex-direction:column;overflow:auto">' +
             '<div class="pdf-toolbar" style="padding:4px 10px;gap:6px">' +
               '<button class="pdf-nav-btn" onclick="panePdfNav(\'' + newPaneId + '\',-1)">◀</button>' +
-              '<span id="panePdfInfo-' + newPaneId + '" style="font-size:12px;color:var(--fg-muted)">1/1</span>' +
+              '<input id="panePdfInfo-' + newPaneId + '" type="number" min="1" value="1" style="width:52px;padding:1px 4px;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:3px;text-align:center" onchange="panePdfGoToPage(\'' + newPaneId + '\',+this.value)">' +
+              '<span style="font-size:11px;color:var(--fg-muted)" id="panePdfTotal-' + newPaneId + '">/ 1</span>' +
               '<button class="pdf-nav-btn" onclick="panePdfNav(\'' + newPaneId + '\',1)">▶</button>' +
               '<button class="pdf-nav-btn" onclick="panePdfZoom(\'' + newPaneId + '\',-0.2)">🔍-</button>' +
               '<span id="panePdfZoom-' + newPaneId + '" style="font-size:12px;color:var(--fg-muted)">100%</span>' +
@@ -9457,12 +10038,10 @@ function splitPane(type) {
               '<input id="paneBrowserUrl-' + newPaneId + '" style="flex:1;padding:3px 6px;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px" placeholder="输入URL..." onkeydown="if(event.key===\'Enter\') navigatePaneBrowser(\'' + newPaneId + '\')">' +
               '<button class="tcb-btn" onclick="navigatePaneBrowser(\'' + newPaneId + '\')" style="font-size:11px">↵</button>' +
             '</div>' +
-            '<iframe id="paneBrowserFrame-' + newPaneId + '" sandbox="allow-scripts allow-forms allow-popups" style="flex:1;border:none;width:100%" src="about:blank"></iframe>' +
+            '<iframe id="paneBrowserFrame-' + newPaneId + '" style="flex:1;border:none;width:100%" src="about:blank"></iframe>' +
           '</div>' +
         '</div>' +
       '</div>';
-    container.appendChild(divider);
-    container.appendChild(pane);
     state['paneTabs_' + newPaneId] = [];
     state['paneActiveTab_' + newPaneId] = null;
     state['paneFileContents_' + newPaneId] = {};
@@ -9471,17 +10050,6 @@ function splitPane(type) {
     var newTabsEl = document.getElementById('editorTabs-' + newPaneId);
     if (newTabsEl) _setupPaneTabsDrop(newTabsEl, newPaneId);
   }
-
-  initDividerDrag(divider);
-  setActivePane(newPaneId);
-
-  // 滑入动画：触发 layout → 移除 anim-in 类
-  requestAnimationFrame(function() {
-    requestAnimationFrame(function() {
-      pane.classList.remove('pane-anim-in');
-      divider.classList.remove('divider-anim-in');
-    });
-  });
 }
 
 function navigatePaneBrowser(paneId) {
@@ -9493,6 +10061,7 @@ function navigatePaneBrowser(paneId) {
   if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
   inp.value = url;
   frame.removeAttribute('srcdoc');
+  _setFrameSandbox(frame, true);
   frame.src = '/api/browser/proxy?url=' + encodeURIComponent(url);
   var tabs = state['paneTabs_' + paneId] || [];
   for (var i = 0; i < tabs.length; i++) { if (tabs[i]._isBrowser) { tabs[i]._browserUrl = url; break; } }
@@ -9501,12 +10070,13 @@ function navigatePaneBrowser(paneId) {
 function closePane(paneId, noAnim) {
   var pane = document.getElementById('pane-' + paneId);
   if (!pane) return;
-  var container = document.getElementById('splitContainer');
+  var container = _findSplitContainer(pane) || document.getElementById('splitContainer');
 
   // 如果关闭的是 Agent 分屏，把 panel-agent 移回 sidebar
   var isAgent = paneId === _agentPaneId;
+  var panelAgent;
   if (isAgent) {
-    var panelAgent = document.getElementById('panel-agent');
+    panelAgent = document.getElementById('panel-agent');
     var sidebar = document.getElementById('sidebar');
     if (panelAgent && sidebar) {
       panelAgent.classList.remove('split-pane-content');
@@ -9544,32 +10114,37 @@ function closePane(paneId, noAnim) {
     }, 260);
   }
 
-  // 如果只剩 pane-0，恢复原始结构
-  var remaining = container.querySelectorAll('.pane');
-  if (remaining.length <= 1 && remaining[0] && remaining[0].id === 'pane-0') {
-    var editorContainer = document.getElementById('editorContainer');
-    var editorArea = document.getElementById('editorArea');
-    if (isAgent && panelAgent && panelAgent.parentNode) {
-      // Agent 已在上面移回sidebar，不需要再移除
+  // 如果只剩 pane-0 且是顶层容器，恢复原始结构
+  var isTopContainer = container && container.id === 'splitContainer';
+  if (isTopContainer) {
+    var remaining = container.querySelectorAll(':scope > .pane');
+    if (remaining.length <= 1 && remaining[0] && remaining[0].id === 'pane-0') {
+      var editorContainer = document.getElementById('editorContainer');
+      var editorArea = document.getElementById('editorArea');
+      setTimeout(function() {
+        if (container.parentNode) {
+          editorArea.appendChild(editorContainer);
+          container.remove();
+          _splitActive = false;
+          _relayoutEditors();
+        }
+      }, noAnim ? 0 : 260);
+      _cleanupPaneState(paneId);
+      return;
     }
-    setTimeout(function() {
-      if (container.parentNode) {
-        editorArea.appendChild(editorContainer);
-        container.remove();
-        _splitActive = false;
-      }
-    }, noAnim ? 0 : 260);
-    return;
   }
 
-  // 激活第一个 pane
-  var firstPane = container.querySelector('.pane');
-  if (firstPane) {
-    setActivePane(firstPane.getAttribute('data-pane-id'));
+  // 激活第一个 pane（只在单层）
+  if (container) {
+    var firstPane = container.querySelector(':scope > .pane');
+    if (firstPane) {
+      setActivePane(firstPane.getAttribute('data-pane-id'));
+    }
   }
 
   // 清理 pane 状态
   _cleanupPaneState(paneId);
+  setTimeout(_relayoutEditors, 280);
 }
 
 function _cleanupPaneState(paneId) {
@@ -9597,6 +10172,32 @@ function _cleanupPaneState(paneId) {
     try { vditor.destroy(); } catch(e) {}
   }
   delete state['paneVditor_' + paneId];
+  var paneMonaco = state['paneMonaco_' + paneId];
+  if (paneMonaco && typeof paneMonaco.dispose === 'function') {
+    try { paneMonaco.dispose(); } catch(e) {}
+  }
+  delete state['paneMonaco_' + paneId];
+  // dispose all models created for this pane
+  try {
+    var api = window.monaco;
+    if (api && api.editor) {
+      paneTabs.forEach(function(t) {
+        if (t._isMonaco) {
+          var uri = api.Uri.file(paneId + '/' + t.path);
+          var m = api.editor.getModel(uri);
+          if (m) m.dispose();
+        }
+      });
+    }
+  } catch(e) {}
+}
+
+function _setFrameSandbox(frame, enable) {
+  if (enable) {
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+  } else {
+    frame.removeAttribute('sandbox');
+  }
 }
 
 /* 关闭分屏编辑器 pane 中的 tab */
@@ -9657,6 +10258,7 @@ function closePaneTab(paneId, path) {
       if (titleEl) titleEl.textContent = '📄 编辑器';
     }
   }
+  _saveSession();
 }
 
 // ─── 跨分屏 Tab 拖拽传递 ──────────────────────────────────
@@ -9895,24 +10497,34 @@ function setActivePane(paneId) {
   });
 }
 
+function _findSplitContainer(el) {
+  var p = el.parentElement;
+  while (p) {
+    if (p.classList && p.classList.contains('split-container')) return p;
+    p = p.parentElement;
+  }
+  return document.getElementById('splitContainer') || null;
+}
+
 function initDividerDrag(divider) {
   divider.addEventListener('mousedown', function(e) {
     e.preventDefault();
     divider.classList.add('dragging');
-    var startX = e.clientX;
-    var container = document.getElementById('splitContainer');
+    var container = _findSplitContainer(divider);
+    var isVertical = container ? container.style.flexDirection === 'column' : (_splitDirection === 'v');
+    var startPos = isVertical ? e.clientY : e.clientX;
     var panes = container.querySelectorAll('.pane');
-    var startWidths = [];
-    panes.forEach(function(p) { startWidths.push(p.offsetWidth); });
+    var startSizes = [];
+    panes.forEach(function(p) { startSizes.push(isVertical ? p.offsetHeight : p.offsetWidth); });
 
     // 拖拽时禁用过渡以获得即时反馈
     panes.forEach(function(p) { p.classList.add('pane-no-transition'); });
     divider.classList.add('divider-no-transition');
 
     function onMove(e2) {
-      var dx = e2.clientX - startX;
+      var d = (isVertical ? e2.clientY : e2.clientX) - startPos;
       var panes = container.querySelectorAll('.pane');
-      if (panes.length < 2 || !startWidths.length) return;
+      if (panes.length < 2 || !startSizes.length) return;
 
       var idx = -1;
       var children = Array.from(container.children);
@@ -9926,16 +10538,21 @@ function initDividerDrag(divider) {
           break;
         }
       }
-      if (idx < 0 || idx >= startWidths.length - 1) return;
+      if (idx < 0 || idx >= startSizes.length - 1) return;
 
-      var newLeft = startWidths[idx] + dx;
-      var newRight = startWidths[idx + 1] - dx;
-      if (newLeft < 200 || newRight < 200) return;
+      var newA = startSizes[idx] + d;
+      var newB = startSizes[idx + 1] - d;
+      if (newA < 200 || newB < 200) return;
 
       panes[idx].style.flex = 'none';
-      panes[idx].style.width = newLeft + 'px';
       panes[idx + 1].style.flex = 'none';
-      panes[idx + 1].style.width = newRight + 'px';
+      if (isVertical) {
+        panes[idx].style.height = newA + 'px';
+        panes[idx + 1].style.height = newB + 'px';
+      } else {
+        panes[idx].style.width = newA + 'px';
+        panes[idx + 1].style.width = newB + 'px';
+      }
     }
 
     function onUp() {
@@ -10000,7 +10617,7 @@ function closeShortcutHelp() {
   document.getElementById('shortcutHelpOverlay').classList.remove('active');
 }
 
-document.addEventListener('keydown', (e) => {
+document.addEventListener('keydown', async (e) => {
   // Ctrl/Meta shortcuts
   if (e.ctrlKey || e.metaKey) {
     switch (e.key.toLowerCase()) {
@@ -10077,7 +10694,7 @@ document.addEventListener('keydown', (e) => {
       case 'D': case 'd':
         if (!isInput && state.dashboard.selectedPlanId) {
           e.preventDefault();
-          if (confirm('确定归档当前选中的 Plan？')) {
+          if (await modalConfirm('确定归档当前选中的 Plan？')) {
             deleteEntity('plan', state.dashboard.selectedPlanId);
           }
         }
@@ -10181,6 +10798,9 @@ async function init() {
     }
     renderFileTree();
     renderWelcomeRecentFiles();
+    renderWelcomeTaskSessions();
+    // 检查是否有上次未关闭的标签页，弹窗询问是否恢复
+    _checkSessionRestore();
   } catch(e) { console.warn('init: load dirs failed', e); }
 
   client.connectWS();
@@ -10604,10 +11224,10 @@ function toggleGradientTheme() {
 function setElColor(el, h, m) {
   var t = h + m / 60;
   var stops = [
-    [0, '#1a1a3e'], [5, '#2d2b55'], [6, '#8b5cf6'],
+    [0, '#7aa2f7'], [5, '#9ece6a'], [6, '#8b5cf6'],
     [7, '#f97316'], [8, '#facc15'], [12, '#22d3ee'],
     [16, '#06b6d4'], [17, '#f97316'], [19, '#a855f7'],
-    [20, '#6366f1'], [23, '#1a1a3e'], [24, '#1a1a3e']
+    [20, '#6366f1'], [23, '#7aa2f7'], [24, '#7aa2f7']
   ];
   for (var i = 0; i < stops.length - 1; i++) {
     var t0 = stops[i][0], c0 = stops[i][1];
@@ -10643,6 +11263,60 @@ var _timerPresets = [0, 5*60, 10*60, 25*60, 60*60];
 var _timerIdx = 0;
 var _activeTimerTaskId = '';
 
+function _playTimerAlert() {
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var g = ctx.createGain();
+    g.connect(ctx.destination);
+    g.gain.value = 0.3;
+    var o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.value = 880;
+    o.connect(g);
+    o.start();
+    o.stop(ctx.currentTime + 0.15);
+    setTimeout(function() {
+      var o2 = ctx.createOscillator();
+      o2.type = 'sine';
+      o2.frequency.value = 1100;
+      o2.connect(ctx.createGain());
+      o2.connect(g);
+      o2.start();
+      o2.stop(ctx.currentTime + 0.15);
+    }, 200);
+    setTimeout(function() { ctx.close(); }, 1000);
+  } catch(e) {}
+}
+
+function _playTimerTick(ratio) {
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var now = ctx.currentTime;
+    var g = ctx.createGain();
+    g.connect(ctx.destination);
+    g.gain.setValueAtTime((0.003 / (1 - ratio + 0.05)) * 0.5, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+    var o = ctx.createOscillator();
+    o.type = 'square';
+    o.frequency.value = 1800;
+    o.connect(g);
+    o.start(now);
+    o.stop(now + 0.04);
+    setTimeout(function() { ctx.close(); }, 200);
+  } catch(e) {}
+}
+
+function _onTimerExpired() {
+  _timerRemaining = 0;
+  _timerRunning = false;
+  _activeTimerTaskId = '';
+  if (_timerInterval) { clearInterval(_timerInterval); _timerInterval = null; }
+  _playTimerAlert();
+  showToast('⏰ 倒计时结束！', 'warning', 0);
+  updateTimerDisplay();
+  saveTimerState();
+}
+
 function saveTimerState() {
   localStorage.setItem('ts2_timer_total', _timerTotal);
   localStorage.setItem('ts2_timer_remaining', _timerRemaining);
@@ -10670,8 +11344,9 @@ function restoreTimerState() {
   }
   if (_timerRunning) {
     _timerInterval = setInterval(function() {
+      _playTimerTick(1 - _timerRemaining / _timerTotal);
       _timerRemaining--;
-      if (_timerRemaining <= 0) { _timerRemaining = 0; _timerRunning = false; _activeTimerTaskId = ''; clearInterval(_timerInterval); _timerInterval = null; }
+      if (_timerRemaining <= 0) { _onTimerExpired(); }
       updateTimerDisplay(); saveTimerState();
     }, 1000);
   }
@@ -10707,8 +11382,9 @@ function cycleTimer() {
   if (_timerTotal > 0) {
     _timerRunning = true;
     _timerInterval = setInterval(function() {
+      _playTimerTick(1 - _timerRemaining / _timerTotal);
       _timerRemaining--;
-      if (_timerRemaining <= 0) { _timerRemaining = 0; _timerRunning = false; _activeTimerTaskId = ''; clearInterval(_timerInterval); _timerInterval = null; }
+      if (_timerRemaining <= 0) { _onTimerExpired(); }
       updateTimerDisplay(); saveTimerState();
     }, 1000);
   }
@@ -10723,8 +11399,9 @@ function resetTimer() {
   _timerRunning = _timerTotal > 0;
   if (_timerRunning) {
     _timerInterval = setInterval(function() {
+      _playTimerTick(1 - _timerRemaining / _timerTotal);
       _timerRemaining--;
-      if (_timerRemaining <= 0) { _timerRemaining = 0; _timerRunning = false; _activeTimerTaskId = ''; clearInterval(_timerInterval); _timerInterval = null; }
+      if (_timerRemaining <= 0) { _onTimerExpired(); }
       updateTimerDisplay(); saveTimerState();
     }, 1000);
   }
@@ -10741,8 +11418,9 @@ function startTaskTimer(minutes, taskId) {
   if (_timerInterval) { clearInterval(_timerInterval); _timerInterval = null; }
   _timerRunning = true;
   _timerInterval = setInterval(function() {
+    _playTimerTick(1 - _timerRemaining / _timerTotal);
     _timerRemaining--;
-    if (_timerRemaining <= 0) { _timerRemaining = 0; _timerRunning = false; _activeTimerTaskId = ''; clearInterval(_timerInterval); _timerInterval = null; }
+    if (_timerRemaining <= 0) { _onTimerExpired(); }
     updateTimerDisplay(); saveTimerState();
   }, 1000);
   saveTimerState();
@@ -12101,9 +12779,11 @@ function slidesUpdateNav() {
   var cur = document.getElementById('slidesCurrentNum');
   var tot = document.getElementById('slidesTotalNum');
   var prev = document.getElementById('slidesPrevBtn');
+  var next = document.getElementById('slidesNextBtn');
   if (cur) cur.textContent = slidesState.currentIndex + 1;
   if (tot) tot.textContent = slidesState.slides.length;
   if (prev) prev.disabled = slidesState.currentIndex === 0;
+  if (next) next.disabled = slidesState.currentIndex === slidesState.slides.length - 1;
 }
 
 function slidesSaveCurrent() {
@@ -12182,6 +12862,14 @@ function slidesAddPage(insertAt) {
   slidesUpdateNav();
   slidesSaveLocal();
   _slidesUpdatePaneVditor();
+}
+
+function slidesAddPageBefore() {
+  slidesAddPage(slidesState.currentIndex);
+}
+
+function slidesAddPageAfter() {
+  slidesAddPage(slidesState.currentIndex + 1);
 }
 
 function slidesDelete(index) {
@@ -12325,8 +13013,8 @@ function _slidesSwitchToNotebook(path) {
   }
 }
 
-function slidesNewNotebook() {
-  var name = prompt('新笔记标题：');
+async function slidesNewNotebook() {
+  var name = await modalPrompt('新笔记标题：');
   if (!name || !name.trim()) return;
   slidesSaveCurrent();
   slidesState.id = slidesGenId();
@@ -12553,7 +13241,7 @@ async function slidesOpenLocalNotebook(name) {
 }
 
 async function slidesDeleteLocalNotebook(name) {
-  if (!confirm('确定删除本地笔记 "' + name + '"？')) return;
+  if (!await modalConfirm('确定删除本地笔记 "' + name + '"？')) return;
   try {
     var dirPrefix = slidesState.localNbDir ? SLIDES_LOCAL_DIR + '/' + slidesState.localNbDir : SLIDES_LOCAL_DIR;
     var baseName = name.replace(/\.\w+$/, '');
@@ -12679,7 +13367,8 @@ async function slidesExportSingleToServer(name) {
 // 服务器保存/加载（notes 目录 MD 文件）
 function slidesNotePath() {
   var name = (slidesState.title || 'note').replace(/[\\/:*?"<>|]/g, '_');
-  return 'Notes/' + name + (slidesState.noteExt || '.md');
+  var dir = slidesState.nbCurrentDir ? 'Notes/' + slidesState.nbCurrentDir : 'Notes';
+  return dir + '/' + name + (slidesState.noteExt || '.md');
 }
 
 function slidesNotebookToMD() {
@@ -12832,7 +13521,7 @@ function slidesImportFile(e) {
   var file = e.target.files[0];
   if (!file) return;
   var reader = new FileReader();
-  reader.onload = function() {
+  reader.onload = async function() {
     var content = reader.result;
     var ext = file.name.split('.').pop().toLowerCase();
     if (ext === 'md' || ext === 'markdown' || ext === 'rmd' || ext === 'rmarkdown' || ext === 'mdx' || ext === 'txt') {
@@ -12840,7 +13529,7 @@ function slidesImportFile(e) {
     } else {
       try {
         var nb = JSON.parse(content);
-        if (!nb.slides || !Array.isArray(nb.slides)) { alert('无效的笔记文件'); return; }
+        if (!nb.slides || !Array.isArray(nb.slides)) { await modalAlert('无效的笔记文件'); return; }
         slidesSaveCurrent();
         slidesState.title = nb.title || '导入的笔记';
         if (nb.id) slidesState.id = nb.id;
@@ -12863,7 +13552,7 @@ function slidesImportFile(e) {
         }
         _slidesSaveToCache(nbPath);
         _ensureSlidesTab(nbPath, slidesState.title);
-      } catch (err) { alert('文件解析失败'); }
+      } catch (err) { await modalAlert('文件解析失败'); }
     }
   };
   reader.readAsText(file);
@@ -13379,7 +14068,7 @@ async function slidesImportSingleFromServerByPath(relPath) {
 
 // 通过完整相对路径删除笔记（搜索结果用）
 async function slidesDeleteNotebookByPath(relPath) {
-  if (!confirm('确定删除笔记 "' + relPath + '"？此操作不可恢复。')) return;
+  if (!await modalConfirm('确定删除笔记 "' + relPath + '"？此操作不可恢复。')) return;
   try {
     var path = 'Notes/' + relPath;
     var res = await client.api('/api/file/removeFile', { path: path });
@@ -13403,6 +14092,7 @@ function _ensureSlidesTab(filePath, title) {
     _slidesSaveToCache(filePath);
   }
   state.openTabs.push({ path: filePath, name: title || filePath.split('/').pop(), modified: false, _isSlides: true });
+  _saveSession();
   addTab(filePath, title || filePath.split('/').pop());
   switchToTab(filePath);
 }
@@ -13483,7 +14173,7 @@ async function slidesOpenNotebook(fileName) {
 
 // 删除笔记
 async function slidesDeleteNotebook(fileName) {
-  if (!confirm('确定删除笔记 "' + fileName + '"？此操作不可恢复。')) return;
+  if (!await modalConfirm('确定删除笔记 "' + fileName + '"？此操作不可恢复。')) return;
   try {
     var filePath = slidesState.nbCurrentDir ? 'Notes/' + slidesState.nbCurrentDir + '/' + fileName : 'Notes/' + fileName;
     var res = await client.api('/api/file/removeFile', { path: filePath });
@@ -13597,7 +14287,51 @@ var _monacoApi = null;  // 持有 monaco 模块引用，供 _loadMonacoFile 使�
 var _monacoSrcFile = null;  // 源码浏览器打开的文件路径，保存时使用源码 API
 
 function _initMonaco(wrap, content, filePath) {
-  if (_monacoLoading) return;
+  if (_monacoApi) {
+    // API already loaded (e.g. by pane), create editor directly
+    var ext = filePath.includes('.') ? filePath.split('.').pop().toLowerCase() : '';
+    var langMap = { py:'python', js:'javascript', ts:'typescript', jsx:'javascript', tsx:'typescript',
+      r:'r', rmd:'markdown', cpp:'cpp', c:'c', h:'c', java:'java', go:'go', rs:'rust',
+      rb:'ruby', php:'php', swift:'swift', kt:'kotlin', scala:'scala', sh:'shell',
+      bash:'shell', ps1:'powershell', sql:'sql', css:'css', scss:'scss', less:'less',
+      vue:'html', svelte:'html', yaml:'yaml', yml:'yaml', toml:'ini', json:'json',
+      xml:'xml', md:'markdown', html:'html', htm:'html', tex:'latex' };
+    var lang = langMap[ext] || 'plaintext';
+    _monacoEditor = monaco.editor.create(wrap, {
+      value: content,
+      language: lang,
+      theme: 'vs-dark',
+      fontSize: 13,
+      fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace",
+      minimap: { enabled: true, size: 'fit' },
+      scrollBeyondLastLine: false,
+      wordWrap: 'on',
+      automaticLayout: true,
+      tabSize: 2,
+      cursorBlinking: 'smooth',
+      smoothScrolling: true,
+      bracketPairColorization: { enabled: true },
+      guides: { bracketPairs: true, indentation: true },
+      renderLineHighlight: 'all',
+      lineNumbersMinChars: 3,
+      padding: { top: 6 },
+    });
+    _monacoReady = true;
+    _updateMonacoStatus(filePath.split('/').pop());
+    _updateMonacoCursor();
+    _monacoEditor.onDidChangeModelContent(function() {
+      var tab = state.openTabs.find(function(t) { return t.path === state.activeTab; });
+      if (tab && tab._isMonaco) tab.modified = true;
+    });
+    _monacoEditor.onDidChangeCursorPosition(function(e) {
+      _updateMonacoCursor();
+    });
+    return;
+  }
+  if (_monacoLoading) {
+    setTimeout(function() { _initMonaco(wrap, content, filePath); }, 200);
+    return;
+  }
   _monacoLoading = true;
   var _vsBaseLocal = location.origin + '/static/monaco-editor/vs';
   var _vsBaseCDN = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs';
@@ -13659,8 +14393,8 @@ function _initMonaco(wrap, content, filePath) {
         _updateMonacoStatus(filePath.split('/').pop());
         _updateMonacoCursor();
         _monacoEditor.onDidChangeModelContent(function() {
-          var tab = state.openTabs.find(function(t) { return t._isMonaco; });
-          if (tab) tab.modified = true;
+          var tab = state.openTabs.find(function(t) { return t.path === state.activeTab; });
+          if (tab && tab._isMonaco) tab.modified = true;
         });
         _monacoEditor.onDidChangeCursorPosition(function(e) {
           _updateMonacoCursor();
@@ -13686,6 +14420,142 @@ function _getMonacoContent() {
   return _monacoEditor ? _monacoEditor.getValue() : '';
 }
 
+var _codeLangMap = { py:'python', js:'javascript', ts:'typescript', jsx:'javascript', tsx:'typescript',
+  r:'r', cpp:'cpp', c:'c', h:'c', java:'java', go:'go', rs:'rust',
+  rb:'ruby', php:'php', swift:'swift', kt:'kotlin', scala:'scala', sh:'shell',
+  bash:'shell', ps1:'powershell', sql:'sql', css:'css', scss:'scss', less:'less',
+  vue:'html', svelte:'html', yaml:'yaml', yml:'yaml', toml:'ini', json:'json',
+  xml:'xml', html:'html', htm:'html', tex:'latex' };
+
+function _isCodeFile(path) {
+  var ext = path.includes('.') ? path.split('.').pop().toLowerCase() : '';
+  return !!_codeLangMap[ext];
+}
+
+function _loadMonacoApi() {
+  if (_monacoLoading) return;
+  _monacoLoading = true;
+  var vsBase = location.origin + '/static/monaco-editor/vs';
+  if (!document.querySelector('link[href*="editor.main.min.css"]')) {
+    var cssLink = document.createElement('link');
+    cssLink.rel = 'stylesheet';
+    cssLink.href = vsBase + '/editor/editor.main.min.css';
+    document.head.appendChild(cssLink);
+  }
+  self.MonacoEnvironment = {
+    getWorkerUrl: function(moduleId, label) {
+      if (label === 'json') return vsBase + '/language/json/json.worker.js';
+      if (label === 'css' || label === 'scss' || label === 'less') return vsBase + '/language/css/css.worker.js';
+      if (label === 'html' || label === 'handlebars' || label === 'razor') return vsBase + '/language/html/html.worker.js';
+      if (label === 'typescript' || label === 'javascript') return vsBase + '/language/typescript/ts.worker.js';
+      return vsBase + '/editor/editor.worker.js';
+    }
+  };
+  var _vditorDefine = typeof define !== 'undefined' ? define : null;
+  var loaderEl = document.createElement('script');
+  loaderEl.src = vsBase + '/loader.js';
+  loaderEl.onload = function() {
+    var _monacoRequire = window.require;
+    if (_vditorDefine) { define = _vditorDefine; }
+    _monacoRequire.config({ paths: { vs: vsBase } });
+    _monacoRequire(['vs/editor/editor.main'], function() {
+      _monacoApi = window.monaco;
+      _monacoLoading = false;
+    });
+  };
+  loaderEl.onerror = function() {
+    console.warn('Local Monaco load failed, falling back to CDN');
+    _monacoLoading = false;
+    _loadMonacoApiCdn();
+  };
+  document.head.appendChild(loaderEl);
+}
+
+function _loadMonacoApiCdn() {
+  if (_monacoLoading) return;
+  _monacoLoading = true;
+  var vsBase = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs';
+  if (!document.querySelector('link[href*="editor.main.min.css"]')) {
+    var cssLink = document.createElement('link');
+    cssLink.rel = 'stylesheet';
+    cssLink.href = vsBase + '/editor/editor.main.min.css';
+    document.head.appendChild(cssLink);
+  }
+  self.MonacoEnvironment = {
+    getWorkerUrl: function(moduleId, label) {
+      if (label === 'json') return vsBase + '/language/json/json.worker.js';
+      if (label === 'css' || label === 'scss' || label === 'less') return vsBase + '/language/css/css.worker.js';
+      if (label === 'html' || label === 'handlebars' || label === 'razor') return vsBase + '/language/html/html.worker.js';
+      if (label === 'typescript' || label === 'javascript') return vsBase + '/language/typescript/ts.worker.js';
+      return vsBase + '/editor/editor.worker.js';
+    }
+  };
+  var _vditorDefine = typeof define !== 'undefined' ? define : null;
+  var loaderEl = document.createElement('script');
+  loaderEl.src = vsBase + '/loader.js';
+  loaderEl.onload = function() {
+    var _monacoRequire = window.require;
+    if (_vditorDefine) { define = _vditorDefine; }
+    _monacoRequire.config({ paths: { vs: vsBase } });
+    _monacoRequire(['vs/editor/editor.main'], function() {
+      _monacoApi = window.monaco;
+      _monacoLoading = false;
+    });
+  };
+  document.head.appendChild(loaderEl);
+}
+
+function _ensurePaneMonaco(paneId, content, filePath) {
+  var container = document.getElementById('paneMonaco-' + paneId);
+  if (!container) return;
+  var ext = filePath.includes('.') ? filePath.split('.').pop().toLowerCase() : '';
+  var lang = _codeLangMap[ext] || 'plaintext';
+  if (!window.monaco) {
+    if (!_monacoLoading) _loadMonacoApi();
+    setTimeout(function() { _ensurePaneMonaco(paneId, content, filePath); }, 200);
+    return;
+  }
+  var api = window.monaco;
+  var uri = api.Uri.file(paneId + '/' + filePath);
+  var model = api.editor.getModel(uri);
+  if (!model) {
+    model = api.editor.createModel(content, lang, uri);
+  } else {
+    model.setValue(content);
+  }
+  var editor = state['paneMonaco_' + paneId];
+  if (!editor) {
+    state['paneMonaco_' + paneId] = api.editor.create(container, {
+      model: model,
+      theme: 'vs-dark',
+      fontSize: 13,
+      fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace",
+      minimap: { enabled: true, size: 'fit' },
+      scrollBeyondLastLine: false,
+      wordWrap: 'on',
+      automaticLayout: true,
+      tabSize: 2,
+      cursorBlinking: 'smooth',
+      smoothScrolling: true,
+      bracketPairColorization: { enabled: true },
+      guides: { bracketPairs: true, indentation: true },
+      renderLineHighlight: 'all',
+      lineNumbersMinChars: 3,
+      padding: { top: 6 },
+    });
+    state['paneMonaco_' + paneId].onDidChangeModelContent(function() {
+      var activePath = state['paneActiveTab_' + paneId];
+      if (activePath) {
+        var tabs = state['paneTabs_' + paneId] || [];
+        var tab = tabs.find(function(t) { return t.path === activePath; });
+        if (tab) tab.modified = true;
+      }
+    });
+  } else {
+    editor.setModel(model);
+  }
+}
+
 function _loadMonacoFile(filePath) {
   if (!_monacoEditor || !filePath || !_monacoFiles[filePath]) return;
   var ext = filePath.includes('.') ? filePath.split('.').pop().toLowerCase() : '';
@@ -13709,8 +14579,6 @@ function _loadMonacoFile(filePath) {
   if (oldModel && oldModel !== model) oldModel.dispose();
   _monacoCurrentFile = filePath;
   _updateMonacoStatus(filePath.split('/').pop());
-  var tabEl = document.querySelector('.tab[data-path="__monaco__"] .tab-label');
-  if (tabEl) tabEl.textContent = filePath.split('/').pop();
   // 切换文件时清空执行输出
   var output = document.getElementById('monacoOutput');
   if (output) { output.style.display = 'none'; output.textContent = ''; }
@@ -13988,11 +14856,11 @@ function initTerminal() {
     _term.write(new Uint8Array(ev.data));
   };
   _termWs.onclose = function() {
-    _term.write('\r\n\x1b[31m[终端连接已断开]\x1b[0m\r\n');
+    if (_term) _term.write('\r\n\x1b[31m[终端连接已断开]\x1b[0m\r\n');
     _termWs = null;
   };
   _termWs.onerror = function() {
-    _term.write('\r\n\x1b[31m[终端连接错误]\x1b[0m\r\n');
+    if (_term) _term.write('\r\n\x1b[31m[终端连接错误]\x1b[0m\r\n');
   };
 
   _term.onData(function(data) {
@@ -14086,6 +14954,7 @@ function _browserFallback(url) {
   var frame = document.getElementById('browserFrame');
   if (frame) {
     frame.removeAttribute('srcdoc');
+    _setFrameSandbox(frame, true);
     frame.src = url;
   }
 }
@@ -14099,6 +14968,7 @@ function _browserLoadUrl(url) {
   input.value = url;
   frame.setAttribute('data-url', url);
   frame.removeAttribute('srcdoc');
+  _setFrameSandbox(frame, true);
   frame.src = _browserProxyUrl(url);
 }
 
@@ -14200,7 +15070,7 @@ function _restoreBrowserFrame(tab) {
   if (_isStartPage(url)) {
     input.value = '';
     frame.removeAttribute('src');
-    _renderStartPage().then(function(html) { frame.srcdoc = html; });
+    _setFrameSandbox(frame, false);_renderStartPage().then(function(html) { frame.srcdoc = html; });
   } else {
     _browserLoadUrl(url);
   }
@@ -14209,7 +15079,7 @@ function _restoreBrowserFrame(tab) {
 function _renderStartPageInPane(paneId) {
   _renderStartPage(paneId).then(function(html) {
     var frame = document.getElementById('paneBrowserFrame-' + paneId);
-    if (frame) frame.srcdoc = html;
+    if (frame) { _setFrameSandbox(frame, false); frame.srcdoc = html; }
   });
 }
 
@@ -14237,6 +15107,7 @@ function openBrowserInPane(paneId, url) {
     if (frame && inp) {
       inp.value = url;
       frame.removeAttribute('srcdoc');
+      _setFrameSandbox(frame, true);
       frame.src = '/api/browser/proxy?url=' + encodeURIComponent(url);
       var tabs = state['paneTabs_' + paneId] || [];
       for (var i = 0; i < tabs.length; i++) {
@@ -14446,7 +15317,7 @@ function _browserNavigate(url) {
   if (_isStartPage(url)) {
     frame.removeAttribute('src');
     input.value = '';
-    _renderStartPage().then(function(html) { frame.srcdoc = html; });
+    _setFrameSandbox(frame, false);_renderStartPage().then(function(html) { frame.srcdoc = html; });
     tab._browserUrl = 'about:blank';
     tab._browserHistory = [];
     tab._browserHistoryIdx = -1;
@@ -14485,7 +15356,7 @@ function browserGoBack() {
       input.value = url;
       frame.setAttribute('data-url', url);
       frame.removeAttribute('src');
-      _renderStartPage().then(function(html) { frame.srcdoc = html; });
+      _setFrameSandbox(frame, false);_renderStartPage().then(function(html) { frame.srcdoc = html; });
     } else {
       _browserLoadUrl(url);
     }
@@ -14507,23 +15378,23 @@ function browserGoForward() {
       input.value = url;
       frame.setAttribute('data-url', url);
       frame.removeAttribute('src');
-      _renderStartPage().then(function(html) { frame.srcdoc = html; });
+      _setFrameSandbox(frame, false);_renderStartPage().then(function(html) { frame.srcdoc = html; });
     } else {
       _browserLoadUrl(url);
     }
   }
 }
 
-function _promptAddBm() {
-  var name = prompt('书签名称:');
+async function _promptAddBm() {
+  var name = await modalPrompt('书签名称:');
   if (!name) return;
-  var url = prompt('书签 URL:');
+  var url = await modalPrompt('书签 URL:');
   if (!url) return;
   var bms = _loadCustomBookmarks();
   bms.push({ name: name, url: url, icon: '🔖' });
   _saveCustomBookmarks(bms);
   var frame = document.getElementById('browserFrame');
-  if (frame) _renderStartPage().then(function(html) { frame.srcdoc = html; });
+  if (frame) _setFrameSandbox(frame, false);_renderStartPage().then(function(html) { frame.srcdoc = html; });
 }
 
 function _delCustomBm(idx) {
@@ -14531,7 +15402,7 @@ function _delCustomBm(idx) {
   bms.splice(idx, 1);
   _saveCustomBookmarks(bms);
   var frame = document.getElementById('browserFrame');
-  if (frame) _renderStartPage().then(function(html) { frame.srcdoc = html; });
+  if (frame) _setFrameSandbox(frame, false);_renderStartPage().then(function(html) { frame.srcdoc = html; });
 }
 
 function browserRefresh() {
@@ -14543,7 +15414,7 @@ function browserRefresh() {
   if (_isStartPage(url)) {
     var frame = document.getElementById('browserFrame');
     frame.removeAttribute('src');
-    _renderStartPage().then(function(html) { frame.srcdoc = html; });
+    _setFrameSandbox(frame, false);_renderStartPage().then(function(html) { frame.srcdoc = html; });
   } else {
     _browserLoadUrl(url);
   }

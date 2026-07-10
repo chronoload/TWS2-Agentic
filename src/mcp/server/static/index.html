@@ -257,6 +257,9 @@
           <button class="course-action-btn" id="courseCreateBtn">+ 新建课程</button>
           <button class="course-action-btn" id="courseRefreshBtn">刷新</button>
         </div>
+        <div class="course-search-wrap">
+          <input type="text" id="courseSearchInput" placeholder="搜索课程..." oninput="onCourseSearch(this.value)">
+        </div>
         <div id="coursesList">
           <div class="empty-state"><span class="empty-icon">📚</span><span>加载中...</span></div>
         </div>
@@ -874,6 +877,7 @@
       <button class="btn" id="btnSync" title="同步">🔄<span class="btn-label"> 同步</span></button>
       <button class="btn" id="btnEditorToggle" title="切换编辑器">📝<span class="btn-label"> 原生</span></button>
       <button class="btn" id="btnSplitRight" title="向右分屏" onclick="splitPane('right')">⬛<span class="btn-label"> 分屏</span></button>
+      <button class="btn" id="btnSplitDown" title="向下分屏" onclick="splitPane('right','v')">▦<span class="btn-label"> 下分屏</span></button>
       <button class="btn" id="btnSplitAgent" title="分屏打开Agent" onclick="splitPane('agent')">🤖<span class="btn-label"> Agent</span></button>
       <button class="btn" id="btnTerminal" title="终端 (Ctrl+`)" onclick="toggleTerminal()">⬛<span class="btn-label"> 终端</span></button>
     </div>
@@ -883,6 +887,7 @@
         <div style="display:flex;align-items:stretch;border-bottom:1px solid var(--border)">
           <div class="editor-tabs" id="editorTabs" style="flex:1"></div>
           <div style="position:relative;display:flex;align-items:center;padding:0 4px">
+            <button onclick="promptSaveTaskSession()" title="保存当前标签页状态为任务" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">📋</button>
             <button onclick="openBrowser()" title="打开浏览器" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">🌐</button>
             <button id="recentFilesBtn" title="最近打开的文件" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">🕐</button>
             <div id="recentFilesDropdown" style="display:none;position:absolute;right:0;top:100%;width:260px;max-height:300px;overflow-y:auto;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:50;padding:4px"></div>
@@ -939,6 +944,12 @@
                   <div style="font-size:12px;color:var(--fg-dim);margin-bottom:8px;padding:0 4px">最近打开</div>
                   <div id="welcomeRecentList" style="display:flex;flex-direction:column;gap:2px">
                     <div id="welcomeRecentEmpty" style="color:var(--fg-dim);font-size:12px;padding:8px 4px">暂无最近打开的文件</div>
+                  </div>
+                </div>
+                <div id="welcomeTaskSessions" style="max-height:300px;overflow-y:auto">
+                  <div style="font-size:12px;color:var(--fg-dim);margin-bottom:8px;padding:0 4px">📋 任务储存</div>
+                  <div id="welcomeTaskSessionsList" style="display:flex;flex-direction:column;gap:2px">
+                    <div id="welcomeTaskSessionsEmpty" style="color:var(--fg-dim);font-size:12px;padding:8px 4px">暂无保存的任务</div>
                   </div>
                 </div>
               </div>
@@ -1003,10 +1014,11 @@
             </div>
             <div id="slidesVditor" style="flex:1;min-height:0;overflow:auto"></div>
             <div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:6px 16px;border-top:1px solid var(--border);background:var(--bg-secondary)">
+              <button class="btn-action btn-outline" onclick="slidesAddPageBefore()" title="在当前页前添加" style="font-size:11px;padding:4px 10px;border-style:dashed">+ 新页</button>
               <button class="btn-action btn-outline" onclick="slidesPrev()" id="slidesPrevBtn" style="font-size:11px;padding:4px 10px">◀ 上一页</button>
               <span style="font-size:13px"><span id="slidesCurrentNum" style="font-weight:700;color:var(--accent);font-size:16px">1</span><span style="color:var(--fg-muted)"> / </span><span id="slidesTotalNum" style="color:var(--fg-muted)">1</span></span>
               <button class="btn-action" onclick="slidesNext()" id="slidesNextBtn" style="font-size:11px;padding:4px 10px">下一页 ▶</button>
-              <button class="btn-action btn-outline" onclick="slidesAddPage()" style="font-size:11px;padding:4px 10px;border-style:dashed">+ 新页</button>
+              <button class="btn-action btn-outline" onclick="slidesAddPageAfter()" title="在当前页后添加" style="font-size:11px;padding:4px 10px;border-style:dashed">+ 新页</button>
               <span id="slidesSaveStatus" style="font-size:11px;color:#4ade80"></span>
             </div>
           </div>
@@ -1028,7 +1040,7 @@
             <div id="jupyterIframeWrap" style="flex:1;position:relative;overflow:hidden">
             </div>
           </div>
-          <div id="monacoEditorView" style="display:none;flex-direction:column;background:var(--bg)">
+          <div id="monacoEditorView" style="display:none;flex-direction:column;min-height:0;background:var(--bg)">
             <div style="display:flex;align-items:center;gap:6px;padding:2px 8px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0;min-height:28px">
               <button id="monacoRunBtn" onclick="execMonacoCode()" style="background:#238636;color:#fff;border:none;border-radius:4px;padding:2px 10px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px">▶ <span style="font-weight:400;font-size:10px">运行</span></button>
               <button id="monacoStopBtn" onclick="stopMonacoCode()" style="display:none;background:#da3633;color:#fff;border:none;border-radius:4px;padding:2px 10px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px">■ <span style="font-weight:400;font-size:10px">停止</span></button>

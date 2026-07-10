@@ -908,6 +908,31 @@ body {
   padding: 8px 12px;
 }
 
+.course-search-wrap {
+  padding: 6px 0;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+}
+
+.course-search-wrap input {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+
+.course-search-wrap input:focus {
+  border-color: var(--accent);
+}
+
 .course-card {
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
@@ -926,9 +951,20 @@ body {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 6px;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
-.course-card .course-title { font-size: 14px; font-weight: 600; }
+.course-card .course-title {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex-shrink: 1;
+}
 .course-card .course-hours { font-size: 11px; color: var(--fg-muted); }
 
 .course-card .course-progress {
@@ -1060,6 +1096,7 @@ body {
 /* Course actions */
 .course-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   margin-top: 6px;
 }
@@ -3192,9 +3229,16 @@ button.dash-disabled {
   flex-direction: column;
   overflow: hidden;
   min-width: 200px;
+  min-height: 0;
   position: relative;
   border-left: 1px solid var(--border);
-  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), flex 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), height 0.25s cubic-bezier(0.4, 0, 0.2, 1), flex 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+}
+.split-container[data-direction="v"] > .pane {
+  min-width: 0;
+  min-height: 100px;
+  border-left: none;
+  border-top: 1px solid var(--border);
 }
 .split-container > .pane.pane-anim-in {
   flex: 0 0 0 !important;
@@ -3203,6 +3247,11 @@ button.dash-disabled {
   opacity: 0;
   overflow: hidden;
   border-left: none;
+}
+.split-container[data-direction="v"] > .pane.pane-anim-in {
+  height: 0 !important;
+  min-height: 0 !important;
+  border-top: none;
 }
 .split-container > .pane.pane-anim-out {
   flex: 0 0 0 !important;
@@ -3213,6 +3262,11 @@ button.dash-disabled {
   pointer-events: none;
   border-left: none;
 }
+.split-container[data-direction="v"] > .pane.pane-anim-out {
+  height: 0 !important;
+  min-height: 0 !important;
+  border-top: none;
+}
 .split-container > .pane.active-pane {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
@@ -3222,8 +3276,13 @@ button.dash-disabled {
   cursor: col-resize;
   background: var(--border);
   flex-shrink: 0;
-  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s, opacity 0.2s ease;
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), height 0.25s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s, opacity 0.2s ease;
   z-index: 10;
+}
+.split-container[data-direction="v"] > .split-divider {
+  width: auto;
+  height: 4px;
+  cursor: row-resize;
 }
 .split-divider:hover, .split-divider.dragging {
   background: var(--accent);
@@ -3232,10 +3291,16 @@ button.dash-disabled {
   width: 0 !important;
   opacity: 0;
 }
+.split-container[data-direction="v"] > .split-divider.divider-anim-in {
+  height: 0 !important;
+}
 .split-divider.divider-anim-out {
   width: 0 !important;
   opacity: 0;
   pointer-events: none;
+}
+.split-container[data-direction="v"] > .split-divider.divider-anim-out {
+  height: 0 !important;
 }
 .split-divider.divider-no-transition {
   transition: background 0.1s !important;
@@ -3270,6 +3335,7 @@ button.dash-disabled {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 .split-btn {
   background: var(--bg-tertiary);
@@ -3396,7 +3462,12 @@ button.dash-disabled {
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+  min-height: 0;
   position: relative;
+}
+
+#monacoEditorWrap {
+  min-height: 0;
 }
 
 .editor-tabs {
@@ -3419,6 +3490,8 @@ button.dash-disabled {
   align-items: center;
   gap: 4px;
   color: var(--fg-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
   transition: all 0.1s;
   white-space: nowrap;
   position: relative;
@@ -3448,6 +3521,7 @@ button.dash-disabled {
   display: grid;
   grid-template-rows: 1fr;
   overflow: hidden;
+  min-height: 0;
 }
 
 /* All children of editor-wrapper fill the same grid cell */
@@ -3474,6 +3548,18 @@ button.dash-disabled {
 /* Vditor container */
 #vditor {
   border: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 分屏模式下 Vditor 编辑区被压缩时保持可滚动 */
+.split-container #vditor .vditor-ir,
+.split-container #vditor .vditor-sv,
+.split-container #vditor .vditor-wysiwyg {
+  min-height: 0 !important;
+  overflow-y: auto !important;
 }
 
 /* Vditor dark theme overrides */
@@ -4494,7 +4580,7 @@ html[data-theme="dark"] .vditor-reset img {
 .header-clock {
   font-size: 14px;
   font-weight: 700;
-  color: var(--fg);
+  color: var(--accent);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   letter-spacing: 1px;
