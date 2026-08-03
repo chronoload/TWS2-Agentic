@@ -1,7 +1,7 @@
 // ─── TS2 Client ──────────────────────────────────────────────
 
 let API_BASE = location.origin;
-const EXPOSED_DIRS = ['Notes', 'bookmarks', 'data', 'datahub', 'projects'];
+const EXPOSED_DIRS = ['Notes', 'bookmarks', 'data', 'datahub', 'projects', 'docs'];
 
 // ─── Auth state ──────────────────────────────────────────────
 let _pendingSwitchPath = ''; // 登录成功后自动重试的工作区路径
@@ -395,6 +395,9 @@ const state = {
   fileContents: {},
   originalContents: {},
   expandedDirs: new Set(),
+  selectedTreeItems: new Set(),
+  _lastClickedTreeItem: null,
+  fileClipboard: [], // [{ path, cut }]
   contextTarget: null,
   activeNavTab: 'files',
   tasks: [],
@@ -461,6 +464,7 @@ const state = {
     expandedPlans: {},    // 子 Plan 展开状态 {planId: true/false}
   },
 };
+window.state = state;
 
 // ─── Editor Service (解耦编辑器与面包屑/文件树) ──────────
 
@@ -492,7 +496,15 @@ const editorService = {
       return;
     }
     if (ext === '.docx' || ext === '.xlsx' || ext === '.pptx') {
-      await openOfficeAsPdf(path);
+      if (state.openTabs.find(t => t.path === path)) {
+        this.switchTo(path);
+        return;
+      }
+      var officeName = path.split('/').pop();
+      state.openTabs.push({ path, name: officeName, modified: false, _isOffice: true });
+      addTab(path, officeName);
+      this.switchTo(path);
+      this._addRecent(path, officeName);
       return;
     }
     if (ext === '.kmind') {
@@ -524,6 +536,15 @@ const editorService = {
       window.open(API_BASE + '/api/file/download/' + encodedPath + '?preview=true', '_blank');
       return;
     }
+    // .tex 文件 → 弹窗选择 Texpile / Monaco（可拔插：texpile 不可用时直接 Monaco）
+    if (ext === '.tex') {
+      var texChoice = await texChooseEditor(path);
+      if (texChoice === 'texpile') {
+        await openTex(path);
+        return;
+      }
+      // 'monaco' 或其他值：走下方 Monaco 分支
+    }
     // 代码/脚本文件 → Monaco Editor（每个文件独立标签页）
     var _codeExts = ['.py','.js','.ts','.jsx','.tsx','.r','.cpp','.c','.h','.java','.go','.rs','.rb','.php','.swift','.kt','.scala','.sh','.bash','.zsh','.ps1','.bat','.sql','.css','.scss','.less','.vue','.svelte','.yaml','.yml','.toml','.json','.xml','.tex','.gradle','.sbt','.pl','.pm','.lua','.hs','.clj','.ex','.erl'];
     if (_codeExts.includes(ext)) {
@@ -551,8 +572,6 @@ const editorService = {
       if (!_monacoEditor) {
         document.getElementById('monacoEditorWrap').innerHTML = '';
         _initMonaco(document.getElementById('monacoEditorWrap'), monoRes.data.content, path);
-      } else {
-        _loadMonacoFile(path);
       }
       showToast('已打开: ' + monoName, 'info');
       return;
@@ -605,6 +624,18 @@ const editorService = {
   },
 
   switchTo(path) {
+    if (window.autoSaveScheduler && path !== state.activeTab && _autoSaveMainDirty()) {
+      window.autoSaveScheduler.flush('main');
+    }
+    // 欢迎页
+    if (path === '__welcome__') {
+      state.activeTab = path;
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.path === path));
+      document.querySelectorAll('.tree-item').forEach(t => t.classList.remove('active'));
+      document.getElementById('statusPath').textContent = '首页';
+      hideEditor();
+      return;
+    }
     // 保存前一个浏览器页签的状态
     var prevTab = state.openTabs.find(function(t) { return t.path === state.activeTab; });
     if (prevTab && prevTab._isBrowser) {
@@ -617,7 +648,7 @@ const editorService = {
     // 切走 Monaco 时保存当前内容（在更新 activeTab 之前）
     if (_monacoCurrentFile && _monacoEditor) {
       var prevTab = state.openTabs.find(function(t) { return t.path === state.activeTab; });
-      if (prevTab && prevTab._isMonaco) _monacoFiles[_monacoCurrentFile] = _monacoEditor.getValue();
+      if (prevTab && prevTab._isMonaco) _monacoFiles[state.activeTab] = _monacoEditor.getValue();
     }
     state.activeTab = path;
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.path === path));
@@ -650,6 +681,7 @@ const editorService = {
       document.getElementById('jupyterEditorView').style.display = 'none';
       document.getElementById('monacoEditorView').style.display = 'none';
       document.getElementById('browserView').style.display = 'none';
+      document.getElementById('texpileEditorView').style.display = 'none';
       // 将 slides 编辑器移回主容器（如果在分屏中的话）
       _moveSlidesEditorToMain();
       // 切换笔记数据（多标签页缓存）
@@ -666,6 +698,20 @@ const editorService = {
       document.getElementById('jupyterEditorView').style.display = 'none';
       document.getElementById('monacoEditorView').style.display = 'none';
       document.getElementById('browserView').style.display = 'none';
+      document.getElementById('texpileEditorView').style.display = 'none';
+      return;
+    }
+    if (tab && tab._isTexpile) {
+      document.getElementById('pdfViewer').style.display = 'none';
+      document.getElementById('welcomeScreen').style.display = 'none';
+      document.getElementById('vditor').style.display = 'none';
+      document.getElementById('plainEditor').style.display = 'none';
+      document.getElementById('slidesEditorView').style.display = 'none';
+      document.getElementById('kmindEditorView').style.display = 'none';
+      document.getElementById('jupyterEditorView').style.display = 'none';
+      document.getElementById('monacoEditorView').style.display = 'none';
+      document.getElementById('browserView').style.display = 'none';
+      document.getElementById('texpileEditorView').style.display = 'flex';
       return;
     }
     if (tab && tab._isJupyter) {
@@ -678,6 +724,7 @@ const editorService = {
       document.getElementById('jupyterEditorView').style.display = 'flex';
       document.getElementById('monacoEditorView').style.display = 'none';
       document.getElementById('browserView').style.display = 'none';
+      document.getElementById('texpileEditorView').style.display = 'none';
       return;
     }
     if (tab && tab._isMonaco) {
@@ -690,10 +737,9 @@ const editorService = {
       document.getElementById('jupyterEditorView').style.display = 'none';
       document.getElementById('monacoEditorView').style.display = 'flex';
       document.getElementById('browserView').style.display = 'none';
+      document.getElementById('texpileEditorView').style.display = 'none';
       if (_monacoEditor) {
-        var uri = _monacoApi.Uri.file(path);
-        var cur = _monacoEditor.getModel();
-        if (!cur || cur.uri.toString() !== uri.toString()) _loadMonacoFile(path);
+        _loadMonacoFile(path);
         setTimeout(function() { _monacoEditor.layout(); }, 50);
       }
       return;
@@ -707,9 +753,25 @@ const editorService = {
       document.getElementById('kmindEditorView').style.display = 'none';
       document.getElementById('jupyterEditorView').style.display = 'none';
       document.getElementById('monacoEditorView').style.display = 'none';
+      document.getElementById('officeEditorView').style.display = 'none';
       document.getElementById('browserView').style.display = 'flex';
-      // 恢复当前浏览器页签的状态
+      document.getElementById('texpileEditorView').style.display = 'none';
       _restoreBrowserFrame(tab);
+      return;
+    }
+    if (tab && tab._isOffice) {
+      document.getElementById('pdfViewer').style.display = 'none';
+      document.getElementById('welcomeScreen').style.display = 'none';
+      document.getElementById('vditor').style.display = 'none';
+      document.getElementById('plainEditor').style.display = 'none';
+      document.getElementById('slidesEditorView').style.display = 'none';
+      document.getElementById('kmindEditorView').style.display = 'none';
+      document.getElementById('jupyterEditorView').style.display = 'none';
+      document.getElementById('monacoEditorView').style.display = 'none';
+      document.getElementById('browserView').style.display = 'none';
+      document.getElementById('officeEditorView').style.display = 'flex';
+      document.getElementById('texpileEditorView').style.display = 'none';
+      showOfficeEditor(path);
       return;
     }
     showEditor();
@@ -822,11 +884,18 @@ const editorService = {
       } else if (prevTab) {
         var prevVditor = state['paneVditor_' + paneId];
         if (prevVditor && state['paneVditorReady_' + paneId] && !prevTab._isPdf && !prevTab._isSlides) {
-          state['paneFileContents_' + paneId][prevPath] = prevVditor.getValue();
+          var prevContent = prevVditor.getValue();
+          if (isRmdPath(prevPath) && window.editorSourceToRmd) {
+            try { prevContent = window.editorSourceToRmd(prevContent); } catch (e) {}
+          }
+          state['paneFileContents_' + paneId][prevPath] = prevContent;
         }
       }
     }
 
+    if (window.autoSaveScheduler && prevPath && prevPath !== path && _autoSavePaneDirty(paneId)) {
+      window.autoSaveScheduler.flush('pane', paneId);
+    }
     state['paneActiveTab_' + paneId] = path;
     // 更新 tab 高亮
     var tabsEl = document.getElementById('editorTabs-' + paneId);
@@ -913,6 +982,9 @@ const editorService = {
       var vditorInstance = state['paneVditor_' + paneId];
       var content = state['paneFileContents_' + paneId][path] || '';
       if (vditorInstance && state['paneVditorReady_' + paneId]) {
+        if (isRmdPath(path) && window.rmdToEditorSource) {
+          try { content = window.rmdToEditorSource(content); } catch (e) {}
+        }
         vditorInstance.setValue(content);
       }
     }
@@ -954,7 +1026,7 @@ function _saveSession() {
       }
     });
     localStorage.setItem('ts2_session', JSON.stringify({
-      openTabs: state.openTabs.filter(function(t) { return !t._isSlides; }).map(function(t) {
+      openTabs: state.openTabs.filter(function(t) { return !t._isSlides && !t._isWelcome; }).map(function(t) {
         var obj = { path: t.path, name: t.name };
         if (t._isPdf && state.pdfViewState[t.path]) {
           obj.pdfState = state.pdfViewState[t.path];
@@ -1060,6 +1132,164 @@ function clearSavedSession() {
   try { localStorage.removeItem('ts2_session'); } catch(e) {}
 }
 
+// ─── Pandoc ::: fenced div preservation for Vditor ──────
+// ::语法在Vditor WYSIWYG里会被吃掉换行，这里在getValue出口处修复。
+// 原理：将:::…行/…:::行中被合并的换行复原。
+function setupPandocDivPreservation(v) {
+  if (!v || v._pandocDivSetup) return;
+  v._pandocDivSetup = true;
+  function fixPandocDivs(md) {
+    if (!md || md.indexOf(':::') === -1) return md;
+    function splitLine(raw) {
+      var t = raw.trim();
+      var idx = t.indexOf(':::');
+      if (idx === -1) return [raw];
+      var before = t.slice(0, idx).trim();   // ::: 之前的前缀/内容
+      var after = t.slice(idx);              // 从 ::: 开始
+      // 开标记: ":::类型 内容" / "::: 类型 内容" / "前缀 ::: 类型 内容"
+      var m = /^:::\s*([a-zA-Z_][\w-]*)\s*(.*)$/.exec(after);
+      if (m) {
+        var res = [];
+        // 前缀是纯引用/列表标记（Vditor 破坏残留）→ 丢弃；否则保留
+        var mark = /^(?:>{1,}|[-*+]|\d+[.)])\s*$/.test(before);
+        if (before && !mark) res.push(before);
+        res.push(':::' + m[1]);              // ::: 强制顶格
+        if (m[2]) res = res.concat(splitLine(m[2]));
+        return res;
+      }
+      // 纯闭标记: ":::"
+      if (/^:::\s*$/.test(after)) {
+        var r = [];
+        if (before) r.push(before);
+        r.push(':::');                       // ::: 强制顶格
+        return r;
+      }
+      // 无法识别（如 "::: 世界" 非标记用法）→ 保留原行
+      return [raw];
+    }
+    var out = [];
+    var lines = md.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf(':::') === -1) { out.push(lines[i]); continue; }
+      var split = splitLine(lines[i]);
+      for (var j = 0; j < split.length; j++) out.push(split[j]);
+    }
+    return out.join('\n');
+  }
+  var origGetValue = v.getValue.bind(v);
+  v.getValue = function() { return fixPandocDivs(origGetValue()); };
+}
+
+// 接管 Vditor 代码块渲染：保留完整 info string（如 ```{r, echo=FALSE}）
+// 模块级函数：主编辑器与分屏 pane 共用（pane 无法访问 initVditor 内的局部函数）
+function setupCodeBlockPreservation(v) {
+  if (!v || !v.lute || v._codeBlockSetup) return;
+  v._codeBlockSetup = true;
+  // 1) 在 Lute 渲染时同时写入 data-info（完整 info string）
+  try {
+    v.lute.SetJSRenderers({
+      renderers: {
+        Md2VditorDOM: {
+          renderCodeBlock: function(n, entering) {
+            if (!entering || !n.Info) return ["", 2];
+            var info = n.Info.Text || '';
+            if (!info) return ["", 2];
+            var content = (n.Content && n.Content.Text) || '';
+            var lang = info.replace(/^\{?([^,\s\}]+).*/, '$1');
+            var ec = content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            var ei = info.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+            var el = lang.replace(/"/g,'&quot;');
+            return ['<div class="vditor-wysiwyg__block" data-type="code-block"' +
+              ' data-language="' + el + '" data-info="' + ei + '">' +
+              '<div class="vditor-wysiwyg__preview" data-render="2">' +
+              '<code class="language-' + el + '">' + ec + '</code></div>' +
+              '<pre><code>' + ec + '<wbr></code></pre></div>', 2];
+          }
+        },
+        Md2VditorIRDOM: {
+          renderCodeBlock: function(n, entering) {
+            if (!entering || !n.Info) return ["", 2];
+            var info = n.Info.Text || '';
+            if (!info) return ["", 2];
+            var content = (n.Content && n.Content.Text) || '';
+            var lang = info.replace(/^\{?([^,\s\}]+).*/, '$1');
+            var ec = content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            var ei = info.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+            var el = lang.replace(/"/g,'&quot;');
+            return ['<div class="vditor-ir__block" data-type="code-block"' +
+              ' data-language="' + el + '" data-info="' + ei + '">' +
+              '<div class="vditor-ir__preview" data-render="2">' +
+              '<code class="language-' + el + '">' + ec + '</code></div>' +
+              '<pre><code>' + ec + '<wbr></code></pre></div>', 2];
+          }
+        }
+      }
+    });
+  } catch(e) { console.warn('code block setup error:', e); }
+  // 2) MutationObserver 兜底：当 Lute 重新渲染时同步 data-info
+  function syncCodeBlocks(root) {
+    if (!root) return;
+    root.querySelectorAll('[data-type="code-block"]').forEach(function(el) {
+      // 用户可能已手动编辑 data-language（如输入 {r, echo=TRUE}）
+      var lang = el.getAttribute('data-language') || '';
+      if (lang && !el.getAttribute('data-info')) {
+        el.setAttribute('data-info', lang);
+      }
+    });
+  }
+  var observer = null;
+  try {
+    observer = new MutationObserver(function(muts) {
+      for (var i = 0; i < muts.length; i++) {
+        if (muts[i].type !== 'childList') continue;
+        for (var j = 0; j < muts[i].addedNodes.length; j++) {
+          var nd = muts[i].addedNodes[j];
+          if (nd.nodeType !== 1 || !nd.getAttribute) continue;
+          if (nd.getAttribute('data-type') === 'code-block') {
+            var lang = nd.getAttribute('data-language') || '';
+            if (lang && !nd.getAttribute('data-info')) {
+              nd.setAttribute('data-info', lang);
+            }
+          } else if (nd.querySelectorAll) {
+            nd.querySelectorAll('[data-type="code-block"]').forEach(function(el) {
+              var lang = el.getAttribute('data-language') || '';
+              if (lang && !el.getAttribute('data-info')) {
+                el.setAttribute('data-info', lang);
+              }
+            });
+          }
+        }
+      }
+    });
+  } catch(e) {}
+  setTimeout(function() {
+    var ed = v.vditor && (v.vditor.wysiwyg || v.vditor.ir);
+    if (ed && ed.element && observer) {
+      observer.observe(ed.element, { childList: true, subtree: true });
+      syncCodeBlocks(ed.element);
+    }
+  }, 50);
+  // 3) 包装 getValue：保存前用 data-info 替换 data-language，然后恢复
+  var origGetValue = v.getValue.bind(v);
+  v.getValue = function() {
+    var ed = v.vditor && (v.vditor.wysiwyg || v.vditor.ir);
+    if (ed && ed.element) {
+      syncCodeBlocks(ed.element);
+      var restore = [];
+      ed.element.querySelectorAll('[data-type="code-block"]').forEach(function(el) {
+        var info = el.getAttribute('data-info') || '';
+        if (info && info !== el.getAttribute('data-language')) {
+          restore.push({el: el, lang: el.getAttribute('data-language')});
+          el.setAttribute('data-language', info);
+        }
+      });
+      try { return origGetValue(); }
+      finally { restore.forEach(function(r) { r.el.setAttribute('data-language', r.lang); }); }
+    }
+    return origGetValue();
+  };
+}
+
 // ─── Vditor Editor ──────────────────────────────────────────
 
 function initVditor() {
@@ -1086,6 +1316,7 @@ function initVditor() {
 
   const acCfg = loadAcConfig();
   var currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+
   state.vditor = new Vditor('vditor', {
     height: '100%',
     mode: 'wysiwyg',
@@ -1097,7 +1328,7 @@ function initVditor() {
       enable: false,
     },
     hint: {
-      delay: 200,
+      delay: 30,  // 极低延迟，近乎实时响应（原 200ms）
       parse: false,
       extend: buildHintExtends(acCfg),
     },
@@ -1147,14 +1378,125 @@ function initVditor() {
     value: '',
     after: () => {
       state.vditorReady = true;
+      setupCodeBlockPreservation(state.vditor);
+      setupPandocDivPreservation(state.vditor);
+      bindVditorShortcuts(state.vditor);
+      var _cont = document.getElementById('vditor');
+      if (_cont) {
+        if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, state.vditor); } catch (e) {} }
+        if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, state.vditor); } catch (e) {} }
+      }
     },
     input: () => {
       if (!state.activeTab) return;
-      const content = state.vditor.getValue();
-      state.fileContents[state.activeTab] = content;
-      markTabModified(state.activeTab, content !== state.originalContents[state.activeTab]);
+      var content = state.vditor.getValue();
+      // fileContents / modified 统一用 Rmd 语义（去掉编辑 meta line）比较
+      var saved = content;
+      if (isRmdPath(state.activeTab) && window.editorSourceToRmd) {
+        try { saved = window.editorSourceToRmd(content); } catch (e) {}
+      }
+      state.fileContents[state.activeTab] = saved;
+      markTabModified(state.activeTab, saved !== state.originalContents[state.activeTab]);
+      if (window.autoSaveScheduler) window.autoSaveScheduler.schedule('main');
     },
   });
+}
+
+// ─── Vditor 快捷键绑定 ───────────────────────────────────
+// Ctrl+M  插入行内公式 $...$（光标定位到公式内部）
+// Ctrl+T  插入 Markdown 表格（3 列示例）
+// 适用于主 Vditor / 分屏 Vditor / 幻灯片 Vditor
+function bindVditorShortcuts(vd) {
+  if (!vd || vd._shortcutsBound) return;
+  vd._shortcutsBound = true;
+
+  function getEditableEl() {
+    try {
+      var v = vd.vditor;
+      if (!v) return null;
+      var mode = v.currentMode || 'wysiwyg';
+      var block = v[mode];
+      return (block && block.element) ? block.element : null;
+    } catch (e) { return null; }
+  }
+
+  var el = getEditableEl();
+  if (!el) {
+    // after 回调时 mode 可能未就绪，延迟重试
+    setTimeout(function () { bindVditorShortcuts(vd); }, 100);
+    return;
+  }
+
+  el.addEventListener('keydown', function (e) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    // Ctrl+Shift+M  → 块级公式
+    // Ctrl+M        → 行内公式
+    // Ctrl+T        → 表格
+    if (e.altKey) return;
+    var key = (e.key || '').toLowerCase();
+    if (e.shiftKey && key === 'm') {
+      e.preventDefault();
+      e.stopPropagation();
+      _vditorInsertBlockMath(vd);
+    } else if (!e.shiftKey && key === 'm') {
+      e.preventDefault();
+      e.stopPropagation();
+      _vditorInsertInlineMath(vd);
+    } else if (!e.shiftKey && key === 't') {
+      e.preventDefault();
+      e.stopPropagation();
+      _vditorInsertTable(vd);
+    }
+  }, true);  // capture 阶段，先于 Vditor 内部处理截获
+}
+
+// 插入行内公式 $...$
+// 策略：只插入 $$，光标回退 1 字符到中间，用户直接输入公式内容
+function _vditorInsertInlineMath(vd) {
+  try {
+    vd.focus();
+    vd.insertValue('$$');
+    // 光标回退 1 字符，落在两个 $ 之间
+    var sel = window.getSelection();
+    if (sel && sel.modify) {
+      sel.modify('extend', 'backward', 'character');
+      sel.collapseToStart();
+    }
+  } catch (e) {
+    console.warn('[vditor] Ctrl+M 插入行内公式失败:', e);
+  }
+}
+
+// 插入块级公式 $$...$$
+// 策略：插入 $$ + 换行 + $$（前后空行包裹），光标落在两个 $$ 之间的空行
+function _vditorInsertBlockMath(vd) {
+  try {
+    vd.focus();
+    // 前后空行确保块级公式独立成块，中间留空行让用户输入
+    vd.insertValue('\n$$\n\n$$\n');
+    // 光标回退到中间空行：从末尾 \n 回退 4 字符（越过 \n、$、$、\n）
+    var sel = window.getSelection();
+    if (sel && sel.modify) {
+      sel.modify('extend', 'backward', 'character');  // \n
+      sel.modify('extend', 'backward', 'character');  // $
+      sel.modify('extend', 'backward', 'character');  // $
+      sel.modify('extend', 'backward', 'character');  // \n
+      sel.collapseToStart();
+    }
+  } catch (e) {
+    console.warn('[vditor] Ctrl+Shift+M 插入块级公式失败:', e);
+  }
+}
+
+// 插入 Markdown 表格（3 列 2 行，光标落在第一个单元格）
+function _vditorInsertTable(vd) {
+  try {
+    vd.focus();
+    // 前导换行防止与前文粘连，末尾换行方便继续输入
+    vd.insertValue('\n| 列1 | 列2 | 列3 |\n|---|---|---|\n|  |  |  |\n');
+  } catch (e) {
+    console.warn('[vditor] Ctrl+T 插入表格失败:', e);
+  }
 }
 
 /* 为分屏 pane 初始化独立的 Vditor 实例 */
@@ -1195,17 +1537,30 @@ function initPaneVditor(paneId) {
         var vditorEl = document.getElementById('paneVditor-' + paneId);
         if (vditorEl) vditorEl.style.display = 'none';
       }
+      setupCodeBlockPreservation(state['paneVditor_' + paneId]);
+      setupPandocDivPreservation(state['paneVditor_' + paneId]);
+      bindVditorShortcuts(state['paneVditor_' + paneId]);
+      var _cont = document.getElementById('paneVditor-' + paneId);
+      if (_cont) {
+        if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, state['paneVditor_' + paneId]); } catch (e) {} }
+        if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, state['paneVditor_' + paneId]); } catch (e) {} }
+      }
     },
     input: function() {
       var activePath = state['paneActiveTab_' + paneId];
       if (!activePath) return;
       var content = state['paneVditor_' + paneId].getValue();
-      state['paneFileContents_' + paneId][activePath] = content;
+      // paneFileContents / modified 统一用 Rmd 语义（去掉编辑 meta line）比较
+      var saved = content;
+      if (isRmdPath(activePath) && window.editorSourceToRmd) {
+        try { saved = window.editorSourceToRmd(content); } catch (e) {}
+      }
+      state['paneFileContents_' + paneId][activePath] = saved;
       var tabs = state['paneTabs_' + paneId] || [];
       var tab = tabs.find(function(t) { return t.path === activePath; });
       if (tab) {
         var orig = (state['paneOriginalContents_' + paneId] || {})[activePath];
-        tab.modified = content !== orig;
+        tab.modified = saved !== orig;
         // 更新 tab 修改标记点
         var tabsEl = document.getElementById('editorTabs-' + paneId);
         if (tabsEl) {
@@ -1216,6 +1571,7 @@ function initPaneVditor(paneId) {
           }
         }
       }
+      if (window.autoSaveScheduler) window.autoSaveScheduler.schedule('pane', paneId);
     },
   });
 }
@@ -1449,6 +1805,7 @@ function showEditor() {
   document.getElementById('jupyterEditorView').style.display = 'none';
   document.getElementById('monacoEditorView').style.display = 'none';
   document.getElementById('browserView').style.display = 'none';
+  document.getElementById('texpileEditorView').style.display = 'none';
   document.getElementById('welcomeScreen').style.display = 'none';
   if (state.editorMode === 'vditor') {
     document.getElementById('vditor').style.display = '';
@@ -1473,12 +1830,18 @@ function hideEditor() {
   document.getElementById('jupyterEditorView').style.display = 'none';
   document.getElementById('monacoEditorView').style.display = 'none';
   document.getElementById('browserView').style.display = 'none';
+  document.getElementById('officeEditorView').style.display = 'none';
+  document.getElementById('texpileEditorView').style.display = 'none';
 }
 
 function setEditorContent(content) {
   if (state.editorMode === 'vditor') {
     if (state.vditorReady && state.vditor) {
-      state.vditor.setValue(content || '');
+      var _c = content || '';
+      if (isRmdPath(state.activeTab)) {
+        try { _c = (window.rmdToEditorSource ? window.rmdToEditorSource(_c) : _c); } catch (e) { _c = content || ''; }
+      }
+      state.vditor.setValue(_c);
     }
   } else {
     document.getElementById('plainEditor').value = content || '';
@@ -1488,7 +1851,11 @@ function setEditorContent(content) {
 function getEditorContent() {
   if (state.editorMode === 'vditor') {
     if (state.vditorReady && state.vditor) {
-      return state.vditor.getValue();
+      var _v = state.vditor.getValue();
+      if (isRmdPath(state.activeTab)) {
+        try { _v = (window.editorSourceToRmd ? window.editorSourceToRmd(_v) : _v); } catch (e) {}
+      }
+      return _v;
     }
     return '';
   } else {
@@ -1496,8 +1863,12 @@ function getEditorContent() {
   }
 }
 
+function isRmdPath(p) {
+  return !!p && /\.rmd$/i.test(p);
+}
+
 function toggleEditorMode() {
-  const content = getEditorContent();
+  let content = getEditorContent();
 
   if (state.editorMode === 'vditor') {
     state.editorMode = 'plain';
@@ -1512,6 +1883,9 @@ function toggleEditorMode() {
     if (!state.vditorReady) {
       initVditor();
     } else {
+      if (isRmdPath(state.activeTab)) {
+        try { content = (window.rmdToEditorSource ? window.rmdToEditorSource(content) : content); } catch (e) {}
+      }
       state.vditor.setValue(content);
     }
     document.getElementById('btnEditorToggle').innerHTML = '📝<span class="btn-label"> 原生</span>';
@@ -2030,13 +2404,15 @@ async function kmindLoadData(path, content) {
   showToast('已打开思维导图', 'info');
 }
 
-async function kmindSave() {
-  if (!kmindState.path) { showToast('未打开任何思维导图', 'error'); return; }
-  var iframe = document.getElementById('kmindIframe');
-  if (!iframe || !iframe.contentWindow) { showToast('思维导图编辑器尚未加载', 'error'); return; }
-  document.getElementById('kmindSaveStatus').textContent = '保存中...';
-  showToast('正在保存...', 'info');
-  iframe.contentWindow.postMessage({ action: 'getData' }, '*');
+async function kmindSave(silent) {
+  if (!kmindState.path) { if (!silent) showToast('未打开任何思维导图', 'error'); return; }
+  var iframe = document.getElementById('kmindSaveStatus');
+  if (!silent && iframe) iframe.textContent = '保存中...';
+  if (!silent) showToast('正在保存...', 'info');
+  kmindState._silent = silent === true;
+  var f = document.getElementById('kmindIframe');
+  if (!f || !f.contentWindow) { if (!silent) showToast('思维导图编辑器尚未加载', 'error'); return; }
+  f.contentWindow.postMessage({ action: 'getData' }, '*');
 }
 
 async function kmindHandleSaveData(e) {
@@ -2045,16 +2421,22 @@ async function kmindHandleSaveData(e) {
     try {
       var kmsRes = await client.putFile(kmindState.path, kmsContent);
       if (kmsRes && kmsRes.code === 0) {
-        document.getElementById('kmindSaveStatus').textContent = '已保存';
-        setTimeout(function() { document.getElementById('kmindSaveStatus').textContent = ''; }, 2000);
-        showToast('已保存', 'success');
-      } else {
-        document.getElementById('kmindSaveStatus').textContent = '保存失败';
+        if (!kmindState._silent) {
+          var st = document.getElementById('kmindSaveStatus');
+          if (st) { st.textContent = '已保存'; setTimeout(function(){ st.textContent = ''; }, 2000); }
+          showToast('已保存', 'success');
+        }
+      } else if (!kmindState._silent) {
+        var st2 = document.getElementById('kmindSaveStatus');
+        if (st2) st2.textContent = '保存失败';
         showToast('保存失败: ' + ((kmsRes && kmsRes.msg) || 'write error'), 'error');
       }
-    } catch(e) {
-      document.getElementById('kmindSaveStatus').textContent = '保存失败';
-      showToast('保存失败', 'error');
+    } catch(err) {
+      if (!kmindState._silent) {
+        var st3 = document.getElementById('kmindSaveStatus');
+        if (st3) st3.textContent = '保存失败';
+        showToast('保存失败', 'error');
+      }
     }
   }
 }
@@ -2081,6 +2463,635 @@ function _kmindRenderRecent() {
 
 async function kmindExportPNG() {
   showToast('导出功能需要先保存思维导图', 'info');
+}
+
+// ─── Texpile LaTeX 编辑器（可拔插） ───────────────────────────────
+// 集成模式：iframe 内运行 texpile 构建产物（mcp/server/static/texpile/index.html）
+// 通信协议：
+//   子→父: { kind:'ts2:invoke', id, op, args }     (请求父窗口执行 op)
+//   父→子: { kind:'ts2:result',  id, ok, data?, error? }
+//   父→子: { kind:'ts2:event',   event, payload }  (主动推送，如 openPath)
+//   子→父: { kind:'ts2:event',   event }           (如 bridgeReady)
+// 可拔插：texpile 构建产物若不存在，texProbeAvailable() 返回 false，
+//         .tex 文件回退到 Monaco 编辑器，主程序不受影响。
+var texState = {
+  path: null,           // 当前打开的 .tex 文件路径
+  ready: false,         // iframe bridge 是否就绪
+  available: null,      // null=未探测 true/false=已探测
+  iframe: null,         // 当前 iframe 元素
+  pendingInvoke: new Map(),  // id → {resolve, reject}
+  _invokeSeq: 0,
+  _silent: false
+};
+
+// 探测 texpile 是否可用（HEAD 请求 /static/texpile/index.html）
+async function texProbeAvailable() {
+  if (texState.available !== null) return texState.available;
+  try {
+    var res = await fetch(API_BASE + '/static/texpile/index.html', { method: 'HEAD' });
+    texState.available = res.ok;
+  } catch (e) {
+    texState.available = false;
+  }
+  return texState.available;
+}
+
+// 强制重新探测（构建后用户可能想立即启用）
+function texReprobe() {
+  texState.available = null;
+  return texProbeAvailable();
+}
+
+// 监听 iframe 消息
+window.addEventListener('message', function(e) {
+  var data = e.data;
+  if (!data || typeof data !== 'object') return;
+  if (data.kind === 'ts2:event' && data.event === 'bridgeReady') {
+    texState.ready = true;
+    // 推送当前打开的文件
+    if (texState.path) {
+      texPostEvent('openPath', texState.path);
+    }
+    return;
+  }
+  if (data.kind === 'ts2:event' && data.event && data.event.indexOf('terminal:') === 0) {
+    // texpileTerminal 的 write/resize/kill 事件（高频，无需返回结果）
+    texTerminalHandleEvent(data.event, data.payload);
+    return;
+  }
+  if (data.kind === 'ts2:invoke') {
+    texHandleInvoke(data);
+    return;
+  }
+});
+
+function texPostEvent(event, payload) {
+  if (texState.iframe && texState.iframe.contentWindow) {
+    texState.iframe.contentWindow.postMessage(
+      { kind: 'ts2:event', event: event, payload: payload }, '*');
+  }
+}
+
+function texPostResult(id, ok, data, error) {
+  if (texState.iframe && texState.iframe.contentWindow) {
+    texState.iframe.contentWindow.postMessage(
+      { kind: 'ts2:result', id: id, ok: ok, data: data, error: error }, '*');
+  }
+}
+
+// 处理子→父 invoke 请求
+async function texHandleInvoke(msg) {
+  var id = msg.id, op = msg.op, args = msg.args || [];
+  try {
+    var result = await texInvokeHandler(op, args);
+    texPostResult(id, true, result);
+  } catch (e) {
+    texPostResult(id, false, undefined, e.message || String(e));
+  }
+}
+
+// invoke 操作分发器：把 texpile 的文件/编译请求映射到 TS2 client API
+async function texInvokeHandler(op, args) {
+  switch (op) {
+    case 'openFolder':
+      // TS2 集成模式下不打开系统文件夹；返回 null
+      return null;
+
+    case 'fsScan': {
+      // args: [root, exts?]
+      var root = args[0];
+      var files = await texScanTexFiles(root);
+      return { root: root, files: files };
+    }
+
+    case 'fsRead': {
+      // args: [path]
+      var r = await client.getFile(args[0]);
+      if (r.code !== 0) throw new Error(r.msg || 'read failed');
+      // 兜底：projects 内文件
+      if (!r.data || !r.data.content) {
+        var r2 = await client.api('/api/data/projects/readFile', { path: args[0] });
+        if (r2.code !== 0 || !r2.data) throw new Error(r2.msg || 'read failed');
+        return { content: r2.data.content };
+      }
+      return { content: r.data.content };
+    }
+
+    case 'fsWrite': {
+      // args: [path, content]
+      var w = await client.putFile(args[0], args[1]);
+      if (w.code !== 0) {
+        var w2 = await client.api('/api/data/projects/writeFile',
+          { path: args[0], content: args[1] });
+        if (w2.code !== 0) throw new Error(w2.msg || 'write failed');
+      }
+      return { ok: true };
+    }
+
+    case 'fsWriteBinary': {
+      // args: [path, ArrayBuffer]
+      var ab = args[1];
+      // 通过 upload API 上传
+      var blob = new Blob([ab]);
+      var form = new FormData();
+      form.append('file', blob, args[0].split('/').pop());
+      form.append('path', args[0]);
+      var upRes = await fetch(API_BASE + '/api/file/upload', { method: 'POST', body: form });
+      var j = await upRes.json();
+      if (j.code !== 0) throw new Error(j.msg || 'binary write failed');
+      return { ok: true };
+    }
+
+    case 'fsTree': {
+      // args: [root]
+      var tree = await texBuildTree(args[0]);
+      return { root: args[0], children: tree };
+    }
+
+    case 'fsOp': {
+      // args: [body]  body: { action:'create'|'delete'|'rename', path, type?, content?, from?, to? }
+      var body = args[0] || {};
+      if (body.action === 'create') {
+        if (body.type === 'dir') {
+          await client.api('/api/file/createDir', { path: body.path });
+        } else {
+          await client.putFile(body.path, body.content || '');
+        }
+      } else if (body.action === 'delete') {
+        await client.removeFile(body.path);
+      } else if (body.action === 'rename') {
+        await client.renameFile(body.from, body.to);
+      } else {
+        throw new Error('unknown fsOp action: ' + body.action);
+      }
+      return { ok: true };
+    }
+
+    case 'fsSearch': {
+      // args: [root, q, regex, caseSensitive]
+      var sRes = await client.search(args[1], args[0]);
+      if (sRes.code !== 0) return { results: [], truncated: false };
+      var results = (sRes.data && sRes.data.results) || [];
+      return { results: results, truncated: false, total: results.length };
+    }
+
+    case 'fsStat': {
+      // args: [path]
+      var stRes = await client.api('/api/file/stat', { path: args[0] });
+      if (stRes.code !== 0) return { exists: false, mtimeMs: 0, size: 0 };
+      return {
+        exists: true,
+        mtimeMs: stRes.data.mtimeMs || 0,
+        size: stRes.data.size || 0
+      };
+    }
+
+    case 'fsFormatLatex': {
+      // 不支持 latexindent；返回原文
+      return { formatted: args[1] };
+    }
+
+    case 'synctex': {
+      // 转发到后端 /api/texpile/synctex
+      var synRes = await client.api('/api/texpile/synctex', args[0] || {});
+      if (synRes.code !== 0) throw new Error(synRes.msg || 'synctex failed');
+      return synRes.data || {};
+    }
+
+    case 'draftCompile': {
+      // 转发到后端 /api/texpile/compile
+      var dcRes = await client.api('/api/texpile/compile', args[0] || {});
+      if (dcRes.code !== 0) throw new Error(dcRes.msg || 'compile failed');
+      return dcRes.data || { ok: false, error: dcRes.msg };
+    }
+
+    case 'draftTypeset': {
+      var dtRes = await client.api('/api/texpile/typeset', args[0] || {});
+      if (dtRes.code !== 0) throw new Error(dtRes.msg || 'typeset failed');
+      return dtRes.data || { ok: false, error: dtRes.msg };
+    }
+
+    case 'draftStop': {
+      await client.api('/api/texpile/stop', {});
+      return { ok: true };
+    }
+
+    case 'draftSavePdf': {
+      // args: [body]  body: { root, defaultName, to? }
+      // 通过 download API 触发浏览器下载
+      var body2 = args[0] || {};
+      var pdfPath = body2.to || (body2.root + '/output/' + body2.defaultName);
+      window.open(API_BASE + '/api/file/download/' +
+        pdfPath.split('/').map(encodeURIComponent).join('/'), '_blank');
+      return { saved: true, path: pdfPath };
+    }
+
+    // Git 在 TS2 集成模式下不可用
+    case 'gitStatus': return { staged: [], unstaged: [], untracked: [] };
+    case 'gitShow':   return { content: '' };
+    case 'gitInit':
+    case 'gitStage':
+    case 'gitUnstage':
+    case 'gitDiscard':
+    case 'gitCommit': return { ok: false, error: 'Git 不可用（TS2 集成模式）' };
+
+    // ── texpileTerminal 桥接 ──
+    case 'terminal:available':
+      // 后端有 winpty 走 PTY，没有走 subprocess fallback，都算可用
+      return { available: true };
+
+    case 'terminal:spawn': {
+      // args: [{ id, cwd?, cols?, rows? }]  返回 { ok, shell?, error? }
+      var spawnOpts = args[0] || {};
+      return await texTerminalSpawn(spawnOpts);
+    }
+
+    default:
+      throw new Error('unknown op: ' + op);
+  }
+}
+
+// ─── texpileTerminal 桥接（PTY 多路复用）─────────────────
+// 一个 iframe 内可能创建多个 Terminal.svelte 实例（编辑器 + 编译输出），每个用 id 区分。
+// 这里维护 id → WebSocket 映射，把 texpile 的 terminal:invoke/event 转发到后端 /api/terminal。
+//
+// 协议：
+//   invoke 'terminal:available'  → { available: true }   （后端有 winpty 即可用，否则 fallback）
+//   invoke 'terminal:spawn' [opts]  → { ok, shell?, error? }   opts={id,cwd?,cols?,rows?}
+//   event  'terminal:write'    {id, data}    → ws.send(data)
+//   event  'terminal:resize'   {id, cols, rows} → ws.send('__resize__:cols:rows')
+//   event  'terminal:kill'     {id}           → ws.close()
+//   推送   'terminal:data'     {id, data}     ← ws.onmessage(bytes)
+//   推送   'terminal:exit'     {id, code}     ← ws.onclose
+var _texTermSessions = {};   // id → { ws, shell }
+
+function _texTermWsUrl(opts) {
+  // 构造 /api/terminal WS URL，附 cwd/cols/rows query
+  var base = (window.API_BASE || '').replace(/^http/, 'ws');
+  if (!base) {
+    // 相对路径：用 location.host 构造
+    base = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+  }
+  var qs = [];
+  if (opts && opts.cwd) qs.push('cwd=' + encodeURIComponent(opts.cwd));
+  if (opts && opts.cols) qs.push('cols=' + encodeURIComponent(opts.cols));
+  if (opts && opts.rows) qs.push('rows=' + encodeURIComponent(opts.rows));
+  // 鉴权：复用 client 的 token / auth
+  try {
+    var cfg = window.client && window.client.config ? window.client.config : null;
+    if (cfg) {
+      if (cfg.api_token) qs.push('token=' + encodeURIComponent(cfg.api_token));
+      if (cfg.auth_code) qs.push('auth_code=' + encodeURIComponent(cfg.auth_code));
+    }
+  } catch (e) {}
+  return base + '/api/terminal' + (qs.length ? '?' + qs.join('&') : '');
+}
+
+async function texTerminalSpawn(opts) {
+  opts = opts || {};
+  var id = opts.id;
+  if (!id) return { ok: false, error: 'missing id' };
+  // 已存在同 id 的会话：先关掉
+  if (_texTermSessions[id]) {
+    try { _texTermSessions[id].ws.close(); } catch (e) {}
+    delete _texTermSessions[id];
+  }
+  var url = _texTermWsUrl(opts);
+  var ws;
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    return { ok: false, error: 'WebSocket 创建失败: ' + (e.message || String(e)) };
+  }
+  // 默认 shell 名（后端会通过 __shell__:name 消息更新）
+  var shellName = 'cmd';
+  var shellResolved = false;
+  return new Promise(function(resolve) {
+    var resolved = false;
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = function() {
+      // 等待后端推送 __shell__:name 元信息后再 resolve
+      // （后端在 PTY/fallback 创建成功后立即发送）
+      // 1500ms 兜底：后端没发就用默认 cmd
+      setTimeout(function() {
+        if (!resolved) {
+          resolved = true;
+          _texTermSessions[id] = { ws: ws, shell: shellName };
+          resolve({ ok: true, shell: shellName });
+        }
+      }, 1500);
+    };
+    ws.onmessage = function(ev) {
+      // 第一条 text 消息可能是 __shell__:name 元信息
+      if (!shellResolved && typeof ev.data === 'string') {
+        var s = String(ev.data);
+        if (s.indexOf('__shell__:') === 0) {
+          shellName = s.slice('__shell__:'.length).trim();
+          // 规范化：去掉 .exe 后缀
+          if (shellName.toLowerCase().endsWith('.exe')) {
+            shellName = shellName.slice(0, -4);
+          }
+          shellResolved = true;
+          if (!resolved) {
+            resolved = true;
+            _texTermSessions[id] = { ws: ws, shell: shellName };
+            resolve({ ok: true, shell: shellName });
+          }
+          return;
+        }
+      }
+      // 普通 PTY 输出：bytes 或 text
+      var data;
+      if (ev.data instanceof ArrayBuffer) {
+        data = new TextDecoder('utf-8').decode(ev.data);
+      } else {
+        data = String(ev.data);
+      }
+      texPostEvent('terminal:data', { id: id, data: data });
+    };
+    ws.onclose = function(ev) {
+      // 通知 texpile shell 退出
+      texPostEvent('terminal:exit', { id: id, code: ev.code || 0 });
+      delete _texTermSessions[id];
+      if (!resolved) {
+        resolved = true;
+        resolve({ ok: false, error: 'PTY 连接立即关闭' });
+      }
+    };
+    ws.onerror = function(e) {
+      if (!resolved) {
+        resolved = true;
+        resolve({ ok: false, error: 'PTY WebSocket 连接失败' });
+      }
+    };
+    // 超时兜底
+    setTimeout(function() {
+      if (!resolved) {
+        resolved = true;
+        try { ws.close(); } catch (e) {}
+        resolve({ ok: false, error: 'PTY spawn 超时' });
+      }
+    }, 8000);
+  });
+}
+
+function texTerminalHandleEvent(event, payload) {
+  if (!payload) return;
+  var id = payload.id;
+  if (!id || !_texTermSessions[id]) return;
+  var sess = _texTermSessions[id];
+  try {
+    if (event === 'terminal:write') {
+      // 数据直接写入 PTY
+      sess.ws.send(payload.data);
+    } else if (event === 'terminal:resize') {
+      // 协议：__resize__:cols:rows
+      sess.ws.send('__resize__:' + payload.cols + ':' + payload.rows);
+    } else if (event === 'terminal:kill') {
+      // 关闭 WS，后端会收到 WebSocketDisconnect 并终止 PTY
+      sess.ws.close();
+      delete _texTermSessions[id];
+    }
+  } catch (e) {
+    console.warn('[texpile-terminal] event handling failed:', event, e);
+  }
+}
+
+// 在 texpile iframe 销毁时清理所有 terminal 会话
+function texTerminalCleanupAll() {
+  Object.keys(_texTermSessions).forEach(function(id) {
+    try { _texTermSessions[id].ws.close(); } catch (e) {}
+    delete _texTermSessions[id];
+  });
+}
+
+// 扫描指定目录下的 .tex 文件（递归）
+async function texScanTexFiles(root) {
+  var result = [];
+  async function walk(dir) {
+    var r = await client.readDir(dir);
+    if (r.code !== 0 || !r.data) return;
+    var entries = r.data.entries || r.data.files || r.data || [];
+    if (!Array.isArray(entries)) return;
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var name = e.name || e;
+      var full = e.path || (dir ? dir + '/' + name : name);
+      // 后端 readDir 返回的是 is_dir（布尔），兼容 type/isDirectory 其它形态
+      var isDir = (e.is_dir === true) || (e.type === 'dir') || (e.isDirectory === true) || (typeof name === 'string' && name.endsWith('/'));
+      if (isDir) {
+        await walk(full.replace(/\/$/, ''));
+      } else if (name.toLowerCase().endsWith('.tex')) {
+        var rel = root ? full.slice(root.length).replace(/^\//, '') : full;
+        result.push({ name: name, path: full, relPath: rel });
+      }
+    }
+  }
+  await walk(root);
+  return result;
+}
+
+// 构建目录树（递归 readDir）
+async function texBuildTree(root) {
+  var tree = [];
+  async function walk(dir, parentNode) {
+    var r = await client.readDir(dir);
+    if (r.code !== 0 || !r.data) return;
+    var entries = r.data.entries || r.data.files || r.data || [];
+    if (!Array.isArray(entries)) return;
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var name = e.name || e;
+      var full = e.path || (dir ? dir + '/' + name : name);
+      // 后端 readDir 返回的是 is_dir（布尔），兼容 type/isDirectory 其它形态
+      var isDir = (e.is_dir === true) || (e.type === 'dir') || (e.isDirectory === true) || (typeof name === 'string' && name.endsWith('/'));
+      var node = { name: name, path: full, type: isDir ? 'dir' : 'file' };
+      if (isDir) {
+        node.children = [];
+        await walk(full.replace(/\/$/, ''), node.children);
+      }
+      parentNode.push(node);
+    }
+  }
+  await walk(root, tree);
+  return tree;
+}
+
+// 等待 iframe bridge ready
+async function texWaitReady() {
+  if (texState.ready) return;
+  return new Promise(function(resolve) {
+    var start = Date.now();
+    var check = function() {
+      if (texState.ready) { resolve(); return; }
+      if (Date.now() - start > 30000) { resolve(); return; }  // 30s 超时
+      setTimeout(check, 200);
+    };
+    check();
+  });
+}
+
+// 销毁 iframe（关闭标签时调用）
+function texDestroyIframe() {
+  // 先清理所有 terminal 会话，避免 PTY 进程泄漏
+  try { texTerminalCleanupAll(); } catch(e) {}
+  if (texState.iframe) {
+    try { texState.iframe.src = 'about:blank'; } catch(e) {}
+    texState.iframe.remove();
+    texState.iframe = null;
+  }
+  texState.path = null;
+  texState.ready = false;
+}
+
+// 加载文件到 iframe
+async function texLoadData(path, content) {
+  texState.path = path;
+  var nameEl = document.getElementById('texpileDocName');
+  if (nameEl) nameEl.textContent = path.split('/').pop();
+
+  // 缓存文件内容供后续保存
+  state.fileContents[path] = content;
+
+  var wrap = document.getElementById('texpileIframeWrap');
+  if (!wrap) return;
+
+  // 复用已存在的 iframe：如果 iframe 已就绪，直接推送 openPath 即可
+  // 避免每次切换文件都销毁重建 iframe 导致界面闪烁
+  if (texState.iframe && texState.ready) {
+    texPostEvent('openPath', path);
+    return;
+  }
+
+  // 首次加载或 iframe 已销毁：重建 iframe
+  texDestroyIframe();
+  texState.ready = false;
+  var iframe = document.createElement('iframe');
+  iframe.id = 'texpileIframe';
+  iframe.style.cssText = 'width:100%;height:100%;border:none;display:block';
+  // ts2embed=1 标记触发 bridge 注入；内嵌时不显示 StartView
+  iframe.src = API_BASE + '/static/texpile/index.html?ts2embed=1';
+  wrap.appendChild(iframe);
+  texState.iframe = iframe;
+
+  // 等待 bridge ready（bridge 会在 texpile 注册 onOpenPath 后发送 bridgeReady）
+  // 全局 message 监听器收到 bridgeReady 会自动推送 openPath，所以这里只需等待
+  await texWaitReady();
+}
+
+// 打开 .tex 文件主入口
+async function openTex(path, opts) {
+  opts = opts || {};
+  // 已有同路径标签则切换
+  var existing = state.openTabs.find(function(t) { return t.path === path; });
+  if (existing) {
+    editorService.switchTo(path);
+    return;
+  }
+  // 读取文件内容
+  var res = await client.getFile(path);
+  if (res.code !== 0 || !res.data) {
+    var srcRes = await client.api('/api/data/projects/readFile', { path: path });
+    if (srcRes.code !== 0 || !srcRes.data) {
+      showToast('打开失败: ' + (res.msg || ''), 'error');
+      return;
+    }
+    res = srcRes;
+  }
+  var content = res.data.content;
+  var fileName = path.split('/').pop();
+  state.fileContents[path] = content;
+  state.openTabs.push({
+    path: path, name: fileName, modified: false, _isTexpile: true
+  });
+  addTab(path, fileName);
+  editorService.switchTo(path);
+  editorService._addRecent(path, fileName);
+  // 切换后加载到 iframe
+  setTimeout(function() { texLoadData(path, content); }, 200);
+}
+
+// 保存：通知 iframe 调用 fsWrite
+// 注意：texpile 内部自己会调 fsWrite，这里主要给"💾 保存"按钮用，
+// 触发 iframe 内部的保存逻辑（如 autosave debounce 立即提交）
+async function texSave(silent) {
+  if (!texState.path) {
+    if (!silent) showToast('未打开任何 LaTeX 文件', 'error');
+    return;
+  }
+  if (!texState.ready) {
+    if (!silent) showToast('Texpile 尚未就绪', 'error');
+    return;
+  }
+  texState._silent = silent === true;
+  // texpile 内部自动保存，这里只触发一次 dirty 状态检查
+  // 通过 event 通知 iframe 立即 flush
+  texPostEvent('saveNow', {});
+  if (!silent) {
+    var st = document.getElementById('texpileSaveStatus');
+    if (st) {
+      st.textContent = '已保存';
+      st.style.color = '#4ade80';
+      setTimeout(function() { st.textContent = ''; }, 2000);
+    }
+    showToast('已保存', 'success');
+  }
+}
+
+// 编译：触发 iframe 内部编译逻辑
+async function texCompile() {
+  if (!texState.path) { showToast('未打开任何 LaTeX 文件', 'error'); return; }
+  if (!texState.ready) { showToast('Texpile 尚未就绪', 'error'); return; }
+  // 推送编译事件，由 iframe 内部 texpile 触发 latexmk
+  texPostEvent('compileNow', {});
+  showToast('已请求编译，请查看 Texpile 界面内的输出', 'info');
+}
+
+// .tex 打开选择器：弹窗让用户在 Monaco / Texpile 之间选择
+async function texChooseEditor(path) {
+  var available = await texProbeAvailable();
+  if (!available) return 'monaco';  // 不可用直接回退
+
+  // 读取用户偏好
+  var pref = localStorage.getItem('ts2_tex_editor_pref');
+  if (pref === 'texpile' || pref === 'monaco') return pref;
+
+  // 首次：弹窗选择
+  return new Promise(function(resolve) {
+    _modalResolve = function(v) { resolve(v); };
+    showHtmlModal('选择 LaTeX 编辑器',
+      '<div style="padding:16px;min-width:380px">' +
+      '<p style="margin:0 0 12px;font-size:13px;color:var(--fg-muted)">' +
+      escapeHtml(path.split('/').pop()) + ' 是 LaTeX 源文件，请选择编辑器：</p>' +
+      '<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">' +
+      '<button class="btn-action" onclick="resolveModal(\'texpile\')" style="padding:10px;text-align:left;cursor:pointer">' +
+      '📐 <b>Texpile</b> <span style="color:var(--fg-muted);font-size:11px">— 全功能 LaTeX 编辑器（智能补全/实时预览/PDF编译）</span>' +
+      '</button>' +
+      '<button class="btn" onclick="resolveModal(\'monaco\')" style="padding:10px;text-align:left;cursor:pointer">' +
+      '📝 <b>Monaco</b> <span style="color:var(--fg-muted);font-size:11px">— 轻量代码编辑器（语法高亮）</span>' +
+      '</button>' +
+      '</div>' +
+      '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg-muted);cursor:pointer">' +
+      '<input type="checkbox" id="texRememberChoice"> 记住选择（可在设置中重置）' +
+      '</label>' +
+      '</div>');
+    // 监听 checkbox 并在 resolveModal 前保存偏好
+    var origResolve = window.resolveModal;
+    window.resolveModal = function(v) {
+      var cb = document.getElementById('texRememberChoice');
+      if (cb && cb.checked && (v === 'texpile' || v === 'monaco')) {
+        localStorage.setItem('ts2_tex_editor_pref', v);
+      }
+      window.resolveModal = origResolve;
+      origResolve(v);
+    };
+  });
+}
+
+// 重置 LaTeX 编辑器偏好（供设置页调用）
+function texResetPreference() {
+  localStorage.removeItem('ts2_tex_editor_pref');
+  showToast('已重置 LaTeX 编辑器选择偏好', 'info');
 }
 
 async function openOfficeAsPdf(path) {
@@ -2148,10 +3159,11 @@ function switchNavTab(tabName) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
   document.querySelectorAll('.nav-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabName}`));
 
-  // 离开 slides/mindmap 时隐藏其编辑器
+  // 离开 slides/mindmap/texpile 时隐藏其编辑器
   var slidesView = document.getElementById('slidesEditorView');
   if (slidesView) slidesView.style.display = 'none';
   document.getElementById('kmindEditorView').style.display = 'none';
+  document.getElementById('texpileEditorView').style.display = 'none';
 
   // 切回文件面板时，通过 editorService 恢复编辑器状态
   if (tabName === 'files') {
@@ -2186,6 +3198,21 @@ async function loadFileTree(subdir = '') {
 
 function renderFileTree() {
   const tree = document.getElementById('fileTree');
+  if (!tree._dragScroll) {
+    tree._dragScroll = true;
+    tree.addEventListener('dragover', (e) => {
+      const rect = tree.getBoundingClientRect();
+      const threshold = 30, speed = 12;
+      if (e.clientY - rect.top < threshold) tree.scrollTop -= speed;
+      else if (rect.bottom - e.clientY < threshold) tree.scrollTop += speed;
+    });
+    tree.addEventListener('click', (e) => {
+      if (e.target === tree || e.target.classList.contains('tree-loading')) {
+        state.selectedTreeItems.clear();
+        renderFileTree();
+      }
+    });
+  }
   tree.innerHTML = '';
 
   // 工作区模式：如果切换到了非 TS2 工作区，显示该工作区的根目录
@@ -2237,8 +3264,9 @@ function renderTreeItem(container, entry, depth) {
   const isActive = entry.is_dir
     ? state.currentDir === entry.path
     : state.activeTab === entry.path;
+  const isSelected = state.selectedTreeItems.has(entry.path);
   const item = document.createElement('div');
-  item.className = 'tree-item' + (isActive ? ' active' : '');
+  item.className = 'tree-item' + (isActive ? ' active' : '') + (isSelected ? ' selected' : '');
   item.style.setProperty('--depth', depth);
   item.dataset.path = entry.path;
   item.dataset.isDir = entry.is_dir ? '1' : '0';
@@ -2253,8 +3281,83 @@ function renderTreeItem(container, entry, depth) {
     ${!entry.is_dir ? `<span class="size">${formatSize(entry.size)}</span>` : ''}
   `;
 
-  item.addEventListener('click', () => onTreeItemClick(entry));
+  item.addEventListener('click', (e) => onTreeItemClick(entry, e));
   item.addEventListener('contextmenu', (e) => onTreeItemContext(e, entry));
+
+  // Drag-to-move: files and folders are draggable; only folders accept drops
+  item.draggable = true;
+  item.addEventListener('mousedown', (e) => {
+    // Ctrl/Shift 多选在 mousedown 处理（比 click 更可靠：避免被右键菜单/拖拽劫持）
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      e.preventDefault();
+      selectTreeItems(entry, e);
+    }
+  });
+  item.addEventListener('dragstart', (e) => {
+    // 多选意图（按住 Ctrl/Shift）时取消拖拽，让 mousedown 处理选择
+    if (e.ctrlKey || e.metaKey || e.shiftKey) { e.preventDefault(); return; }
+    e.dataTransfer.effectAllowed = 'move';
+    // If dragged item is in selection, drag all selected; otherwise drag just this item
+    const paths = (state.selectedTreeItems.has(entry.path) && state.selectedTreeItems.size > 0)
+      ? Array.from(state.selectedTreeItems)
+      : [entry.path];
+    e.dataTransfer.setData('text/plain', JSON.stringify(paths));
+    item.classList.add('dragging');
+    // Also mark other selected items as dragging
+    if (paths.length > 1) {
+      document.querySelectorAll('.tree-item').forEach(el => {
+        if (state.selectedTreeItems.has(el.dataset.path)) el.classList.add('dragging');
+      });
+    }
+  });
+  item.addEventListener('dragend', () => {
+    item.classList.remove('dragging');
+    document.querySelectorAll('.tree-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+    document.querySelectorAll('.tree-item.dragging').forEach(el => el.classList.remove('dragging'));
+  });
+
+  if (entry.is_dir) {
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    item.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      item.classList.add('drag-over');
+    });
+    item.addEventListener('dragleave', (e) => {
+      if (!item.contains(e.relatedTarget)) item.classList.remove('drag-over');
+    });
+    item.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      item.classList.remove('drag-over');
+      const rawData = e.dataTransfer.getData('text/plain');
+      if (!rawData) return;
+      let srcPaths;
+      try { srcPaths = JSON.parse(rawData); } catch { return; }
+      if (!Array.isArray(srcPaths) || srcPaths.length === 0) return;
+      const dstDir = entry.path;
+      // Filter out invalid moves (self, or into own subtree)
+      const validPaths = srcPaths.filter(p => p !== dstDir && !p.startsWith(dstDir + '/'));
+      if (validPaths.length === 0) return;
+      let successCount = 0;
+      for (const srcPath of validPaths) {
+        const srcName = srcPath.split('/').pop();
+        const dstPath = dstDir + '/' + srcName;
+        if (srcPath === dstPath) continue;
+        const res = await client.renameFile(srcPath, dstPath);
+        if (res.code === 0) successCount++;
+      }
+      if (successCount > 0) {
+        state.selectedTreeItems.clear();
+        showToast(`已移动 ${successCount} 个项目到 ${entry.name}`, 'success');
+        await refreshTree();
+      } else {
+        showToast('移动失败', 'error');
+      }
+    });
+  }
 
   container.appendChild(item);
 }
@@ -2285,7 +3388,103 @@ function formatSize(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + 'M';
 }
 
-async function onTreeItemClick(entry) {
+function selectTreeItems(entry, e) {
+  const isCtrl = e.ctrlKey || e.metaKey;
+  const isShift = e.shiftKey;
+  if (isShift && state._lastClickedTreeItem) {
+    // Shift 范围选择：按当前可见顺序从锚点到当前项
+    const allItems = Array.from(document.querySelectorAll('.tree-item'));
+    const lastIdx = allItems.findIndex(el => el.dataset.path === state._lastClickedTreeItem);
+    const curIdx = allItems.findIndex(el => el.dataset.path === entry.path);
+    if (lastIdx !== -1 && curIdx !== -1) {
+      const start = Math.min(lastIdx, curIdx);
+      const end = Math.max(lastIdx, curIdx);
+      state.selectedTreeItems.clear();
+      for (let i = start; i <= end; i++) {
+        state.selectedTreeItems.add(allItems[i].dataset.path);
+      }
+    }
+  } else if (isCtrl) {
+    // Ctrl 切换单个选中
+    if (state.selectedTreeItems.has(entry.path)) state.selectedTreeItems.delete(entry.path);
+    else state.selectedTreeItems.add(entry.path);
+  } else {
+    // 仅 Shift 但没有锚点：选中单个
+    state.selectedTreeItems.clear();
+    state.selectedTreeItems.add(entry.path);
+  }
+  state._lastClickedTreeItem = entry.path;
+  renderFileTree();
+}
+
+// ─── 文件复制 / 剪切 / 粘贴（内部剪贴板） ───────────────────
+
+// 以 getFile 是否带回 content 来可靠区分文件/目录：
+// 服务端对“目录”调用 getFile 返回 None（非 0），对“文件”返回 {content,...}
+// 注意：readDir 对文件也返回 code:0 data:[]，不能用于判别。
+async function copyDirRecursive(srcPath, destPath) {
+  const dirRes = await client.readDir(srcPath);
+  if (dirRes.code !== 0 || !dirRes.data) return false;
+  const mk = await client.api('/api/file/createDir', { path: destPath });
+  if (mk.code !== 0) return false;
+  for (const child of dirRes.data) {
+    const s = srcPath + '/' + child.name;
+    const d = destPath + '/' + child.name;
+    if (child.is_dir) {
+      await copyDirRecursive(s, d);
+    } else {
+      const f = await client.getFile(s);
+      if (f.code === 0) await client.putFile(d, f.data.content);
+    }
+  }
+  return true;
+}
+
+// 将 src 复制到指定 dest，自动识别文件/目录（可靠判别见上）
+async function copyEntryTo(srcPath, destPath) {
+  const f = await client.getFile(srcPath);
+  if (f.code === 0 && f.data && typeof f.data.content === 'string') {
+    const r = await client.putFile(destPath, f.data.content);
+    return r.code === 0;
+  }
+  // 目录：递归复制
+  return await copyDirRecursive(srcPath, destPath);
+}
+
+// 同目录内复制（自动加 -copy / -copy2 ... 避免覆盖），返回是否成功
+async function duplicateEntryUnique(path) {
+  const name = path.split('/').pop();
+  const dot = name.lastIndexOf('.');
+  const base = dot > 0 ? name.substring(0, dot) : name;
+  const ext = dot > 0 ? name.substring(dot) : '';
+  for (let i = 0; i < 30; i++) {
+    const suffix = i === 0 ? '-copy' : (i === 1 ? '-copy' : '-copy' + i);
+    const dest = path.replace(name, base + suffix + ext);
+    const ok = await copyEntryTo(path, dest);
+    if (ok) return true;
+  }
+  return false;
+}
+
+// 右键菜单操作的目标集合：右键项在选中集合中则作用于整个选中；否则只作用该项
+function getContextActionTargets(target) {
+  if (state.selectedTreeItems.size > 0 && state.selectedTreeItems.has(target.path)) {
+    return Array.from(state.selectedTreeItems);
+  }
+  state.selectedTreeItems.clear();
+  state.selectedTreeItems.add(target.path);
+  return [target.path];
+}
+
+async function onTreeItemClick(entry, e) {
+  // 多选已在 mousedown 处理，这里仅响应普通点击
+  if (e && (e.ctrlKey || e.metaKey || e.shiftKey)) return;
+
+  // Regular click: clear selection, select this item
+  state.selectedTreeItems.clear();
+  state.selectedTreeItems.add(entry.path);
+  state._lastClickedTreeItem = entry.path;
+
   if (entry.is_dir) {
     state.currentDir = entry.path;
     updateFileBreadcrumb();
@@ -2304,7 +3503,7 @@ async function onTreeItemClick(entry) {
   } else if (entry.ext === '.pdf') {
     await openPdf(entry.path);
   } else if (entry.ext === '.docx' || entry.ext === '.xlsx' || entry.ext === '.pptx') {
-    await openOfficeAsPdf(entry.path);
+    await editorService.open(entry.path);
   } else if (entry.ext === '.html' || entry.ext === '.htm') {
     const encodedPath = entry.path.split('/').map(s => encodeURIComponent(s)).join('/');
     window.open(API_BASE + '/api/file/download/' + encodedPath + '?preview=true', '_blank');
@@ -2340,6 +3539,22 @@ function onTreeItemContext(e, entry) {
   extEditItem.style.display = (!entry.is_dir) ? '' : 'none';
   const openWithItem = document.getElementById('ctxOpenWith');
   openWithItem.style.display = (!entry.is_dir && shouldShowIdePicker(entry)) ? '' : 'none';
+
+  // 多选感知：右键项在选中集合中则菜单作用于整个选中
+  const multi = state.selectedTreeItems.size > 1 && state.selectedTreeItems.has(entry.path);
+  const ctxDuplicate = menu.querySelector('[data-action="duplicate"]');
+  const ctxRename = menu.querySelector('[data-action="rename"]');
+  const ctxOpen = menu.querySelector('[data-action="open"]');
+  if (multi) {
+    const n = state.selectedTreeItems.size;
+    if (ctxDuplicate) ctxDuplicate.textContent = `📋 复制（${n} 项）`;
+    if (ctxRename) ctxRename.style.display = 'none';
+    if (ctxOpen) ctxOpen.style.display = 'none';
+  } else {
+    if (ctxDuplicate) ctxDuplicate.textContent = '📋 复制';
+    if (ctxRename) ctxRename.style.display = '';
+    if (ctxOpen) ctxOpen.style.display = '';
+  }
 }
 
 async function refreshTree() {
@@ -2388,14 +3603,14 @@ function addTab(path, name) {
   tab.className = 'tab';
   tab.dataset.path = path;
   tab.title = name;
-  tab.draggable = true;
+  tab.draggable = path !== '__welcome__';
   var tabData = state.openTabs.find(function(t) { return t.path === path; });
-  var icon = (tabData && tabData._isSlides) ? '📔' : getFileIcon('.' + path.split('.').pop());
+  var icon = (path === '__welcome__') ? '🏠' : ((tabData && tabData._isSlides) ? '📔' : getFileIcon('.' + path.split('.').pop()));
   tab.innerHTML = `
     <span>${icon}</span>
     <span class="tab-label">${name}</span>
     <span class="modified" style="display:none"></span>
-    <span class="close">×</span>
+    ${path === '__welcome__' ? '' : '<span class="close">×</span>'}
   `;
 
   tab.addEventListener('click', (e) => {
@@ -2407,6 +3622,7 @@ function addTab(path, name) {
   });
 
   tab.addEventListener('dragstart', (e) => {
+    if (path === '__welcome__') { e.preventDefault(); return; }
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', path);
     e.dataTransfer.setData('application/x-pane-id', '0');
@@ -2453,7 +3669,12 @@ function addTab(path, name) {
     switchToTab(state.activeTab);
   });
 
-  tabs.appendChild(tab);
+  // 欢迎页插到最前，其余插到最后
+  if (path === '__welcome__') {
+    tabs.insertBefore(tab, tabs.firstChild);
+  } else {
+    tabs.appendChild(tab);
+  }
 }
 
 function switchToTab(path) {
@@ -2461,6 +3682,7 @@ function switchToTab(path) {
 }
 
 async function closeTab(path) {
+  if (path === '__welcome__') return;
   const idx = state.openTabs.findIndex(t => t.path === path);
   if (idx === -1) return;
 
@@ -2472,6 +3694,7 @@ async function closeTab(path) {
   const isPdf = tab._isPdf;
   const isSlides = tab._isSlides;
   const isKmind = tab._isKmind;
+  const isTexpile = tab._isTexpile;
   state.openTabs.splice(idx, 1);
   delete state.fileContents[path];
   delete state.originalContents[path];
@@ -2495,6 +3718,14 @@ async function closeTab(path) {
   }
   if (isKmind) {
     document.getElementById('kmindEditorView').style.display = 'none';
+  }
+  if (isTexpile) {
+    // 关闭时静默保存并销毁 iframe
+    if (texState.path === path) {
+      texSave(true);
+      texDestroyIframe();
+    }
+    document.getElementById('texpileEditorView').style.display = 'none';
   }
   if (tab._isJupyter) {
     document.getElementById('jupyterEditorView').style.display = 'none';
@@ -2524,6 +3755,9 @@ async function closeTab(path) {
     var frame = document.getElementById('browserFrame');
     if (frame) { frame.src = 'about:blank'; frame.removeAttribute('data-url'); }
   }
+  if (tab._isOffice) {
+    hideOfficeEditor();
+  }
 
   const tabEl = document.querySelector(`.tab[data-path="${CSS.escape(path)}"]`);
   if (tabEl) tabEl.remove();
@@ -2532,9 +3766,8 @@ async function closeTab(path) {
     if (state.openTabs.length > 0) {
       switchToTab(state.openTabs[state.openTabs.length - 1].path);
     } else {
-      state.activeTab = null;
-      hideEditor();
-      document.getElementById('statusPath').textContent = '就绪';
+      // 没有其他标签页时切换到欢迎页
+      switchToTab('__welcome__');
     }
   }
   _saveSession();
@@ -2549,16 +3782,24 @@ function markTabModified(path, modified) {
   }
 }
 
-async function saveCurrentFile() {
+async function saveCurrentFile(silent) {
   // 如果活动 pane 是分屏编辑器，走分屏保存
   if (_splitActive && _activePaneId !== '0' && _activePaneId !== _agentPaneId) {
-    await savePaneFile(_activePaneId);
+    await savePaneFile(_activePaneId, silent);
     return;
   }
 
   if (!state.activeTab) return;
 
   const path = state.activeTab;
+  // Texpile 标签页：内容在 iframe 内由 texpile 自行编辑/保存，
+  // 绝对不能走下面的 getEditorContent()（会取到 vditor 残留内容）
+  // 否则会把 vditor 的 markdown 内容覆盖写入 .tex 文件
+  var texTab = state.openTabs.find(function(t) { return t.path === path; });
+  if (texTab && texTab._isTexpile) {
+    await texSave(silent);
+    return;
+  }
   // Monaco 标签页：从实例取值
   if (_monacoEditor && _monacoCurrentFile && state.activeTab === path) {
     var monoTab = state.openTabs.find(function(t) { return t.path === path; });
@@ -2576,10 +3817,9 @@ async function saveCurrentFile() {
       if (res.code === 0) {
         _monacoFiles[_monacoCurrentFile] = content;
         markTabModified(path, false);
-        showToast('已保存: ' + _monacoCurrentFile.split('/').pop(), 'success');
-        await refreshTree();
+        if (!silent) { showToast('已保存: ' + _monacoCurrentFile.split('/').pop(), 'success'); await refreshTree(); }
       } else {
-        showToast('保存失败: ' + (res.msg || ''), 'error');
+        if (!silent) showToast('保存失败: ' + (res.msg || ''), 'error');
       }
       return;
     }
@@ -2595,14 +3835,13 @@ async function saveCurrentFile() {
     state.fileContents[path] = content;
     state.originalContents[path] = content;
     markTabModified(path, false);
-    showToast('已保存: ' + path.split('/').pop(), 'success');
-    await refreshTree();
+    if (!silent) { showToast('已保存: ' + path.split('/').pop(), 'success'); await refreshTree(); }
   } else {
-    showToast('保存失败: ' + (res.msg || ''), 'error');
+    if (!silent) showToast('保存失败: ' + (res.msg || ''), 'error');
   }
 }
 
-async function savePaneFile(paneId) {
+async function savePaneFile(paneId, silent) {
   var activePath = state['paneActiveTab_' + paneId];
   if (!activePath) return;
 
@@ -2615,6 +3854,10 @@ async function savePaneFile(paneId) {
     : (vditorInstance && state['paneVditorReady_' + paneId])
     ? vditorInstance.getValue()
     : (state['paneFileContents_' + paneId][activePath] || '');
+
+  if (isRmdPath(activePath) && window.editorSourceToRmd) {
+    try { content = window.editorSourceToRmd(content); } catch (e) {}
+  }
 
   var res = await client.putFile(activePath, content);
   if (res.code !== 0) {
@@ -2634,10 +3877,9 @@ async function savePaneFile(paneId) {
         if (modDot) modDot.style.display = 'none';
       }
     }
-    showToast('已保存: ' + activePath.split('/').pop(), 'success');
-    await refreshTree();
+    if (!silent) { showToast('已保存: ' + activePath.split('/').pop(), 'success'); await refreshTree(); }
   } else {
-    showToast('保存失败: ' + (res.msg || ''), 'error');
+    if (!silent) showToast('保存失败: ' + (res.msg || ''), 'error');
   }
 }
 
@@ -3530,8 +4772,6 @@ async function srcOpenInEditor(path) {
   if (!_monacoEditor) {
     document.getElementById('monacoEditorWrap').innerHTML = '';
     _initMonaco(document.getElementById('monacoEditorWrap'), content, path);
-  } else {
-    _loadMonacoFile(path);
   }
   // 标记为源码文件，保存时使用源码 API
   _monacoSrcFile = path;
@@ -4378,6 +5618,7 @@ function renderCourses() {
           <button class="course-action-btn note-btn" onclick="openCourseNote('${escapeHtml(courseId)}')">📓 笔记</button>
           <button class="course-action-btn resource-btn" onclick="showCourseResources('${escapeHtml(courseId)}')">📎 资源(${resources.length})</button>
           <button class="course-action-btn" onclick="openNotesFolder('${escapeHtml(courseId)}')">📂 文件夹</button>
+          <button class="course-action-btn" onclick="openExecToolsModal('${escapeHtml(courseId)}')">📋 辅助工具</button>
           <button class="course-action-btn" onclick="editCourse('${escapeHtml(courseId)}')">✏️ 编辑</button>
           <button class="course-action-btn" onclick="addLessonToCourse('${escapeHtml(courseId)}')" style="font-size:10px">📖 +课时</button>
           <button class="course-action-btn" onclick="reorderLessons('${escapeHtml(courseId)}')" style="font-size:10px">↻ 重排</button>
@@ -4412,6 +5653,7 @@ function renderCourses() {
                   <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
                     <button class="course-action-btn note-btn" style="font-size:9px;padding:0 6px" onclick="openLessonNote('${escapeHtml(courseId)}', ${lNum})">📝 笔记</button>
                     <button class="course-action-btn resource-btn" style="font-size:9px;padding:0 6px" onclick="showCourseResources('${escapeHtml(courseId)}', ${lNum})">📎</button>
+                    <button class="course-action-btn" style="font-size:9px;padding:0 4px" onclick="openExecToolsModal('${escapeHtml(courseId)}', ${lNum})">📋</button>
                     <button class="course-action-btn" style="font-size:9px;padding:0 4px" onclick="editLesson('${escapeHtml(courseId)}', ${lNum})">✏️</button>
                     <button class="course-action-btn" style="font-size:9px;padding:0 4px;color:var(--red)" onclick="deleteLessonConfirm('${escapeHtml(courseId)}', ${lNum}, '${lTitle.replace(/'/g, "\\'").replace(/\\/g, "\\\\")}')">🗑️</button>
                     ${lessonRes.length ? lessonRes.map(r =>
@@ -4719,19 +5961,53 @@ async function addCourseResourceFromTree(courseId) {
 
 // ─── 课程笔记打开跳转（仿 course_tracker.py get_or_create_note + _open_note）──
 
+// 从字符串中提取 "Lxx" 的数字部分（如 "L01_逻辑与证明基础" → 1）
+function _extractLNumFromTitle(s) {
+  if (!s) return null;
+  const m = String(s).match(/L(\d+)/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 function getNotePath(course, lessonNumber) {
   const title = course.course_title || course.title || 'unknown';
   const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
-  if (lessonNumber != null) {
-    const lesson = (course.lessons || []).find(l => (l.lesson_number || l.number) === lessonNumber);
-    const lTitle = lesson ? (lesson.lesson_title || lesson.title || '') : '';
-    const safeLTitle = lTitle.replace(/[\\/:*?"<>|]/g, '_').slice(0, 30);
-    const fn = lTitle
-      ? `L${String(lessonNumber).padStart(2, '0')}_${safeLTitle}.Rmd`
-      : `L${String(lessonNumber).padStart(2, '0')}.Rmd`;
-    return `Notes/${safeTitle}/${fn}`;
+
+  if (lessonNumber == null) {
+    return `Notes/${safeTitle}/course_notes.Rmd`;
   }
-  return `Notes/${safeTitle}/course_notes.Rmd`;
+
+  const lessons = course.lessons || [];
+  const num = v => (v != null ? v : null);
+  let lesson = lessons.find(l => num(l.lesson_number) === lessonNumber || num(l.number) === lessonNumber);
+
+  // 容错1：若按 lesson_number 找不到，依次尝试：
+  //   a) lessonNumber-1 作为 0-based 索引（用户笔记 L01 起步，lessonIdx=0 → lesson_number=1）
+  //   b) lessonNumber 作为 0-based 索引（兜底）
+  if (!lesson) {
+    if (lessonNumber - 1 >= 0 && lessonNumber - 1 < lessons.length) {
+      lesson = lessons[lessonNumber - 1];
+    } else if (lessonNumber >= 0 && lessonNumber < lessons.length) {
+      lesson = lessons[lessonNumber];
+    }
+  }
+
+  const rawTitle = lesson ? (lesson.lesson_title || lesson.title || '') : '';
+  // 容错3：去除 lesson_title 开头的 "Lxx_" 前缀，避免文件名出现 L01_L01_xxx.Rmd
+  const lTitle = rawTitle.replace(/^L\d+[_\s]*/i, '');
+  const safeLTitle = lTitle.replace(/[\\/:*?"<>|]/g, '_').slice(0, 30);
+
+  // 容错2：优先用 lesson_title 里已有的 "Lxx" 数字（用户笔记命名习惯）
+  // 否则取 lesson.lesson_number；若 lesson_number 缺失或为 0，用传入的 lessonNumber（已是 1-based）
+  let numForFile = _extractLNumFromTitle(lTitle);
+  if (numForFile == null) {
+    const realNum = lesson ? num(lesson.lesson_number != null ? lesson.lesson_number : lesson.number) : null;
+    numForFile = (realNum != null && realNum > 0) ? realNum : lessonNumber;
+  }
+
+  const fn = lTitle
+    ? `L${String(numForFile).padStart(2, '0')}_${safeLTitle}.Rmd`
+    : `L${String(numForFile).padStart(2, '0')}.Rmd`;
+  return `Notes/${safeTitle}/${fn}`;
 }
 
 function generateNoteYaml(course, lessonNumber) {
@@ -5002,8 +6278,16 @@ async function openCourseNote(courseId) {
 async function openLessonNote(courseId, lessonNumber) {
   const course = state.courses.find(c => (c.note_id || c.id || c._id || c.filename || '') === courseId);
   if (!course) { showToast('课程未找到', 'error'); return; }
-  const notePath = getNotePath(course, lessonNumber);
+  // 先用理想路径，不存在则按 Lxx 数字扫描目录容错匹配
+  let notePath = getNotePath(course, lessonNumber);
   let res = await client.getFile(notePath);
+  if (res.code !== 0 || !res.data || !res.data.content) {
+    const matched = await _findNoteByLNum(course, lessonNumber);
+    if (matched) {
+      notePath = matched;
+      res = await client.getFile(notePath);
+    }
+  }
   if (res.code !== 0 || !res.data || !res.data.content) {
     const template = generateNoteYaml(course, lessonNumber);
     res = await client.putFile(notePath, template);
@@ -5011,6 +6295,29 @@ async function openLessonNote(courseId, lessonNumber) {
     showToast('已创建课时笔记', 'success');
   }
   await editorService.open(notePath);
+}
+
+// 扫描笔记目录，按 "Lxx" 数字匹配已存在的笔记文件（标题不一致也能命中）
+async function _findNoteByLNum(course, lessonNumber) {
+  if (lessonNumber == null) return null;
+  const title = course.course_title || course.title || 'unknown';
+  const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+  const dir = `Notes/${safeTitle}`;
+  const targetNum = parseInt(lessonNumber, 10);
+  try {
+    const r = await client.readDir(dir);
+    if (r.code !== 0 || !Array.isArray(r.data)) return null;
+    const entries = r.data || [];
+    for (const e of entries) {
+      if (e.is_dir) continue;
+      const name = e.name || (e.path || '').split('/').pop() || '';
+      const m = String(name).match(/L(\d+)/i);
+      if (m && parseInt(m[1], 10) === targetNum && /\.rmd$/i.test(name)) {
+        return dir + '/' + name;
+      }
+    }
+  } catch(e) {}
+  return null;
 }
 
 async function openNotesFolder(courseId) {
@@ -5103,8 +6410,6 @@ async function openWith(ide) {
       if (!_monacoEditor) {
         document.getElementById('monacoEditorWrap').innerHTML = '';
         _initMonaco(document.getElementById('monacoEditorWrap'), res.data.content, filePath);
-      } else {
-        _loadMonacoFile(filePath);
       }
       break;
     }
@@ -5599,6 +6904,7 @@ document.getElementById('execLessonSelect').addEventListener('change', (e) => {
   if (idx === '') {
     document.getElementById('execLessonInfo').style.display = 'none';
     document.getElementById('execLessonActions').style.display = 'none';
+    document.getElementById('execToolsBtn').style.display = 'none';
     document.getElementById('execTimer').style.display = 'none';
     document.getElementById('execCompleteBtn').style.display = 'none';
     resetTimer();
@@ -5624,7 +6930,8 @@ function showExecLessonInfo(courseId, lessonIdx) {
   if (!course || !course.lessons || !course.lessons[lessonIdx]) return;
 
   const lesson = course.lessons[lessonIdx];
-  const lNum = lesson.lesson_number || lesson.number || (lessonIdx + 1);
+  const _ln = lesson.lesson_number != null ? lesson.lesson_number : lesson.number;
+  const lNum = (_ln != null && _ln > 0) ? _ln : (lessonIdx + 1);
   const title = lesson.lesson_title || lesson.title || '未命名课时';
   const question = lesson.central_question || '';
   const desc = lesson.description || '';
@@ -5652,8 +6959,10 @@ function showExecLessonInfo(courseId, lessonIdx) {
       <button class="course-action-btn note-btn" style="font-size:10px;padding:2px 8px" data-action="note" data-course="${escapeHtml(courseId)}" data-lesson="${lNum}">📝 笔记</button>
       <button class="course-action-btn resource-btn" style="font-size:10px;padding:2px 8px" data-action="resource" data-course="${escapeHtml(courseId)}" data-lesson="${lNum}">📎 本课资源</button>
       <button class="course-action-btn" style="font-size:10px;padding:2px 6px" data-action="edit" data-course="${escapeHtml(courseId)}" data-lesson="${lNum}">✏️ 编辑</button>
+      <button class="course-action-btn" style="font-size:10px;padding:2px 6px" onclick="openExecToolsModal('${escapeHtml(courseId)}', ${lNum})">📋</button>
       <button class="course-action-btn" style="font-size:10px;padding:2px 6px;color:var(--red)" data-action="delete" data-course="${escapeHtml(courseId)}" data-lesson="${lNum}" data-title="${safeTitle}">🗑️ 删除</button>
     </div>
+    <button class="exec-action-btn" onclick="openExecToolsModal()">📋 辅助工具</button>
   `;
   actionsEl.style.display = 'block';
 
@@ -5799,6 +7108,7 @@ document.getElementById('execCompleteBtn').addEventListener('click', async () =>
       showToast('🎉 课程全部完成！', 'success');
       document.getElementById('execLessonInfo').style.display = 'none';
       document.getElementById('execLessonActions').style.display = 'none';
+      document.getElementById('execToolsBtn').style.display = 'none';
       document.getElementById('execTimer').style.display = 'none';
       document.getElementById('execCompleteBtn').style.display = 'none';
     }
@@ -7485,6 +8795,7 @@ function getLastCheckpointHash(msg) {
 
 function renderAgentMessages() {
   const container = document.getElementById('agentMessages');
+  var pendingRenders = []; // 收集需要异步渲染的 {el, content}
   container.innerHTML = state.agentMessages.map(msg => {
     let rendered = '';
     if (msg.role === 'user') {
@@ -7503,7 +8814,22 @@ function renderAgentMessages() {
       }
       return '<div class="agent-msg assistant">' + rendered + '</div>';
     } else if (msg.role === 'assistant') {
-      rendered = renderSimpleMarkdown(msg.content);
+      // 流式输出中（agentStreaming 且是最后一条 assistant）用简化版避免卡顿，
+      // 完成后用 Vditor.preview 异步完整渲染
+      var mi2 = state.agentMessages.indexOf(msg);
+      var isLastAssistant = true;
+      for (var k = state.agentMessages.length - 1; k > mi2; k--) {
+        if (state.agentMessages[k].role === 'assistant') { isLastAssistant = false; break; }
+      }
+      if (state.agentStreaming && isLastAssistant) {
+        // 流式中：同步简化渲染
+        rendered = renderSimpleMarkdown(msg.content);
+      } else {
+        // 完成：用占位符，稍后异步渲染
+        var renderId = 'agent-md-' + mi2 + '-' + Date.now();
+        pendingRenders.push({ id: renderId, content: msg.content });
+        rendered = '<div id="' + renderId + '" class="md-pending vditor-reset">' + renderSimpleMarkdown(msg.content) + '</div>';
+      }
       // 内联 toolCalls（流式 + 恢复后）
       if (msg.toolCalls && msg.toolCalls.length) {
         rendered += renderToolCallsInline(msg.toolCalls);
@@ -7521,7 +8847,7 @@ function renderAgentMessages() {
       return `
         <div class="agent-msg ${msg.role}">
           <div class="msg-role">${msg.role === 'user' ? '👤 你' : msg.role === 'tool_call' ? '🔧 工具' : '🤖 助手'}</div>
-          <div class="msg-content">${rendered}</div>
+          <div class="msg-content vditor-reset">${rendered}</div>
           <div class="agent-actions">
             <span class="agent-msg-time">${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span>
             <button class="agent-action-btn" onclick="copyAgentMessage(${mi})" title="复制消息">📋</button>
@@ -7530,15 +8856,31 @@ function renderAgentMessages() {
         </div>
       `;
   }).join('');
+
+  // 异步渲染所有待处理的 markdown 内容
+  pendingRenders.forEach(function(item) {
+    var el = document.getElementById(item.id);
+    if (el) {
+      el.removeAttribute('id');
+      _renderMdInto(el, item.content);
+    }
+  });
+
   container.scrollTop = container.scrollHeight;
 }
 
+var _agentRenderTimer = null;
 function updateLastAssistantMessage(content) {
   // 找到最后一条 assistant 消息并更新内容
   for (let i = state.agentMessages.length - 1; i >= 0; i--) {
     if (state.agentMessages[i].role === 'assistant') {
       state.agentMessages[i].content = content;
-      renderAgentMessages();
+      // 流式期间 debounce 渲染，避免每个 delta 都重建 DOM
+      if (_agentRenderTimer) clearTimeout(_agentRenderTimer);
+      _agentRenderTimer = setTimeout(function() {
+        renderAgentMessages();
+        _agentRenderTimer = null;
+      }, 50);
       return;
     }
   }
@@ -7616,6 +8958,8 @@ async function sendAgentMessage() {
     state.agentStreaming = false;
     document.getElementById('agentTyping').classList.remove('show');
     updateAgentSendButton();
+    // 流式结束后再渲染一次，确保最后一条 assistant 消息用完整 markdown 渲染
+    renderAgentMessages();
   }
 }
 
@@ -9112,7 +10456,7 @@ document.querySelectorAll('.context-menu-item').forEach(item => {
         break;
 
       case 'rename':
-        showModal('重命名', target.name, async (newName) => {
+        showModal('重命名', '输入新名称', async (newName) => {
           const lastSlash = target.path.lastIndexOf('/');
           const dir = lastSlash >= 0 ? target.path.substring(0, lastSlash + 1) : '';
           const newPath = dir + newName;
@@ -9123,46 +10467,44 @@ document.querySelectorAll('.context-menu-item').forEach(item => {
           } else {
             showToast('重命名失败: ' + (res.msg || ''), 'error');
           }
-        });
+        }, { defaultValue: target.name });
         break;
 
-      case 'duplicate':
-        if (state.fileContents[target.path] !== undefined) {
-          const ext = target.ext || '';
-          const baseName = target.name.replace(ext, '');
-          const newPath = target.path.replace(target.name, baseName + '-copy' + ext);
-          const res = await client.putFile(newPath, state.fileContents[target.path]);
-          if (res.code === 0) {
-            showToast('已复制', 'success');
-            await refreshTree();
-          }
+      case 'duplicate': {
+        const targets = getContextActionTargets(target);
+        let okCount = 0;
+        for (const p of targets) {
+          if (await duplicateEntryUnique(p)) okCount++;
+        }
+        if (okCount > 0) {
+          showToast(`已复制 ${okCount} 项`, 'success');
+          await refreshTree();
         } else {
-          const fileRes = await client.getFile(target.path);
-          if (fileRes.code === 0) {
-            const ext = target.ext || '';
-            const baseName = target.name.replace(ext, '');
-            const newPath = target.path.replace(target.name, baseName + '-copy' + ext);
-            const res = await client.putFile(newPath, fileRes.data.content);
-            if (res.code === 0) {
-              showToast('已复制', 'success');
-              await refreshTree();
-            }
-          }
+          showToast('复制失败', 'error');
         }
         break;
+      }
 
-      case 'delete':
-        if (await modalConfirm(`确定删除 "${target.name}"？`)) {
-          const res = await client.removeFile(target.path);
-          if (res.code === 0) {
-            showToast('已删除', 'success');
-            closeTab(target.path);
-            await refreshTree();
-          } else {
-            showToast('删除失败: ' + (res.msg || ''), 'error');
-          }
+      case 'delete': {
+        const targets = getContextActionTargets(target);
+        const confirmed = targets.length > 1
+          ? await modalConfirm(`确定删除选中的 ${targets.length} 个项目？`)
+          : await modalConfirm(`确定删除 "${target.name}"？`);
+        if (!confirmed) break;
+        let okCount = 0;
+        for (const p of targets) {
+          const res = await client.removeFile(p);
+          if (res.code === 0) { okCount++; closeTab(p); }
+        }
+        if (okCount > 0) {
+          showToast(`已删除 ${okCount} 项`, 'success');
+          state.selectedTreeItems.clear();
+          await refreshTree();
+        } else {
+          showToast('删除失败', 'error');
         }
         break;
+      }
 
       case 'download':
         client.downloadFile(target.path);
@@ -9200,6 +10542,77 @@ document.querySelectorAll('.context-menu-item').forEach(item => {
         break;
     }
   });
+});
+
+// ─── 快捷键：Ctrl+C / X / V 复制 / 剪切 / 粘贴 ───────────────
+
+function cutOrCopySelection(cut) {
+  if (state.selectedTreeItems.size === 0) {
+    showToast('请先选中文件（Ctrl/Shift 点击）', 'info');
+    return;
+  }
+  state.fileClipboard = Array.from(state.selectedTreeItems).map(p => ({ path: p, cut }));
+  showToast(cut ? `已剪切 ${state.fileClipboard.length} 项（Ctrl+V 粘贴）` : `已复制 ${state.fileClipboard.length} 项（Ctrl+V 粘贴）`, 'info');
+}
+
+function getPasteTargetDir() {
+  if (state.currentDir) return state.currentDir;
+  const first = state.fileClipboard[0];
+  if (first) {
+    const idx = first.path.lastIndexOf('/');
+    return idx > 0 ? first.path.substring(0, idx) : '';
+  }
+  return '';
+}
+
+async function pasteClipboard() {
+  if (state.fileClipboard.length === 0) {
+    showToast('剪贴板为空', 'info');
+    return;
+  }
+  const destDir = getPasteTargetDir();
+  if (!destDir) { showToast('无法确定粘贴位置', 'error'); return; }
+  let okCount = 0;
+  const kept = [];
+  for (const item of state.fileClipboard) {
+    const name = item.path.split('/').pop();
+    const dot = name.lastIndexOf('.');
+    const base = dot > 0 ? name.substring(0, dot) : name;
+    const ext = dot > 0 ? name.substring(dot) : '';
+    let done = false;
+    for (let i = 0; i < 30 && !done; i++) {
+      const suffix = i === 0 ? '' : (i === 1 ? '-copy' : '-copy' + i);
+      const dest = destDir + '/' + base + suffix + ext;
+      if (item.cut) {
+        if (item.path === dest) { continue; } // 同位置不移动，换名
+        const r = await client.renameFile(item.path, dest);
+        if (r.code === 0) done = true;
+      } else {
+        done = await copyEntryTo(item.path, dest);
+      }
+    }
+    if (done) okCount++;
+    else kept.push(item);
+  }
+  if (okCount > 0) {
+    state.selectedTreeItems.clear();
+    await refreshTree();
+  }
+  // 剪切项粘贴后清空；复制项保留以便多次粘贴；失败项保留
+  if (state.fileClipboard.every(e => e.cut)) state.fileClipboard = [];
+  else state.fileClipboard = kept;
+  showToast(`已粘贴 ${okCount} 项到 ${destDir}`, 'success');
+}
+
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  const tag = (t.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || t.isContentEditable) return;
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'c') { e.preventDefault(); cutOrCopySelection(false); }
+  else if (k === 'x') { e.preventDefault(); cutOrCopySelection(true); }
+  else if (k === 'v') { e.preventDefault(); pasteClipboard(); }
 });
 
 // ─── Toolbar Actions ────────────────────────────────────────
@@ -10320,6 +11733,11 @@ async function _moveTabBetweenPanes(srcPath, srcPaneId, dstPaneId) {
       latestContent = (state['paneFileContents_' + srcPaneId] || {})[srcPath] || '';
     }
   }
+  // 统一为 Rmd 语义（去掉编辑 meta line），保证 fileContents/paneFileContents/
+  // paneOriginalContents 三张表始终存 Rmd 而非编辑器源码
+  if (isRmdPath(srcPath) && window.editorSourceToRmd) {
+    try { latestContent = window.editorSourceToRmd(latestContent); } catch (e) {}
+  }
   // 同步回源 state
   if (tabData._isSlides) {
     // slides：不做内容同步（DOM 整体迁移，cache 已更新）
@@ -10430,7 +11848,11 @@ async function _moveTabBetweenPanes(srcPath, srcPaneId, dstPaneId) {
       // 设置 Vditor 内容（slides 已通过 DOM 整体迁移）
       var vditorInstance = state['paneVditor_' + dstPaneId];
       if (vditorInstance && state['paneVditorReady_' + dstPaneId]) {
-        vditorInstance.setValue(latestContent);
+        var _disp = latestContent;
+        if (isRmdPath(srcPath) && window.rmdToEditorSource) {
+          try { _disp = window.rmdToEditorSource(_disp); } catch (e) {}
+        }
+        vditorInstance.setValue(_disp);
       }
     }
   }
@@ -10801,6 +12223,12 @@ async function init() {
     renderWelcomeTaskSessions();
     // 检查是否有上次未关闭的标签页，弹窗询问是否恢复
     _checkSessionRestore();
+    // 无标签页时默认显示欢迎页标签（仅在无会话可恢复时）
+    if (state.openTabs.length === 0) {
+      state.openTabs.push({ path: '__welcome__', name: '首页', modified: false, _isWelcome: true });
+      addTab('__welcome__', '首页');
+      state.activeTab = '__welcome__';
+    }
   } catch(e) { console.warn('init: load dirs failed', e); }
 
   client.connectWS();
@@ -11096,20 +12524,56 @@ function lerpColor(a, b, t) {
   }).join('');
 }
 
+// 相对亮度（WCAG）：输入 #rrggbb，返回 0..1
+function relLuminance(hex) {
+  var r = parseInt(hex.slice(1,3),16)/255;
+  var g = parseInt(hex.slice(3,5),16)/255;
+  var b = parseInt(hex.slice(5,7),16)/255;
+  function ch(c) { return c <= 0.03928 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4); }
+  return 0.2126*ch(r) + 0.7152*ch(g) + 0.0722*ch(b);
+}
+
+// 对比度比（WCAG）：1..21
+function contrastRatio(a, b) {
+  var la = relLuminance(a), lb = relLuminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+// 保证 fg 在 bg 上有足够对比度；不足时向白/黑插值（保留原色相，只调亮度）
+function ensureFgContrast(bgHex, fgHex, minContrast) {
+  if (contrastRatio(bgHex, fgHex) >= minContrast) return fgHex;
+  var bgIsDark = relLuminance(bgHex) < 0.5;
+  var target = bgIsDark ? '#ffffff' : '#000000';
+  // 二分搜索最小偏移，保留原 fg 色调
+  var lo = 0, hi = 1, best = fgHex;
+  for (var i = 0; i < 20; i++) {
+    var mid = (lo + hi) / 2;
+    var test = lerpColor(fgHex, target, mid);
+    if (contrastRatio(bgHex, test) >= minContrast) { best = test; hi = mid; }
+    else { lo = mid; }
+  }
+  return best;
+}
+
 function getTimeColors() {
   var d = new Date();
   var h = d.getHours() + d.getMinutes() / 60;
+  // phases 设计原则：
+  //   1. 深色时段 fg 用高亮浅色（保证深底浅字对比度 ≥ 7:1）
+  //   2. 浅色时段 fg 用极深色（保证浅底深字对比度 ≥ 10:1）
+  //   3. 日出/日落过渡缩短到 1 小时（7→8、17→18），减少 RGB 插值灰区
+  //   4. fg 由 ensureFgContrast 兜底，任何插值点对比度 ≥ 4.5:1 (WCAG AA)
   var phases = [
-    { t: 0,  bg: '#0d1117', bg2: '#161b22', accent: '#58a6ff', fg: '#c9d1d9' },
-    { t: 5,  bg: '#1a1b26', bg2: '#24283b', accent: '#7aa2f7', fg: '#c0caf5' },
-    { t: 7,  bg: '#2d1b2e', bg2: '#3d2438', accent: '#f0a070', fg: '#e8d5c0' },
-    { t: 10, bg: '#f5e6d0', bg2: '#fff5e6', accent: '#d97706', fg: '#3d2e1e' },
-    { t: 12, bg: '#f5f5f0', bg2: '#ffffff', accent: '#4f73d1', fg: '#2c2c2c' },
-    { t: 15, bg: '#e8f0fe', bg2: '#ffffff', accent: '#2563eb', fg: '#1e293b' },
-    { t: 17, bg: '#f5e6d0', bg2: '#fff5e6', accent: '#d97706', fg: '#3d2e1e' },
-    { t: 19, bg: '#2d1b2e', bg2: '#3d2438', accent: '#e8799b', fg: '#e8d5c0' },
-    { t: 21, bg: '#16162a', bg2: '#1e1e3a', accent: '#a78bfa', fg: '#c4b5fd' },
-    { t: 24, bg: '#0d1117', bg2: '#161b22', accent: '#58a6ff', fg: '#c9d1d9' },
+    { t: 0,  bg: '#0d1117', bg2: '#161b22', accent: '#58a6ff', fg: '#e6edf3' },  // 深夜
+    { t: 5,  bg: '#1a1b26', bg2: '#24283b', accent: '#7aa2f7', fg: '#d4ddf5' },  // 黎明前
+    { t: 7,  bg: '#2d1b2e', bg2: '#3d2438', accent: '#f0a070', fg: '#f0dccb' },  // 日出紫
+    { t: 8,  bg: '#f5e6d0', bg2: '#fff5e6', accent: '#d97706', fg: '#2d1f0e' },  // 上午米色（快速过渡完成）
+    { t: 12, bg: '#f5f5f0', bg2: '#ffffff', accent: '#4f73d1', fg: '#1a1a1a' },  // 中午白
+    { t: 15, bg: '#e8f0fe', bg2: '#ffffff', accent: '#2563eb', fg: '#0f172a' },  // 下午蓝白
+    { t: 17, bg: '#f5e6d0', bg2: '#fff5e6', accent: '#d97706', fg: '#2d1f0e' },  // 傍晚米色
+    { t: 18, bg: '#2d1b2e', bg2: '#3d2438', accent: '#e8799b', fg: '#f0dccb' },  // 黄昏紫（快速过渡完成）
+    { t: 21, bg: '#16162a', bg2: '#1e1e3a', accent: '#a78bfa', fg: '#d4ccf5' },  // 夜晚深蓝
+    { t: 24, bg: '#0d1117', bg2: '#161b22', accent: '#58a6ff', fg: '#e6edf3' },  // 深夜
   ];
   for (var i = 0; i < phases.length - 1; i++) {
     if (h >= phases[i].t && h < phases[i+1].t) {
@@ -11129,14 +12593,19 @@ var _gradientTimer = null;
 var _gradientStyleEl = null;
 
 function buildGradientCSS(c, isDark) {
+  // fg 兜底：保证 --fg 在 c.bg 上对比度 ≥ 4.5:1 (WCAG AA)
+  // fg-muted 保证 ≥ 3:1（AA 大字/图标），fg-dim 不强制（设计就是暗淡）
+  var fg = ensureFgContrast(c.bg, c.fg, 4.5);
+  var fgMuted = ensureFgContrast(c.bg, isDark ? '#7d8aa8' : '#5a5a5a', 3.0);
   return 'html[data-theme="gradient"]{'
     + '--bg:' + c.bg + ';'
     + '--bg-secondary:' + c.bg2 + ';'
+    + '--bg-card:' + c.bg2 + ';'
     + '--bg-tertiary:' + (isDark ? '#2f3349' : '#e8e8e4') + ';'
     + '--bg-hover:' + (isDark ? '#353a54' : '#e0e0dc') + ';'
-    + '--fg:' + c.fg + ';'
-    + '--fg-muted:' + (isDark ? '#565f89' : '#737373') + ';'
-    + '--fg-dim:' + (isDark ? '#3b4261' : '#b0b0ac') + ';'
+    + '--fg:' + fg + ';'
+    + '--fg-muted:' + fgMuted + ';'
+    + '--fg-dim:' + (isDark ? '#5a6582' : '#9a9a96') + ';'
     + '--accent:' + c.accent + ';'
     + '--accent-hover:' + c.accent + ';'
     + '--accent-bg:' + c.accent.slice(0,7) + '1f' + ';'
@@ -11158,7 +12627,10 @@ function buildGradientCSS(c, isDark) {
 
 function applyGradientTheme() {
   var c = getTimeColors();
-  var isDark = ['#0d1117','#1a1b26','#16162a','#2d1b2e'].some(function(x) { return c.bg.startsWith(x); });
+  // isDark 判断改用相对亮度（WCAG），不依赖 startsWith 匹配特定 hex
+  // 阈值 0.4：bg 亮度 < 0.4 视为深色（深色 phase 的 bg 亮度通常 < 0.05）
+  // 过渡时段（bg 中等亮度）也能准确判断
+  var isDark = relLuminance(c.bg) < 0.4;
   var css = buildGradientCSS(c, isDark);
   if (_gradientStyleEl) {
     _gradientStyleEl.textContent = css;
@@ -11188,6 +12660,8 @@ function applyBaseTheme(theme) {
   document.getElementById('vditorContentTheme').href = theme === 'light'
     ? '/static/vditor/css/content-theme/light.css'
     : '/static/vditor/css/content-theme/dark.css';
+  // 重新渲染所有 markdown 容器（笔记预览、agent 消息等），适配新主题
+  setTimeout(_rerenderMdOnThemeChange, 50);
 }
 
 function toggleTheme() {
@@ -12112,21 +13586,78 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
 
 // ─── 编辑器自动补全 ──────────────────────────────────────────
 const LATEX_COMMANDS = {
-  'alpha':'α','beta':'β','gamma':'γ','delta':'δ','epsilon':'ε','varepsilon':'ε','zeta':'ζ','eta':'η','theta':'θ','vartheta':'ϑ',
-  'iota':'ι','kappa':'κ','lambda':'λ','mu':'μ','nu':'ν','xi':'ξ','pi':'π','rho':'ρ','sigma':'σ','tau':'τ','upsilon':'υ','phi':'φ','varphi':'ϕ','chi':'χ','psi':'ψ','omega':'ω',
-  'Gamma':'Γ','Delta':'Δ','Theta':'Θ','Lambda':'Λ','Xi':'Ξ','Pi':'Π','Sigma':'Σ','Upsilon':'Υ','Phi':'Φ','Psi':'Ψ','Omega':'Ω',
-  'frac':'\\frac{a}{b}','dfrac':'\\dfrac{a}{b}','sqrt':'\\sqrt{x}','sum':'\\sum_{i=1}^{n}','prod':'\\prod_{i=1}^{n}','int':'\\int_{a}^{b}',
-  'iint':'\\iint','iiint':'\\iiint','oint':'\\oint','lim':'\\lim_{x \\to }',
-  'leq':'≤','geq':'≥','neq':'≠','approx':'≈','equiv':'≡','sim':'∼','propto':'∝','perp':'⊥','parallel':'∥',
-  'in':'∈','notin':'∉','subset':'⊂','supset':'⊃','subseteq':'⊆','supseteq':'⊇','cup':'∪','cap':'∩','emptyset':'∅',
-  'rightarrow':'→','leftarrow':'←','leftrightarrow':'↔','Rightarrow':'⇒','Leftarrow':'⇐','mapsto':'↦',
-  'sin':'\\sin','cos':'\\cos','tan':'\\tan','ln':'\\ln','log':'\\log','exp':'\\exp','det':'\\det',
-  'hat':'\\hat{x}','bar':'\\bar{x}','vec':'\\vec{x}','dot':'\\dot{x}','ddot':'\\ddot{x}','tilde':'\\tilde{x}',
+  // ── 希腊字母（小写）：一律 \name 命令 ──
+  'alpha':'\\alpha','beta':'\\beta','gamma':'\\gamma','delta':'\\delta','epsilon':'\\epsilon','varepsilon':'\\varepsilon',
+  'zeta':'\\zeta','eta':'\\eta','theta':'\\theta','vartheta':'\\vartheta','iota':'\\iota','kappa':'\\kappa',
+  'lambda':'\\lambda','mu':'\\mu','nu':'\\nu','xi':'\\xi','pi':'\\pi','rho':'\\rho','sigma':'\\sigma','tau':'\\tau',
+  'upsilon':'\\upsilon','phi':'\\phi','varphi':'\\varphi','chi':'\\chi','psi':'\\psi','omega':'\\omega',
+  // ── 希腊字母（大写）──
+  'Gamma':'\\Gamma','Delta':'\\Delta','Theta':'\\Theta','Lambda':'\\Lambda','Xi':'\\Xi','Pi':'\\Pi',
+  'Sigma':'\\Sigma','Upsilon':'\\Upsilon','Phi':'\\Phi','Psi':'\\Psi','Omega':'\\Omega',
+  // ── 分式 / 根式 / 求和 / 积分（带占位符结构，纯 LaTeX）──
+  'frac':'\\frac{a}{b}','dfrac':'\\dfrac{a}{b}','tfrac':'\\tfrac{a}{b}',
+  'sqrt':'\\sqrt{x}','nthroot':'\\sqrt[n]{x}',
+  'sum':'\\sum_{i=1}^{n}','prod':'\\prod_{i=1}^{n}',
+  'int':'\\int_{a}^{b}','iint':'\\iint','iiint':'\\iiint','oint':'\\oint',
+  'oiint':'\\oiint','oiiint':'\\oiiint',
+  'lim':'\\lim_{x \\to \\infty}',
+  // ── 关系运算符 ──
+  'leq':'\\leq','le':'\\le','geq':'\\geq','ge':'\\ge','neq':'\\neq','ne':'\\ne',
+  'approx':'\\approx','equiv':'\\equiv','sim':'\\sim','simeq':'\\simeq','cong':'\\cong',
+  'propto':'\\propto','perp':'\\perp','parallel':'\\parallel','nparallel':'\\nparallel',
+  // ── 集合运算符 ──
+  'in':'\\in','notin':'\\notin','ni':'\\ni',
+  'subset':'\\subset','supset':'\\supset','subseteq':'\\subseteq','supseteq':'\\supseteq',
+  'subsetneq':'\\subsetneq','supsetneq':'\\supsetneq',
+  'cup':'\\cup','cap':'\\cap','setminus':'\\setminus','emptyset':'\\emptyset','varnothing':'\\varnothing',
+  // ── 箭头 ──
+  'rightarrow':'\\rightarrow','to':'\\to','leftarrow':'\\leftarrow','leftrightarrow':'\\leftrightarrow',
+  'Rightarrow':'\\Rightarrow','Leftarrow':'\\Leftarrow','Leftrightarrow':'\\Leftrightarrow',
+  'mapsto':'\\mapsto','hookrightarrow':'\\hookrightarrow','rightleftharpoons':'\\rightleftharpoons',
+  'uparrow':'\\uparrow','downarrow':'\\downarrow','updownarrow':'\\updownarrow',
+  // ── 三角 / 指数 / 对数 ──
+  'sin':'\\sin','cos':'\\cos','tan':'\\tan','cot':'\\cot','sec':'\\sec','csc':'\\csc',
+  'arcsin':'\\arcsin','arccos':'\\arccos','arctan':'\\arctan',
+  'sinh':'\\sinh','cosh':'\\cosh','tanh':'\\tanh',
+  'ln':'\\ln','log':'\\log','exp':'\\exp','det':'\\det','dim':'\\dim','min':'\\min','max':'\\max',
+  // ── 重音符号 ──
+  'hat':'\\hat{x}','bar':'\\bar{x}','vec':'\\vec{x}','dot':'\\dot{x}','ddot':'\\ddot{x}',
+  'tilde':'\\tilde{x}','widehat':'\\widehat{x}','widetilde':'\\widetilde{x}','overline':'\\overline{x}',
+  'underline':'\\underline{x}','overrightarrow':'\\overrightarrow{x}',
+  // ── 字体 ──
   'mathbf':'\\mathbf{x}','mathbb':'\\mathbb{R}','mathcal':'\\mathcal{L}','mathrm':'\\mathrm{x}',
-  'begin':'\\begin{aligned}\n\n\\end{aligned}','pmatrix':'\\begin{pmatrix}\na & b \\\\\nc & d\n\\end{pmatrix}',
-  'bmatrix':'\\begin{bmatrix}\na & b \\\\\nc & d\n\\end{bmatrix}','cases':'\\begin{cases}\na, & x > 0 \\\\\nb, & \\text{otherwise}\n\\end{cases}',
-  'nabla':'∇','partial':'∂','infty':'∞','hbar':'ℏ','forall':'∀','exists':'∃',
-  'text':'\\text{}','quad':'\\quad','cdots':'⋯','ldots':'…','boxed':'\\boxed{x}',
+  'mathit':'\\mathit{x}','mathsf':'\\mathsf{x}','mathtt':'\\mathtt{x}','boldsymbol':'\\boldsymbol{x}',
+  // ── 矩阵 / 环境 ──
+  'begin':'\\begin{aligned}\n  a &= b \\\\\n  c &= d\n\\end{aligned}',
+  'pmatrix':'\\begin{pmatrix}\n  a & b \\\\\n  c & d\n\\end{pmatrix}',
+  'bmatrix':'\\begin{bmatrix}\n  a & b \\\\\n  c & d\n\\end{bmatrix}',
+  'vmatrix':'\\begin{vmatrix}\n  a & b \\\\\n  c & d\n\\end{vmatrix}',
+  'Bmatrix':'\\begin{Bmatrix}\n  a & b \\\\\n  c & d\n\\end{Bmatrix}',
+  'cases':'\\begin{cases}\n  a, & x > 0 \\\\\n  b, & x \\leq 0\n\\end{cases}',
+  'aligned':'\\begin{aligned}\n  a &= b \\\\\n  c &= d\n\\end{aligned}',
+  'array':'\\begin{array}{cc}\n  a & b \\\\\n  c & d\n\\end{array}',
+  // ── 微积分 / 向量 ──
+  'nabla':'\\nabla','partial':'\\partial','infty':'\\infty','hbar':'\\hbar','hslash':'\\hslash',
+  'forall':'\\forall','exists':'\\exists','nexists':'\\nexists',
+  'grad':'\\nabla','div':'\\nabla \\cdot','curl':'\\nabla \\times',
+  // ── 间距 / 省略号 / 框 ──
+  'quad':'\\quad','qquad':'\\qquad','space':'\\ ','thinspace':'\\,','negthinspace':'\\!',
+  'cdots':'\\cdots','ldots':'\\ldots','vdots':'\\vdots','ddots':'\\ddots',
+  'boxed':'\\boxed{x}','mathring':'\\mathring{x}',
+  // ── 二元运算符 ──
+  'pm':'\\pm','mp':'\\mp','times':'\\times','div':'\\div','ast':'\\ast','star':'\\star',
+  'circ':'\\circ','bullet':'\\bullet','otimes':'\\otimes','oplus':'\\oplus','odot':'\\odot',
+  'dagger':'\\dagger','ddagger':'\\ddagger','wr':'\\wr',
+  // ── 括号 / 定界符 ──
+  'langle':'\\langle','rangle':'\\rangle','lceil':'\\lceil','rceil':'\\rceil',
+  'lfloor':'\\lfloor','rfloor':'\\rfloor','lvert':'\\lvert','rvert':'\\rvert',
+  'left':'\\left( \\right)','big':'\\big(','Big':'\\Big(','Bigg':'\\Bigg(',
+  // ── 其他常用 ──
+  'text':'\\text{}','displaystyle':'\\displaystyle','scriptstyle':'\\scriptstyle',
+  'underbrace':'\\underbrace{x}_{\\text{label}}','overbrace':'\\overbrace{x}^{\\text{label}}',
+  'frac-d':'\\dfrac{a}{b}','frac-t':'\\tfrac{a}{b}',
+  're':'\\operatorname{Re}','im':'\\operatorname{Im}','arg':'\\operatorname{arg}',
+  'deg':'\\operatorname{deg}','gcd':'\\gcd','hom':'\\operatorname{hom}',
 };
 
 const SNIPPETS = {
@@ -12141,24 +13672,37 @@ const SNIPPETS = {
 
 const DEFAULT_DICTS = [
   { name:'数学名词（中文）', enabled:true, entries:[
-    {keyword:'极限',value:'极限',desc:'lim'},{keyword:'导数',value:'导数',desc:"f'(x)"},
-    {keyword:'偏导',value:'偏导数',desc:'∂f/∂x'},{keyword:'积分',value:'积分',desc:'∫'},
-    {keyword:'矩阵',value:'矩阵',desc:'A ∈ ℝᵐˣⁿ'},{keyword:'行列式',value:'行列式',desc:'det(A)'},
-    {keyword:'特征值',value:'特征值',desc:'λ'},{keyword:'概率',value:'概率',desc:'P(A)'},
-    {keyword:'期望',value:'期望',desc:'E[X]'},{keyword:'方差',value:'方差',desc:'Var(X)'},
-    {keyword:'正态分布',value:'正态分布',desc:'N(μ,σ²)'},{keyword:'傅里叶变换',value:'傅里叶变换',desc:'F(ω)'},
-    {keyword:'微分方程',value:'微分方程'},{keyword:'泰勒展开',value:'泰勒展开'},
+    {keyword:'极限',value:'极限',desc:'\\lim'},
+    {keyword:'导数',value:'导数',desc:"f'(x)"},
+    {keyword:'偏导',value:'偏导数',desc:'\\frac{\\partial f}{\\partial x}'},
+    {keyword:'积分',value:'积分',desc:'\\int'},
+    {keyword:'矩阵',value:'矩阵',desc:'A \\in \\mathbb{R}^{m \\times n}'},
+    {keyword:'行列式',value:'行列式',desc:'\\det(A)'},
+    {keyword:'特征值',value:'特征值',desc:'\\lambda'},
+    {keyword:'概率',value:'概率',desc:'P(A)'},
+    {keyword:'期望',value:'期望',desc:'E[X]'},
+    {keyword:'方差',value:'方差',desc:'\\operatorname{Var}(X)'},
+    {keyword:'正态分布',value:'正态分布',desc:'\\mathcal{N}(\\mu, \\sigma^2)'},
+    {keyword:'傅里叶变换',value:'傅里叶变换',desc:'F(\\omega)'},
+    {keyword:'微分方程',value:'微分方程'},
+    {keyword:'泰勒展开',value:'泰勒展开',desc:'\\sum_{n=0}^{\\infty} \\frac{f^{(n)}(a)}{n!}(x-a)^n'},
   ]},
   { name:'物理名词（中文）', enabled:true, entries:[
-    {keyword:'动量',value:'动量',desc:'p = mv'},{keyword:'角动量',value:'角动量',desc:'L = r × p'},
-    {keyword:'动能',value:'动能',desc:'Eₖ = ½mv²'},{keyword:'势能',value:'势能',desc:'Eₚ'},
-    {keyword:'引力',value:'万有引力',desc:'F = GMm/r²'},{keyword:'电场',value:'电场',desc:'E'},
-    {keyword:'磁场',value:'磁场',desc:'B'},{keyword:'麦克斯韦方程',value:'麦克斯韦方程组'},
-    {keyword:'熵',value:'熵',desc:'S'},{keyword:'波函数',value:'波函数',desc:'ψ'},
-    {keyword:'薛定谔方程',value:'薛定谔方程',desc:'iℏ∂ψ/∂t = Ĥψ'},
-    {keyword:'不确定性原理',value:'不确定性原理',desc:'ΔxΔp ≥ ℏ/2'},
-    {keyword:'质能方程',value:'质能方程',desc:'E = mc²'},
-    {keyword:'哈密顿量',value:'哈密顿量',desc:'Ĥ'},{keyword:'拉格朗日量',value:'拉格朗日量',desc:'L'},
+    {keyword:'动量',value:'动量',desc:'p = mv'},
+    {keyword:'角动量',value:'角动量',desc:'\\vec{L} = \\vec{r} \\times \\vec{p}'},
+    {keyword:'动能',value:'动能',desc:'E_k = \\frac{1}{2}mv^2'},
+    {keyword:'势能',value:'势能',desc:'E_p'},
+    {keyword:'引力',value:'万有引力',desc:'F = \\frac{GMm}{r^2}'},
+    {keyword:'电场',value:'电场',desc:'\\vec{E}'},
+    {keyword:'磁场',value:'磁场',desc:'\\vec{B}'},
+    {keyword:'麦克斯韦方程',value:'麦克斯韦方程组',desc:'\\nabla \\cdot \\vec{E} = \\frac{\\rho}{\\varepsilon_0}'},
+    {keyword:'熵',value:'熵',desc:'S'},
+    {keyword:'波函数',value:'波函数',desc:'\\psi'},
+    {keyword:'薛定谔方程',value:'薛定谔方程',desc:'i\\hbar \\frac{\\partial \\psi}{\\partial t} = \\hat{H}\\psi'},
+    {keyword:'不确定性原理',value:'不确定性原理',desc:'\\Delta x \\Delta p \\geq \\frac{\\hbar}{2}'},
+    {keyword:'质能方程',value:'质能方程',desc:'E = mc^2'},
+    {keyword:'哈密顿量',value:'哈密顿量',desc:'\\hat{H}'},
+    {keyword:'拉格朗日量',value:'拉格朗日量',desc:'\\mathcal{L}'},
   ]},
   { name:'生物名词（中文）', enabled:false, entries:[
     {keyword:'细胞',value:'细胞'},{keyword:'蛋白质',value:'蛋白质'},{keyword:'基因',value:'基因'},
@@ -12171,18 +13715,28 @@ const DEFAULT_DICTS = [
     {keyword:'催化剂',value:'催化剂'},{keyword:'同位素',value:'同位素'},
   ]},
   { name:'数学名词（English）', enabled:true, entries:[
-    {keyword:'limit',value:'limit',desc:'lim'},{keyword:'derivative',value:'derivative',desc:"f'(x)"},
-    {keyword:'integral',value:'integral',desc:'∫'},{keyword:'matrix',value:'matrix',desc:'A ∈ ℝᵐˣⁿ'},
-    {keyword:'eigenvalue',value:'eigenvalue',desc:'λ'},{keyword:'probability',value:'probability',desc:'P(A)'},
-    {keyword:'variance',value:'variance',desc:'Var(X)'},{keyword:'Fourier transform',value:'Fourier transform',desc:'F(ω)'},
-    {keyword:'differential equation',value:'differential equation'},{keyword:'PDE',value:'partial differential equation'},
+    {keyword:'limit',value:'limit',desc:'\\lim'},
+    {keyword:'derivative',value:'derivative',desc:"f'(x)"},
+    {keyword:'integral',value:'integral',desc:'\\int'},
+    {keyword:'matrix',value:'matrix',desc:'A \\in \\mathbb{R}^{m \\times n}'},
+    {keyword:'eigenvalue',value:'eigenvalue',desc:'\\lambda'},
+    {keyword:'probability',value:'probability',desc:'P(A)'},
+    {keyword:'variance',value:'variance',desc:'\\operatorname{Var}(X)'},
+    {keyword:'Fourier transform',value:'Fourier transform',desc:'F(\\omega)'},
+    {keyword:'differential equation',value:'differential equation'},
+    {keyword:'PDE',value:'partial differential equation'},
   ]},
   { name:'物理名词（English）', enabled:true, entries:[
-    {keyword:'momentum',value:'momentum',desc:'p = mv'},{keyword:'energy',value:'energy',desc:'E'},
-    {keyword:'force',value:'force',desc:'F = ma'},{keyword:'electric field',value:'electric field',desc:'E'},
-    {keyword:'magnetic field',value:'magnetic field',desc:'B'},{keyword:'entropy',value:'entropy',desc:'S'},
-    {keyword:'wave function',value:'wave function',desc:'ψ'},{keyword:'Schrödinger equation',value:'Schrödinger equation',desc:'iℏ∂ψ/∂t = Ĥψ'},
-    {keyword:'Hamiltonian',value:'Hamiltonian',desc:'Ĥ'},{keyword:'Lagrangian',value:'Lagrangian',desc:'L'},
+    {keyword:'momentum',value:'momentum',desc:'p = mv'},
+    {keyword:'energy',value:'energy',desc:'E'},
+    {keyword:'force',value:'force',desc:'F = ma'},
+    {keyword:'electric field',value:'electric field',desc:'\\vec{E}'},
+    {keyword:'magnetic field',value:'magnetic field',desc:'\\vec{B}'},
+    {keyword:'entropy',value:'entropy',desc:'S'},
+    {keyword:'wave function',value:'wave function',desc:'\\psi'},
+    {keyword:'Schrödinger equation',value:'Schrödinger equation',desc:'i\\hbar \\frac{\\partial \\psi}{\\partial t} = \\hat{H}\\psi'},
+    {keyword:'Hamiltonian',value:'Hamiltonian',desc:'\\hat{H}'},
+    {keyword:'Lagrangian',value:'Lagrangian',desc:'\\mathcal{L}'},
   ]},
   { name:'生物名词（English）', enabled:false, entries:[
     {keyword:'cell',value:'cell'},{keyword:'protein',value:'protein'},{keyword:'gene',value:'gene'},
@@ -12203,9 +13757,27 @@ function saveAcConfig(c) { localStorage.setItem('ts2_autocomplete_config', JSON.
 function buildHintExtends(cfg) {
   const ext = [];
   if (cfg.latex) {
+    // 触发键 \ ：用户输入 \alp → 候选 \alpha，选中后替换为 \alpha
     ext.push({ key:'\\', hint: async function(key) {
       if (!key) { const c=['frac','sqrt','sum','int','lim','begin','alpha','beta']; return c.map(n=>({html:'<span style="color:#c678dd">\\'+n+'</span> <span style="color:#888;font-size:11px">'+(LATEX_COMMANDS[n]||'')+'</span>',value:LATEX_COMMANDS[n]||('\\'+n)})); }
       const lk=key.toLowerCase(); return Object.entries(LATEX_COMMANDS).filter(([n])=>n.toLowerCase().startsWith(lk)).slice(0,8).map(([n,v])=>({html:'<span style="color:#c678dd">\\'+n+'</span> <span style="color:#888;font-size:11px">'+(v.length>30?v.substring(0,30)+'…':v)+'</span>',value:v}));
+    }});
+
+    // 触发键 $ ：用户在 $ 后输入字母自动唤起 LaTeX 命令
+    // 例：输入 $alp → 候选 \alpha，选中后 $alp 被替换为 $\alpha（保留 $ 定界符）
+    // 这样用户无需先输入 \，在数学上下文里直接打字母就能补全
+    ext.push({ key:'$', hint: async function(key) {
+      if (!key) return [];  // 仅输入 $ 不弹列表，避免干扰普通 $ 输入
+      const lk = key.toLowerCase();
+      const matches = Object.entries(LATEX_COMMANDS)
+        .filter(([n]) => n.toLowerCase().startsWith(lk))
+        .slice(0, 8)
+        .map(([n,v]) => ({
+          html: '<span style="color:#c678dd">\\'+n+'</span> <span style="color:#888;font-size:11px">'+(v.length>30?v.substring(0,30)+'…':v)+'</span>',
+          // value 带 $ 前缀：Vditor 会用 value 替换 "$"+key，需保留 $
+          value: '$' + v
+        }));
+      return matches;
     }});
   }
   if (cfg.snippets) {
@@ -12394,7 +13966,97 @@ function initAutoSync() {
   }
 }
 
+// ─── 编辑自动保存（autosave） ──────────────────────────────────────────
+
+function _autoSaveMainDirty() {
+  var p = state.activeTab;
+  if (!p) return false;
+  // texpile / monaco / 浏览器等"非 vditor/plain"标签页不参与外部 autosave：
+  // 它们各自有独立的保存机制（texpile 走 iframe 内 fsWrite，monaco 走 _monacoEditor.getValue），
+  // 走外部 getEditorContent() 会把 vditor 的残留内容误写到这些文件路径上
+  var tab = state.openTabs.find(function(t) { return t.path === p; });
+  if (tab && (tab._isTexpile || tab._isMonaco || tab._isBrowser || tab._isOffice)) return false;
+  return (state.fileContents[p] || '') !== (state.originalContents[p] || '');
+}
+function _autoSavePaneDirty(pid) {
+  var active = state['paneActiveTab_' + pid];
+  if (!active) return false;
+  var fc = state['paneFileContents_' + pid] || {};
+  var oc = state['paneOriginalContents_' + pid] || {};
+  return (fc[active] || '') !== (oc[active] || '');
+}
+
+function autoSavePerformSave(scope, id) {
+  try {
+    if (scope === 'main') {
+      saveCurrentFile(true);
+    } else if (scope === 'pane') {
+      var ptab = (state['paneTabs_' + id] || []).find(function (t) { return t.path === state['paneActiveTab_' + id]; });
+      if (ptab && ptab._isPdf) return;   // PDF panes are not editable
+      savePaneFile(id, true);
+    } else if (scope === 'slides') {
+      slidesSaveCurrent();
+      if (slidesState.nbSource === 'server') slidesSaveToServerSilent();
+    } else if (scope === 'kmind') {
+      if (kmindState && kmindState.path) kmindSave(true);
+    }
+  } catch (e) {
+    console.warn('[autosave] save failed', scope, id, e);
+  }
+}
+
+function autoSaveFlushAll() {
+  if (!window.autoSaveScheduler) return;
+  if (_autoSaveMainDirty()) autoSavePerformSave('main');
+  Object.keys(state).forEach(function (k) {
+    var m = /^paneTabs_(.+)$/.exec(k);
+    if (m) { var pid = m[1]; if (_autoSavePaneDirty(pid)) autoSavePerformSave('pane', pid); }
+  });
+  if (kmindState && kmindState.path) autoSavePerformSave('kmind');
+  if (slidesState && slidesState.nbSource === 'server') autoSavePerformSave('slides');
+}
+
+function initAutoSave() {
+  if (typeof createAutoSaveScheduler !== 'function') return;
+  window.autoSaveScheduler = createAutoSaveScheduler({
+    debounceMs: 1500,
+    intervalMs: (typeof AUTO_SAVE_INTERVAL !== 'undefined' ? AUTO_SAVE_INTERVAL : 30000) || 30000,
+    performSave: autoSavePerformSave,
+    flushAll: autoSaveFlushAll,
+  });
+  var enabled = localStorage.getItem('ts2_autosave_enabled');
+  var toggle = document.getElementById('autoSaveToggle');
+  if (enabled !== '0') {
+    window.autoSaveScheduler.start();
+    if (toggle) toggle.checked = true;
+  } else if (toggle) {
+    toggle.checked = false;
+  }
+  // 生命周期兜底：页面隐藏/关闭时立即落盘最近的编辑
+  window.addEventListener('pagehide', function () {
+    try { autoSaveFlushAll(); } catch (e) { console.warn('[autosave] pagehide flush failed', e); }
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') {
+      try { autoSaveFlushAll(); } catch (e) { console.warn('[autosave] visibility flush failed', e); }
+    }
+  });
+}
+
+function toggleAutoSave(enabled) {
+  if (!window.autoSaveScheduler) return;
+  if (enabled) {
+    window.autoSaveScheduler.start();
+    localStorage.setItem('ts2_autosave_enabled', '1');
+  } else {
+    window.autoSaveScheduler.stop();
+    localStorage.setItem('ts2_autosave_enabled', '0');
+    showToast('已关闭编辑自动保存');
+  }
+}
+
 initAutoSync();
+initAutoSave();
 
 // ─── IndexedDB 本地文件系统 ──────────────────────────────────────────
 
@@ -12791,6 +14453,7 @@ function slidesSaveCurrent() {
     try {
       var val = slidesState.vditor.getValue();
       if (val !== undefined) {
+        if (window.editorSourceToRmd) { try { val = window.editorSourceToRmd(val); } catch (e) {} }
         slidesState.slides[slidesState.currentIndex].markdown = val;
         slidesState.slides[slidesState.currentIndex].updatedAt = Date.now();
       }
@@ -12808,6 +14471,7 @@ function slidesLoadPage(index) {
   slidesState.isSwitching = true;
   try {
     var md = slidesState.slides[index] ? slidesState.slides[index].markdown : '';
+    if (window.rmdToEditorSource) { try { md = window.rmdToEditorSource(md); } catch (e) {} }
     slidesState.vditor.setValue(md || '');
   } finally {
     setTimeout(function() { slidesState.isSwitching = false; }, 100);
@@ -12898,7 +14562,9 @@ function _slidesUpdatePaneVditor() {
     if ((state['paneTabs_' + pid] || []).find(function(t) { return t._isSlides; })) {
       var v = state['paneVditor_' + pid];
       if (v && state['paneVditorReady_' + pid]) {
-        v.setValue((slidesState.slides[slidesState.currentIndex] || {}).markdown || '');
+        var _spmd = (slidesState.slides[slidesState.currentIndex] || {}).markdown || '';
+        if (window.rmdToEditorSource) { try { _spmd = window.rmdToEditorSource(_spmd); } catch (e) {} }
+        v.setValue(_spmd);
       }
     }
   }
@@ -13667,11 +15333,23 @@ function initSlidesPanel() {
           cache: { enable: false },
           cdn: '/static/vditor',
           _lutePath: '/static/vditor/dist/js/lute/lute.min.js',
+          after: function() {
+            setupCodeBlockPreservation(slidesState.vditor);
+            bindVditorShortcuts(slidesState.vditor);
+            var _sel = document.getElementById('slidesVditor');
+            if (_sel) {
+              if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_sel, slidesState.vditor); } catch (e) {} }
+              if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_sel, slidesState.vditor); } catch (e) {} }
+            }
+          },
           input: function(val) {
             if (!slidesState.isSwitching && slidesState.slides[slidesState.currentIndex]) {
-              slidesState.slides[slidesState.currentIndex].markdown = val;
+              var _md = val;
+              if (window.editorSourceToRmd) { try { _md = window.editorSourceToRmd(val); } catch (e) {} }
+              slidesState.slides[slidesState.currentIndex].markdown = _md;
               slidesState.slides[slidesState.currentIndex].updatedAt = Date.now();
               slidesDebounceSaveSilent();  // 静默保存到 localStorage，不弹提示
+              if (window.autoSaveScheduler && slidesState.nbSource === 'server') window.autoSaveScheduler.schedule('slides');
             }
           },
           toolbar: ['headings','bold','italic','strike','|','quote','inline-code','code','|','list','ordered-list','check','|','link','table','|','undo','redo','|','edit-mode','preview','fullscreen'],
@@ -13690,7 +15368,9 @@ function initSlidesPanel() {
           var checkReady = function() {
             if (slidesState.vditor && slidesState.vditor.vditor && slidesState.slides[slidesState.currentIndex]) {
               try {
-                slidesState.vditor.setValue(slidesState.slides[slidesState.currentIndex].markdown || '');
+                var _md = slidesState.slides[slidesState.currentIndex].markdown || '';
+        if (window.rmdToEditorSource) { try { _md = window.rmdToEditorSource(_md); } catch (e) {} }
+        slidesState.vditor.setValue(_md);
               } catch(e) {
                 setTimeout(checkReady, 200);
               }
@@ -13706,7 +15386,9 @@ function initSlidesPanel() {
     // 已初始化，重新加载当前页
     setTimeout(function() {
       if (slidesState.vditor && slidesState.slides[slidesState.currentIndex]) {
-        slidesState.vditor.setValue(slidesState.slides[slidesState.currentIndex].markdown || '');
+        var _md = slidesState.slides[slidesState.currentIndex].markdown || '';
+        if (window.rmdToEditorSource) { try { _md = window.rmdToEditorSource(_md); } catch (e) {} }
+        slidesState.vditor.setValue(_md);
       }
     }, 100);
   }
@@ -14285,6 +15967,7 @@ var _monacoCurrentFile = null;
 var _monacoFiles = {};
 var _monacoApi = null;  // 持有 monaco 模块引用，供 _loadMonacoFile 使用
 var _monacoSrcFile = null;  // 源码浏览器打开的文件路径，保存时使用源码 API
+var _monacoSwitching = false;  // 切换文件时为 true，防止 onDidChangeModelContent 误标 modified
 
 function _initMonaco(wrap, content, filePath) {
   if (_monacoApi) {
@@ -14320,9 +16003,11 @@ function _initMonaco(wrap, content, filePath) {
     _updateMonacoStatus(filePath.split('/').pop());
     _updateMonacoCursor();
     _monacoEditor.onDidChangeModelContent(function() {
-      var tab = state.openTabs.find(function(t) { return t.path === state.activeTab; });
-      if (tab && tab._isMonaco) tab.modified = true;
-    });
+      if (_monacoSwitching) return;
+        var tab = state.openTabs.find(function(t) { return t.path === state.activeTab; });
+        if (tab && tab._isMonaco) tab.modified = true;
+        if (window.autoSaveScheduler) window.autoSaveScheduler.schedule('main');
+      });
     _monacoEditor.onDidChangeCursorPosition(function(e) {
       _updateMonacoCursor();
     });
@@ -14358,8 +16043,9 @@ function _initMonaco(wrap, content, filePath) {
     loaderEl.src = vsBase + '/loader.js';
     loaderEl.onload = function() {
       var _monacoRequire = window.require;
-      if (_vditorDefine) { define = _vditorDefine; }
       _monacoRequire.config({ paths: { vs: vsBase } });
+      // 接管全局 define，使 katex/mhchem 的匿名 UMD 模块不会误用 Monaco 的 loader
+      _installDefineProxy(_vditorDefine);
       _monacoRequire(['vs/editor/editor.main'], function() {
         _monacoApi = window.monaco;
         var ext = filePath.includes('.') ? filePath.split('.').pop().toLowerCase() : '';
@@ -14393,8 +16079,10 @@ function _initMonaco(wrap, content, filePath) {
         _updateMonacoStatus(filePath.split('/').pop());
         _updateMonacoCursor();
         _monacoEditor.onDidChangeModelContent(function() {
+          if (_monacoSwitching) return;
           var tab = state.openTabs.find(function(t) { return t.path === state.activeTab; });
           if (tab && tab._isMonaco) tab.modified = true;
+          if (window.autoSaveScheduler) window.autoSaveScheduler.schedule('main');
         });
         _monacoEditor.onDidChangeCursorPosition(function(e) {
           _updateMonacoCursor();
@@ -14432,6 +16120,34 @@ function _isCodeFile(path) {
   return !!_codeLangMap[ext];
 }
 
+// 让 Monaco 的 AMD loader 与 vditor/katex 的 RequireJS 共存：
+// 用代理接管全局 define —— 命名模块（Monaco 内部）交给 Monaco 的 loader，
+// 匿名 UMD 模块（katex/mhchem 等）交还给 vditor 的 define。
+// 这样无论 katex 在 Monaco 加载前/中/后注入都能正常工作（顺序无关）。
+function _installDefineProxy(vditorDefine) {
+  if (window.__monacoDefineProxyInstalled) return;
+  window.__monacoDefineProxyInstalled = true;
+  var _monacoDefine = window.define;
+  window.define = function() {
+    var a = arguments;
+    if (typeof a[0] === 'string') return _monacoDefine.apply(this, a);
+    if (vditorDefine) return vditorDefine.apply(this, a);
+    var deps = Array.isArray(a[0]) ? a[0] : [];
+    var factory = Array.isArray(a[0]) ? a[1] : a[0];
+    var resolved = deps.map(function(d) {
+      if (d === 'require') return function() {};
+      if (d === 'exports') return {};
+      if (d === 'module') return { exports: {} };
+      if (d === 'katex') return window.katex;
+      return window[d];
+    });
+    var res = typeof factory === 'function' ? factory.apply(this, resolved) : factory;
+    if (res && res.render && !window.katex) window.katex = res;
+    return res;
+  };
+  window.define.amd = _monacoDefine.amd;
+}
+
 function _loadMonacoApi() {
   if (_monacoLoading) return;
   _monacoLoading = true;
@@ -14456,8 +16172,8 @@ function _loadMonacoApi() {
   loaderEl.src = vsBase + '/loader.js';
   loaderEl.onload = function() {
     var _monacoRequire = window.require;
-    if (_vditorDefine) { define = _vditorDefine; }
     _monacoRequire.config({ paths: { vs: vsBase } });
+    _installDefineProxy(_vditorDefine);
     _monacoRequire(['vs/editor/editor.main'], function() {
       _monacoApi = window.monaco;
       _monacoLoading = false;
@@ -14495,8 +16211,8 @@ function _loadMonacoApiCdn() {
   loaderEl.src = vsBase + '/loader.js';
   loaderEl.onload = function() {
     var _monacoRequire = window.require;
-    if (_vditorDefine) { define = _vditorDefine; }
     _monacoRequire.config({ paths: { vs: vsBase } });
+    _installDefineProxy(_vditorDefine);
     _monacoRequire(['vs/editor/editor.main'], function() {
       _monacoApi = window.monaco;
       _monacoLoading = false;
@@ -14549,6 +16265,7 @@ function _ensurePaneMonaco(paneId, content, filePath) {
         var tabs = state['paneTabs_' + paneId] || [];
         var tab = tabs.find(function(t) { return t.path === activePath; });
         if (tab) tab.modified = true;
+        if (window.autoSaveScheduler) window.autoSaveScheduler.schedule('pane', paneId);
       }
     });
   } else {
@@ -14557,7 +16274,7 @@ function _ensurePaneMonaco(paneId, content, filePath) {
 }
 
 function _loadMonacoFile(filePath) {
-  if (!_monacoEditor || !filePath || !_monacoFiles[filePath]) return;
+  if (!_monacoEditor || !filePath || _monacoFiles[filePath] === undefined) return;
   var ext = filePath.includes('.') ? filePath.split('.').pop().toLowerCase() : '';
   var langMap = { py:'python', js:'javascript', ts:'typescript', jsx:'javascript', tsx:'typescript',
     r:'r', rmd:'markdown', cpp:'cpp', c:'c', h:'c', java:'java', go:'go', rs:'rust',
@@ -14567,16 +16284,16 @@ function _loadMonacoFile(filePath) {
     xml:'xml', md:'markdown', html:'html', htm:'html', tex:'latex' };
   var lang = langMap[ext] || 'plaintext';
   var uri = _monacoApi.Uri.file(filePath);
-  var oldModel = _monacoEditor.getModel();
   // 检查同名 model 是否已存在，避免 "Cannot add model because it already exists"
   var model = _monacoApi.editor.getModel(uri);
   if (model) {
+    _monacoSwitching = true;
     model.setValue(_monacoFiles[filePath]);
+    _monacoSwitching = false;
   } else {
     model = _monacoApi.editor.createModel(_monacoFiles[filePath], lang, uri);
   }
   _monacoEditor.setModel(model);
-  if (oldModel && oldModel !== model) oldModel.dispose();
   _monacoCurrentFile = filePath;
   _updateMonacoStatus(filePath.split('/').pop());
   // 切换文件时清空执行输出
@@ -14845,6 +16562,17 @@ function initTerminal() {
   // WebSocket 连接
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var wsUrl = proto + '//' + location.host + '/api/terminal';
+  // 非 localhost 访问时 WS 需要 token/auth_code 鉴权（同 _texTermWsUrl），
+  // 否则后端 4001 拒绝 → 界面正常但输入无响应
+  try {
+    var cfg = window.client && window.client.config ? window.client.config : null;
+    var qs = [];
+    if (cfg) {
+      if (cfg.api_token) qs.push('token=' + encodeURIComponent(cfg.api_token));
+      if (cfg.auth_code) qs.push('auth_code=' + encodeURIComponent(cfg.auth_code));
+    }
+    if (qs.length) wsUrl += '?' + qs.join('&');
+  } catch (e) {}
   _termWs = new WebSocket(wsUrl);
   _termWs.binaryType = 'arraybuffer';
 
@@ -15419,5 +17147,2149 @@ function browserRefresh() {
     _browserLoadUrl(url);
   }
 }
+
+// ─── 执行模式辅助工具模态框 ──────────────────────────────────
+var _execToolsState = {
+  currentTab: 'preview',
+  courseId: null,
+  lessonNum: null,
+  notePath: null,
+  analysisData: null,
+  reviewData: null,
+  cardQueue: [],
+  cardIndex: 0,
+  fillBlankData: null,
+  fillBlankQueue: [],
+  fillBlankIndex: 0
+};
+
+async function openExecToolsModal(optCourseId, optLessonNum) {
+  // 支持三种调用方式：
+  //   1) 无参数：执行栏大按钮 → 课程级模式（lessonNum=null）
+  //   2) 显式传入 courseId 和 lessonNum：从课时小按钮调用
+  //   3) 只传 courseId 不传 lessonNum：从课程卡片按钮调用，同样为课程级模式
+  var courseId = optCourseId || state.execCourseId;
+  _execToolsState.courseId = courseId;
+  var course = (state.courses || []).find(function(c) {
+    return (c.note_id || c.id || c._id || c.filename) === courseId;
+  });
+  var lessonNum = null;
+  if (optLessonNum != null) {
+    // 课时小按钮：显式传入的 lessonNum 即为 lesson_number
+    lessonNum = optLessonNum;
+  } else {
+    // 无参数 或 只传 courseId：都走课程级模式（lessonNum=null）
+    lessonNum = null;
+  }
+  _execToolsState.lessonNum = lessonNum;
+  if (course && lessonNum != null) {
+    var idealPath = getNotePath(course, lessonNum);
+    // 检查理想路径是否存在，不存在则按 Lxx 数字容错匹配
+    var r = await client.getFile(idealPath);
+    if (r.code === 0 && r.data && r.data.content) {
+      _execToolsState.notePath = idealPath;
+    } else {
+      var matched = await _findNoteByLNum(course, lessonNum);
+      _execToolsState.notePath = matched || idealPath;
+    }
+  } else {
+    // 课程级模式：清空 notePath，避免误用上次缓存的路径
+    _execToolsState.notePath = null;
+  }
+  var html = _buildExecToolsHtml();
+  showHtmlModal('📋 辅助工具', html);
+  // 销毁可能残留的 Vditor WYSIWYG 实例（来自上一次打开）
+  _destroyAllPairVditors();
+  if (lessonNum == null) {
+    // 课程级入口：加载课程总览
+    setTimeout(function() { loadCourseOverview(); }, 100);
+  } else {
+    setTimeout(function() { loadNotePreview(); }, 100);
+  }
+}
+
+function _buildExecToolsHtml() {
+  // 课程卡片入口（无 lessonNum）显示"课程总览"tab，否则显示"笔记预览"
+  var isCourseLevel = _execToolsState.lessonNum == null;
+  var firstTab = isCourseLevel ? 'overview' : 'preview';
+  var firstLabel = isCourseLevel ? '📊 课程总览' : '📝 笔记预览';
+  return [
+    '<div class="exec-tools-tabs">',
+    '  <div class="exec-tools-tab active" onclick="switchExecToolTab(\'' + firstTab + '\', event)">' + firstLabel + '</div>',
+    '  <div class="exec-tools-tab" onclick="switchExecToolTab(\'analysis\', event)">🔍 笔记分析</div>',
+    '  <div class="exec-tools-tab" onclick="switchExecToolTab(\'review\', event)">🔄 间隔复习</div>',
+    '  <div class="exec-tools-tab" onclick="switchExecToolTab(\'theorem\', event)">📐 定理证明</div>',
+    '  <div class="exec-tools-tab" onclick="switchExecToolTab(\'problem\', event)">❓ 问题解答</div>',
+    '  <div class="exec-tools-tab" onclick="switchExecToolTab(\'graph\', event)">🌐 知识图谱</div>',
+    '</div>',
+    '<div class="exec-tools-content">',
+    '  <div id="execTab-' + firstTab + '" class="active">' + (isCourseLevel
+      ? '<div id="courseOverviewArea">加载中...</div>'
+      : '<div id="notePreviewArea">加载中...</div>') + '</div>',
+    '  <div id="execTab-analysis">',
+    '    <button class="btn primary" onclick="analyzeNote()">🔍 分析笔记</button>',
+    '    <div id="analysisResult" class="exec-tools-section"></div>',
+    '  </div>',
+    '  <div id="execTab-review">',
+    '    <div class="exec-tools-btnrow">',
+    '      <button class="btn" onclick="loadSpacedReview(true)">📥 加载笔记</button>',
+    '      <button class="btn" onclick="resetSpacedReview()">🔄 重置</button>',
+    '      <button class="btn primary" onclick="startCardReview()">🎯 卡片复习</button>',
+    '      <button class="btn" onclick="_startFillBlankQueue()">✍️ 填空测验</button>',
+    '    </div>',
+    '    <div id="reviewStats"></div>',
+    '    <div id="reviewListView"></div>',
+    '    <div id="reviewCardView" style="display:none;"></div>',
+    '    <div id="reviewFillView" style="display:none;"></div>',
+    '  </div>',
+    '  <div id="execTab-theorem">',
+    '    <div class="exec-tools-btnrow">',
+    '      <button class="btn primary" onclick="loadTheoremProofs()">🔄 加载定理</button>',
+    '    </div>',
+    '    <div id="theoremProofView" class="pair-panel-view"></div>',
+    '  </div>',
+    '  <div id="execTab-problem">',
+    '    <div class="exec-tools-btnrow">',
+    '      <button class="btn primary" onclick="loadProblemSolutions()">🔄 加载问题</button>',
+    '    </div>',
+    '    <div id="problemSolutionView" class="pair-panel-view"></div>',
+    '  </div>',
+    '  <div id="execTab-graph">',
+    '    <button class="btn primary" onclick="loadKnowledgeGraph()">🌐 加载图谱</button>',
+    '    <div id="execGraphContainer" class="exec-tools-section"></div>',
+    '  </div>',
+    '</div>'
+  ].join('');
+}
+
+function switchExecToolTab(tabName, ev) {
+  _execToolsState.currentTab = tabName;
+  document.querySelectorAll('.exec-tools-tab').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.exec-tools-content > div').forEach(function(d) { d.classList.remove('active'); });
+  if (ev) ev.target.classList.add('active');
+  var panel = document.getElementById('execTab-' + tabName);
+  if (panel) panel.classList.add('active');
+
+  // 自动加载定理/问题/复习数据（仅在未加载过时触发）
+  if (tabName === 'theorem') {
+    var v = document.getElementById('theoremProofView');
+    if (v && !v.querySelector('.pair-panel') && !v.querySelector('.pair-empty')) setTimeout(loadTheoremProofs, 50);
+  } else if (tabName === 'problem') {
+    var v = document.getElementById('problemSolutionView');
+    if (v && !v.querySelector('.pair-panel') && !v.querySelector('.pair-empty')) setTimeout(loadProblemSolutions, 50);
+  } else if (tabName === 'review') {
+    // 课程级且数据为空时自动加载
+    if (_execToolsState.lessonNum == null && (!_execToolsState.reviewData || !_execToolsState.reviewData.reviews || !_execToolsState.reviewData.reviews.length)) {
+      setTimeout(loadSpacedReview, 50);
+    }
+  }
+}
+
+// ─── 笔记预览 ───
+async function loadNotePreview() {
+  if (!_execToolsState.notePath) {
+    document.getElementById('notePreviewArea').innerHTML =
+      '<p style="color:var(--fg-muted)">未找到笔记文件路径</p>';
+    return;
+  }
+  try {
+    var res = await client.getFile(_execToolsState.notePath);
+    var content = (res.data && res.data.content) || '';
+    var preview = document.getElementById('notePreviewArea');
+    // 去掉 YAML front matter（vditor 不识别）
+    content = content.replace(/^---\n[\s\S]*?\n---\n/, '');
+    // 用 markdown 渲染（含 ::: env 环境转换 + KaTeX）
+    var wrapper = document.createElement('div');
+    wrapper.className = 'note-preview-content vditor-reset';
+    preview.innerHTML = '';
+    preview.appendChild(wrapper);
+    _renderMdInto(wrapper, content);
+  } catch(e) {
+    document.getElementById('notePreviewArea').innerHTML =
+      '<p style="color:var(--fg-muted)">笔记文件不存在</p>';
+  }
+}
+
+// ─── Markdown 渲染（兼容 Rmd 的 ::: env 环境） ───
+// 支持的环境类型（与 env_mapping.lua 对齐）
+var _MD_ENV_TYPES = {
+  theorem: '定理', proposition: '命题', corollary: '推论', lemma: '引理', claim: '断言',
+  definition: '定义', example: '例', problem: '问题', remark: '注', note: '注记',
+  solution: '解', assumption: '假设', conjecture: '猜想', axiom: '公理', principle: '原理',
+  question: '问', exercise: '练习', proof: '证明', cbox: '盒子', block: '块', alert: '警示', 'example-block': '例题块'
+};
+
+// 从 content 中提取 ::: env ... ::: 块，返回 { mdContent, envBlocks }
+// mdContent 中环境块被替换为占位符（HTML 注释形式，不会被 markdown 处理）
+// envBlocks 为 [{ type, content, placeholder }] 数组
+function _extractEnvBlocks(content) {
+  if (!content) return { mdContent: '', envBlocks: [] };
+  var envBlocks = [];
+  var lines = content.split('\n');
+  var outLines = [];
+  var i = 0;
+  var envStartRe = /^:::\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*$/;
+  var envEndRe = /^:::\s*$/;
+
+  while (i < lines.length) {
+    var line = lines[i];
+    var startMatch = line.match(envStartRe);
+    if (startMatch) {
+      var envType = startMatch[1].toLowerCase();
+      var depth = 1;
+      var innerLines = [];
+      i++;
+      while (i < lines.length && depth > 0) {
+        var l = lines[i];
+        if (l.match(envStartRe)) {
+          depth++;
+          innerLines.push(l);
+        } else if (l.match(envEndRe)) {
+          depth--;
+          if (depth > 0) innerLines.push(l);
+        } else {
+          innerLines.push(l);
+        }
+        i++;
+      }
+      var idx = envBlocks.length;
+      var placeholder = '<!--ENVBLOCK' + idx + '-->';
+      envBlocks.push({ type: envType, content: innerLines.join('\n'), placeholder: placeholder });
+      // 用空行包围占位符，确保 markdown 解析器把它当作独立块
+      outLines.push('', placeholder, '');
+    } else {
+      outLines.push(line);
+    }
+    i++;
+  }
+  return { mdContent: outLines.join('\n'), envBlocks: envBlocks };
+}
+
+// 长文本阈值：超过此长度不渲染 markdown，直接显示纯文本（避免卡死）
+var _MD_RENDER_LIMIT = 40000;
+// 已渲染的容器记录：用于主题切换时重新渲染
+var _mdRenderedContainers = [];
+
+// 异步渲染 markdown 到目标元素（含环境块 + KaTeX）
+// 使用 Vditor.preview 异步 API，渲染完成后回填环境块
+function _renderMdInto(el, content, options) {
+  if (!el) return Promise.resolve();
+  if (!content) { el.innerHTML = ''; return Promise.resolve(); }
+
+  options = options || {};
+
+  // 长文本保护：超过阈值直接纯文本展示
+  if (content.length > _MD_RENDER_LIMIT) {
+    el.innerHTML = '<div class="md-fallback md-too-long">' +
+      '<div class="md-too-long-hint">内容过长（' + content.length + ' 字符），已切换为纯文本展示以避免卡顿</div>' +
+      '<pre class="md-too-long-pre">' + escapeHtml(content) + '</pre></div>';
+    _renderKatex(el);
+    return Promise.resolve();
+  }
+
+  // 提取环境块
+  var extracted = _extractEnvBlocks(content);
+  var mdContent = extracted.mdContent;
+  var envBlocks = extracted.envBlocks;
+
+  // vditor 未加载时退化为纯文本
+  if (typeof Vditor === 'undefined' || typeof Vditor.preview !== 'function') {
+    el.innerHTML = '<div class="md-fallback">' + escapeHtml(content) + '</div>';
+    _renderKatex(el);
+    return Promise.resolve();
+  }
+
+  // 记录渲染信息（用于主题切换时重渲染）
+  var renderInfo = { el: el, content: content, options: options };
+  // 避免重复记录同一容器
+  for (var i = 0; i < _mdRenderedContainers.length; i++) {
+    if (_mdRenderedContainers[i].el === el) {
+      _mdRenderedContainers[i] = renderInfo;
+      renderInfo = null;
+      break;
+    }
+  }
+  if (renderInfo) _mdRenderedContainers.push(renderInfo);
+
+  // 根据当前主题决定 vditor 的 mode 和 hljs 样式
+  var currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+  var isLight = currentTheme === 'light';
+  var vditorMode = isLight ? 'light' : 'dark';
+  var hljsStyle = isLight ? 'github' : 'github-dark';
+
+  // 直接在 el 上渲染（el 自身已有 vditor-reset 类），不创建内层 div
+  // 这样 dark.css 的 .vditor-reset 规则直接作用于 el，子元素正确继承颜色
+  el.innerHTML = '';
+  // 确保 el 有 vditor-reset 类（用于 content-theme CSS 生效）
+  if (el.className.indexOf('vditor-reset') === -1) {
+    el.className = (el.className + ' vditor-reset').trim();
+  }
+
+  // 调用 Vditor.preview 异步渲染（内部会处理代码高亮、数学公式、流程图等）
+  return Vditor.preview(el, mdContent, {
+    cdn: '/static/vditor',
+    mode: vditorMode,
+    hljs: { style: hljsStyle },
+    markdown: { autoSpace: true, gfmAutoLink: false },
+    math: { inlineDigit: false, engine: 'KaTeX' }
+  }).then(function() {
+    // 渲染完成后，把占位符替换为环境块 div
+    envBlocks.forEach(function(blk, idx) {
+      var placeholderNodes = [];
+      var walker = document.createTreeWalker(el, NodeFilter.SHOW_COMMENT, null);
+      while (walker.nextNode()) {
+        if (walker.currentNode.nodeValue === 'ENVBLOCK' + idx) {
+          placeholderNodes.push(walker.currentNode);
+        }
+      }
+      blk.placeholderNodes = placeholderNodes;
+    });
+
+    envBlocks.forEach(function(blk) {
+      var label = _MD_ENV_TYPES[blk.type] || blk.type;
+      var envDiv = document.createElement('div');
+      envDiv.className = 'md-env md-env-' + blk.type;
+      var labelDiv = document.createElement('div');
+      labelDiv.className = 'md-env-label';
+      labelDiv.textContent = label;
+      var bodyDiv = document.createElement('div');
+      bodyDiv.className = 'md-env-body';
+      envDiv.appendChild(labelDiv);
+      envDiv.appendChild(bodyDiv);
+      _renderMdInto(bodyDiv, blk.content);
+
+      if (blk.placeholderNodes && blk.placeholderNodes.length > 0) {
+        var firstNode = blk.placeholderNodes[0];
+        var parent = firstNode.parentNode;
+        if (parent.tagName === 'P' && parent.childNodes.length <= 1) {
+          parent.parentNode.replaceChild(envDiv, parent);
+        } else {
+          parent.replaceChild(envDiv, firstNode);
+        }
+        for (var i = 1; i < blk.placeholderNodes.length; i++) {
+          var p = blk.placeholderNodes[i].parentNode;
+          if (p) p.removeChild(blk.placeholderNodes[i]);
+        }
+      }
+    });
+  }).catch(function(e) {
+    console.warn('Vditor.preview failed:', e);
+    el.innerHTML = '<div class="md-fallback">' + escapeHtml(content) + '</div>';
+    _renderKatex(el);
+  });
+}
+
+// 主题切换时重新渲染所有已渲染的 markdown 容器
+function _rerenderMdOnThemeChange() {
+  var containers = _mdRenderedContainers.slice();
+  _mdRenderedContainers = [];
+  containers.forEach(function(info) {
+    if (info.el && document.body.contains(info.el)) {
+      _renderMdInto(info.el, info.content, info.options);
+    }
+  });
+}
+
+// KaTeX 自动渲染（支持 $...$ / $$...$$ / \(...\) / \[...\]）
+function _renderKatex(el) {
+  if (!el || typeof renderMathInElement !== 'function') return;
+  try {
+    renderMathInElement(el, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '\\[', right: '\\]', display: true},
+        {left: '\\(', right: '\\)', display: false},
+        {left: '$', right: '$', display: false}
+      ],
+      throwOnError: false,
+      output: 'html',  // 只输出 HTML，不输出 MathML（避免 mathvariant='script' 弃用警告）
+      ignoredTags: ['script', 'noscript', 'style', 'textarea', 'code'],
+      ignoredClasses: ['element-type-badge', 'stats-mini-label', 'stats-mini-value']
+    });
+  } catch(e) { /* KaTeX 渲染失败时静默降级为原文 */ }
+}
+
+// ─── 笔记分析 ───
+async function analyzeNote() {
+  document.getElementById('analysisResult').innerHTML = '<p>分析中...</p>';
+  try {
+    var isCourseLevel = _execToolsState.lessonNum == null;
+    var res;
+    if (isCourseLevel) {
+      res = await client.api_get('/api/data/courses/' + encodeURIComponent(_execToolsState.courseId) + '/analysis-data');
+    } else {
+      res = await client.api('/api/data/notes/analyze', {
+        path: _execToolsState.notePath,
+        course_id: _execToolsState.courseId || '',
+        lesson_num: _execToolsState.lessonNum || 0
+      });
+    }
+    if (res.code !== 0) {
+      document.getElementById('analysisResult').innerHTML =
+        '<p style="color:var(--red)">' + (res.msg || '分析失败') + '</p>';
+      return;
+    }
+    _execToolsState.analysisData = res.data;
+    _renderAnalysisResult(res.data, isCourseLevel);
+  } catch(e) {
+    document.getElementById('analysisResult').innerHTML =
+      '<p style="color:var(--red)">错误: ' + e.message + '</p>';
+  }
+}
+
+// 分析结果分页参数
+var _ANALYSIS_PAGE_SIZE = 50;
+
+function _analysisRenderPage(data, isCourseLevel) {
+  var state = _execToolsState._analysisPageState;
+  if (!state) return;
+  var allEls = data.elements || [];
+  var searchQ = (_execToolsState._analysisSearchQuery || '').toLowerCase();
+
+  // 搜索过滤
+  var filtered = allEls;
+  if (searchQ) {
+    filtered = allEls.filter(function(e) {
+      var title = (e.title || '').toLowerCase();
+      var content = (e.content || '').toLowerCase();
+      return title.indexOf(searchQ) !== -1 || content.indexOf(searchQ) !== -1;
+    });
+  }
+
+  var total = filtered.length;
+  var end = Math.min(state.cursor + _ANALYSIS_PAGE_SIZE, total);
+  var pageEls = filtered.slice(0, end);
+  var hasMore = end < total;
+
+  // 生成当前页的元素 HTML
+  var listHtml = pageEls.map(function(e, idx) {
+    var cats = (e.categories || []).map(function(c) {
+      return '<span class="element-category-tag">' + c + '</span>';
+    }).join('');
+    var etype = e.type || e.elem_type || '';
+    return '<div class="element-list-item" ondblclick="startFillBlank(\'' + e.id + '\')">' +
+           '<span class="element-type-badge ' + etype + '">' + etype + '</span>' +
+           '<div class="analysis-elem-title vditor-reset" id="analysis-elem-title-' + idx + '"></div>' + cats +
+           '<div class="element-list-content vditor-reset" id="analysis-elem-' + idx + '"></div></div>';
+  }).join('');
+
+  if (listHtml === '' && searchQ) {
+    listHtml = '<div style="text-align:center;padding:30px;color:var(--fg-muted);">没有匹配的元素</div>';
+  }
+
+  // 加载更多按钮 / 已全部显示
+  var loadMoreHtml = '';
+  if (hasMore) {
+    loadMoreHtml = '<div style="text-align:center;padding:12px 0">' +
+      '<button class="btn" onclick="_analysisLoadMore()">📦 加载更多 (' + (total - end) + ' 个剩余)</button></div>';
+  } else if (total > _ANALYSIS_PAGE_SIZE) {
+    loadMoreHtml = '<div style="text-align:center;padding:8px 0;color:var(--fg-muted);font-size:11px;">✅ 已全部显示 (' + total + ' 个)</div>';
+  }
+
+  var listContainer = document.getElementById('analysisListContainer');
+  if (listContainer) {
+    listContainer.innerHTML = listHtml + loadMoreHtml;
+  }
+
+  // 只渲染当前可见元素的 markdown（跳过已渲染的）
+  pageEls.forEach(function(e, idx) {
+    if (idx >= state.cursor) {
+      var titleEl = document.getElementById('analysis-elem-title-' + idx);
+      if (titleEl) _renderMdInto(titleEl, e.title || '');
+      var el = document.getElementById('analysis-elem-' + idx);
+      if (el) _renderMdInto(el, (e.content || '').substring(0, 400));
+    }
+  });
+
+  state.cursor = end;
+}
+
+function _analysisLoadMore() {
+  var data = _execToolsState._analysisData;
+  if (data) _analysisRenderPage(data, _execToolsState._analysisPageIsCourseLevel);
+}
+
+// 分析搜索输入处理
+function _onAnalysisSearch() {
+  var q = (document.getElementById('analysisSearchInput').value || '').trim();
+  _execToolsState._analysisSearchQuery = q;
+  _execToolsState._analysisPageState = { cursor: 0 };
+  var data = _execToolsState._analysisData;
+  if (data) _analysisRenderPage(data, _execToolsState._analysisPageIsCourseLevel);
+}
+
+function _renderAnalysisResult(data, isCourseLevel) {
+  var stats = data.stats;
+  var typeCards = Object.keys(stats.by_type).map(function(t) {
+    return '<div class="stats-mini-card"><div class="stats-mini-value">' + stats.by_type[t] +
+           '</div><div class="stats-mini-label">' + t + '</div></div>';
+  }).join('');
+  var catCards = Object.keys(stats.by_category).map(function(c) {
+    return '<div class="stats-mini-card"><div class="stats-mini-value">' + stats.by_category[c] +
+           '</div><div class="stats-mini-label">' + c + '</div></div>';
+  }).join('');
+
+  // 课程级模式：在列表前显示课时来源信息
+  var courseHeader = '';
+  var lessonTitles = data.lesson_titles;
+  if (isCourseLevel && lessonTitles) {
+    var lessonKeys = Object.keys(lessonTitles);
+    courseHeader = '<div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px;padding:6px 8px;background:var(--bg-secondary);border-radius:6px">' +
+      '📚 课程级分析：共 ' + lessonKeys.length + ' 个课时，' + stats.total + ' 个元素</div>';
+  }
+
+  // 初始化分页状态
+  _execToolsState._analysisData = data;
+  _execToolsState._analysisPageIsCourseLevel = isCourseLevel;
+  _execToolsState._analysisPageState = { cursor: 0 };
+  _execToolsState._analysisSearchQuery = '';
+
+  // 渲染静态部分（统计卡片 + 按钮 + 搜索 + 元素列表容器）
+  document.getElementById('analysisResult').innerHTML =
+    courseHeader +
+    '<div class="stats-mini-grid">' +
+    '<div class="stats-mini-card"><div class="stats-mini-value">' + stats.total +
+    '</div><div class="stats-mini-label">总元素</div></div>' + typeCards + '</div>' +
+    '<div class="stats-mini-grid">' + catCards + '</div>' +
+    '<div style="display:flex;gap:8px;margin:8px 0;">' +
+    '<button class="btn" onclick="exportNoteAnalysis(\'json\')">📤 导出JSON</button>' +
+    '<button class="btn" onclick="exportNoteAnalysis(\'csv\')">📤 导出CSV</button>' +
+    '</div>' +
+    '<div style="margin-bottom:6px;">' +
+    '<input id="analysisSearchInput" type="text" placeholder="🔍 搜索元素标题或内容..." ' +
+    'oninput="_onAnalysisSearch()" ' +
+    'style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;' +
+    'background:var(--bg);color:var(--fg);font-size:12px;box-sizing:border-box;">' +
+    '</div>' +
+    '<div id="analysisListContainer"></div>';
+
+  // 渲染第一页
+  _analysisRenderPage(data, isCourseLevel);
+}
+
+function exportNoteAnalysis(format) {
+  if (!_execToolsState.analysisData) return;
+  var content, mime, ext;
+  if (format === 'json') {
+    content = JSON.stringify(_execToolsState.analysisData.elements, null, 2);
+    mime = 'application/json'; ext = 'json';
+  } else {
+    var rows = [['type', 'title', 'content', 'categories', 'triples']];
+    _execToolsState.analysisData.elements.forEach(function(e) {
+      rows.push([e.type || e.elem_type, e.title || '', (e.content || '').substring(0, 200),
+        (e.categories || []).join(';'),
+        (e.triples || []).map(function(t) { return t.subject + '-' + t.predicate + '-' + t.object; }).join(';')
+      ]);
+    });
+    content = rows.map(function(r) {
+      return r.map(function(c) { return '"' + String(c).replace(/"/g, '""') + '"'; }).join(',');
+    }).join('\n');
+    mime = 'text/csv'; ext = 'csv';
+  }
+  var blob = new Blob([content], { type: mime });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'note_analysis.' + ext;
+  a.click();
+  showToast('已导出 ' + ext.toUpperCase(), 'success');
+}
+
+// ─── 间隔复习 - 列表视图 ───
+async function refreshReviewList() {
+  try {
+    var res = await client.api_get('/api/data/spaced-repetition/all');
+    if (res.code !== 0) return;
+    _execToolsState.reviewData = res.data;
+    _renderReviewList(res.data);
+  } catch(e) {
+    showToast('加载复习数据失败: ' + e.message, 'error');
+  }
+}
+
+function _renderReviewList(data) {
+  var s = data.stats;
+  document.getElementById('reviewStats').innerHTML =
+    '<div class="stats-mini-grid">' +
+    '<div class="stats-mini-card"><div class="stats-mini-value">' + s.total +
+    '</div><div class="stats-mini-label">总卡片</div></div>' +
+    '<div class="stats-mini-card"><div class="stats-mini-value">' + s.due +
+    '</div><div class="stats-mini-label">待复习</div></div></div>';
+
+  if (!data.reviews || data.reviews.length === 0) {
+    document.getElementById('reviewListView').innerHTML =
+      '<p style="text-align:center;color:var(--fg-muted);padding:20px;">暂无复习卡片，请点击 [📥 加载笔记]</p>';
+    return;
+  }
+
+  // 构建课程标题和课时信息映射
+  var courseTitles = {}, lessonTitles = {};
+  (state.courses || []).forEach(function(c) {
+    var cid = c.note_id || c.id || c._id || c.filename || '';
+    courseTitles[cid] = c.course_title || c.title || c.name || cid;
+    (c.lessons || []).forEach(function(l) {
+      var lnum = l.lesson_number || l.num || 0;
+      lessonTitles[cid + '|' + lnum] = l.lesson_title || l.title || '';
+    });
+  });
+
+  // 按课时 (course_id + lesson_num) 分组
+  var groups = {};
+  data.reviews.forEach(function(r) {
+    var elem = r.elem || {};
+    var cid = elem.course_id || '';
+    var lnum = elem.lesson_num;
+    if (lnum == null) lnum = 0;
+    var gkey = cid + '|' + lnum;
+    if (!groups[gkey]) groups[gkey] = { courseId: cid, lessonNum: lnum, reviews: [], _dueCount: 0 };
+    groups[gkey].reviews.push(r);
+    if (r.is_due) groups[gkey]._dueCount++;
+  });
+
+  // 全局状态缓存
+  _execToolsState._reviewGroupData = { groups: groups, courseTitles: courseTitles, lessonTitles: lessonTitles };
+  _execToolsState._reviewSearchQuery = '';
+  _execToolsState._reviewLessonFilter = '';
+  _execToolsState._reviewRenderState = {}; // { groupId: { cursor, expanded } }
+
+  // 构建课时过滤下拉选项
+  var gkeys = Object.keys(groups).sort();
+  var filterOptions = '<option value="">📚 全部课时</option>';
+  gkeys.forEach(function(gkey) {
+    var grp = groups[gkey];
+    var cid = grp.courseId;
+    var lnum = grp.lessonNum;
+    var cname = courseTitles[cid] || cid;
+    var ltitle = lessonTitles[gkey] || '';
+    var label = cname + ' L' + String(lnum).padStart(2, '0');
+    if (ltitle) label += ' ' + ltitle;
+    filterOptions += '<option value="' + escapeHtml(gkey) + '">' + escapeHtml(label) + ' (' + grp.reviews.length + ')</option>';
+  });
+
+  var selectStyle = 'padding:6px 10px;border:1px solid var(--border);border-radius:6px;' +
+    'background:var(--bg);color:var(--fg);font-size:13px;box-sizing:border-box;max-width:200px;cursor:pointer;';
+
+  // 渲染搜索栏 + 分组容器
+  document.getElementById('reviewListView').innerHTML =
+    '<div style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;">' +
+    '<input id="reviewSearchInput" type="text" placeholder="🔍 搜索卡片标题或内容..." ' +
+    'oninput="_onReviewSearch()" ' +
+    'style="flex:1;min-width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;' +
+    'background:var(--bg);color:var(--fg);font-size:13px;box-sizing:border-box;">' +
+    '<select id="reviewLessonFilter" onchange="_onReviewLessonFilter()" style="' + selectStyle + '">' + filterOptions + '</select>' +
+    '</div>' +
+    '<div id="reviewGroupContainer"></div>' +
+    '<div style="font-size:11px;color:var(--fg-muted);margin-top:6px;">双击卡片可开始填空测验</div>';
+
+  _renderReviewGroups();
+}
+
+// 搜索过滤
+function _onReviewSearch() {
+  var q = (document.getElementById('reviewSearchInput').value || '').trim().toLowerCase();
+  _execToolsState._reviewSearchQuery = q;
+  _renderReviewGroups();
+}
+
+// 课时过滤
+function _onReviewLessonFilter() {
+  var sel = document.getElementById('reviewLessonFilter');
+  _execToolsState._reviewLessonFilter = sel ? sel.value : '';
+  _execToolsState._reviewGroupCursor = 0; // 重置组级光标
+  _renderReviewGroups();
+}
+
+// 渲染所有课时分组
+var _REVIEW_GROUP_PAGE_SIZE = 15; // 每次加载的课时组数
+
+function _renderReviewGroups() {
+  var gd = _execToolsState._reviewGroupData;
+  if (!gd) return;
+  var groups = gd.groups, courseTitles = gd.courseTitles, lessonTitles = gd.lessonTitles;
+  var q = (_execToolsState._reviewSearchQuery || '').toLowerCase();
+
+  var gkeys = Object.keys(groups).sort();
+
+  // 课时过滤
+  var lessonFilter = _execToolsState._reviewLessonFilter || '';
+  if (lessonFilter) {
+    gkeys = gkeys.filter(function(k) { return k === lessonFilter; });
+  }
+
+  var container = document.getElementById('reviewGroupContainer');
+  if (!container) return;
+
+  // 课时组级别懒加载：只渲染 cursor 之前的课时组
+  var groupCursor = _execToolsState._reviewGroupCursor || _REVIEW_GROUP_PAGE_SIZE;
+  var visibleKeys = gkeys.slice(0, groupCursor);
+  var hasMoreGroups = groupCursor < gkeys.length;
+
+  var html = '';
+
+  visibleKeys.forEach(function(gkey) {
+    var grp = groups[gkey];
+    var cid = grp.courseId;
+    var lnum = grp.lessonNum;
+    var courseName = courseTitles[cid] || cid;
+    var ltitle = lessonTitles[gkey] || '';
+    var headerLabel = courseName + ' — L' + String(lnum).padStart(2, '0');
+    if (ltitle) headerLabel += ' ' + ltitle;
+
+    // 过滤匹配搜索的卡片
+    var matched;
+    if (q) {
+      matched = grp.reviews.filter(function(r) {
+        var elem = r.elem || {};
+        var title = (elem.title || '').toLowerCase();
+        var content = (elem.content || '').toLowerCase();
+        return title.indexOf(q) !== -1 || content.indexOf(q) !== -1;
+      });
+    } else {
+      matched = grp.reviews;
+    }
+
+    if (matched.length === 0) return;
+
+    var stateKey = '_rg_' + gkey;
+    var rs = _execToolsState._reviewRenderState[stateKey] ||
+      { expanded: true, cardCursor: 0 };
+    _execToolsState._reviewRenderState[stateKey] = rs;
+
+    var totalDue = grp._dueCount;
+    var dueBadge = totalDue > 0
+      ? '<span class="course-group-due-badge">' + totalDue + ' 待复习</span>'
+      : '';
+
+    // 分组头部（可折叠）
+    html += '<div class="course-group-block">' +
+      '<div class="course-group-header" onclick="_toggleReviewGroup(\'' + escapeHtml(gkey) + '\')">' +
+      '<span class="course-group-toggle">' + (rs.expanded ? '▼' : '▶') + '</span>' +
+      '<span class="course-group-title">' + escapeHtml(headerLabel) + '</span>' +
+      '<span class="course-group-count">' + matched.length + ' 张卡片</span>' + dueBadge +
+      '</div>';
+
+    if (rs.expanded) {
+      // 组内卡片懒加载：每批 20 张
+      var cardPageSize = 20;
+      var cardEnd = Math.min(rs.cardCursor + cardPageSize, matched.length);
+      var pageCards = matched.slice(0, cardEnd);
+      var hasMoreCards = cardEnd < matched.length;
+
+      html += '<div class="review-list-grid">';
+      pageCards.forEach(function(r, idx) {
+        var elem = r.elem || {};
+        var dueBadge2 = r.is_due
+          ? '<span class="due-badge yes">待复习</span>'
+          : '<span class="due-badge no">未到期</span>';
+        var nextStr = r.next_review
+          ? new Date(r.next_review).toLocaleString('zh-CN')
+          : '立即';
+        var etype = elem.type || elem.elem_type || '';
+        var renderId = 'review-row-' + gkey.replace(/[^a-zA-Z0-9_-]/g, '_') + '-' + idx;
+        html += '<div class="review-list-card" ondblclick="startFillBlank(\'' + r.elem_id + '\')">' +
+          '<div class="review-list-card-header">' +
+          '<span class="element-type-badge ' + etype + '">' + etype + '</span>' +
+          '<span class="review-list-card-level">L' + r.level + '</span>' + dueBadge2 +
+          '</div>' +
+          '<div class="review-list-card-title vditor-reset" id="' + renderId + '"></div>' +
+          '<div class="review-list-card-next">下次: ' + nextStr + '</div>' +
+          '</div>';
+      });
+      html += '</div>';
+
+      // 组内卡片"加载更多"
+      if (hasMoreCards) {
+        html += '<div style="text-align:center;padding:4px 0 10px 0">' +
+          '<button class="btn" style="font-size:11px" onclick="_loadMoreGroupCards(\'' + escapeHtml(gkey) + '\')">📦 加载更多卡片 (' + (matched.length - cardEnd) + ' 张)</button></div>';
+      } else if (matched.length > cardPageSize) {
+        html += '<div style="text-align:center;padding:2px 0 8px 0;color:var(--fg-muted);font-size:10px;">✅ 已全部显示 (' + matched.length + ' 张)</div>';
+      }
+    }
+
+    html += '</div>'; // .course-group-block
+  });
+
+  // 课时组级别的"加载更多"
+  if (hasMoreGroups) {
+    var remaining = gkeys.length - groupCursor;
+    html += '<div style="text-align:center;padding:12px 0">' +
+      '<button class="btn" style="font-size:12px" onclick="_loadMoreReviewGroups()">📦 加载更多课时 (' + remaining + ' 个课时未显示)</button></div>';
+  } else if (gkeys.length > _REVIEW_GROUP_PAGE_SIZE) {
+    html += '<div style="text-align:center;padding:8px 0;color:var(--fg-muted);font-size:11px;">✅ 已全部显示 (' + gkeys.length + ' 个课时)</div>';
+  }
+
+  if (!html) {
+    html = '<p style="text-align:center;color:var(--fg-muted);padding:20px;">没有匹配的复习卡片</p>';
+  }
+
+  container.innerHTML = html;
+
+  // 异步渲染卡片标题 markdown（只渲染当前可见的展开组）
+  visibleKeys.forEach(function(gkey) {
+    var grp = groups[gkey];
+    var q2 = (_execToolsState._reviewSearchQuery || '').toLowerCase();
+    var matched = q2 ? grp.reviews.filter(function(r) {
+      var elem = r.elem || {};
+      var title = (elem.title || '').toLowerCase();
+      var content = (elem.content || '').toLowerCase();
+      return title.indexOf(q2) !== -1 || content.indexOf(q2) !== -1;
+    }) : grp.reviews;
+
+    var stateKey = '_rg_' + gkey;
+    var rs = _execToolsState._reviewRenderState[stateKey];
+    if (!rs || !rs.expanded) return;
+
+    var cardPageSize = 20;
+    var cardEnd = Math.min(rs.cardCursor + cardPageSize, matched.length);
+    var pageCards = matched.slice(0, cardEnd);
+
+    pageCards.forEach(function(r, idx) {
+      var el = document.getElementById('review-row-' + gkey.replace(/[^a-zA-Z0-9_-]/g, '_') + '-' + idx);
+      if (el) _renderMdInto(el, (r.elem || {}).title || '');
+    });
+  });
+}
+
+// 折叠/展开课时分组
+function _toggleReviewGroup(gkey) {
+  var stateKey = '_rg_' + gkey;
+  var rs = _execToolsState._reviewRenderState[stateKey];
+  if (rs) rs.expanded = !rs.expanded;
+  _renderReviewGroups();
+}
+
+// 加载更多课时组（组级别懒加载）
+function _loadMoreReviewGroups() {
+  var gd = _execToolsState._reviewGroupData;
+  if (!gd) return;
+  var gkeys = Object.keys(gd.groups);
+  var cursor = _execToolsState._reviewGroupCursor || _REVIEW_GROUP_PAGE_SIZE;
+  _execToolsState._reviewGroupCursor = cursor + _REVIEW_GROUP_PAGE_SIZE;
+  if (_execToolsState._reviewGroupCursor > gkeys.length) {
+    _execToolsState._reviewGroupCursor = gkeys.length;
+  }
+  _renderReviewGroups();
+}
+
+// 加载更多组内卡片
+function _loadMoreGroupCards(gkey) {
+  var stateKey = '_rg_' + gkey;
+  var rs = _execToolsState._reviewRenderState[stateKey];
+  if (rs) rs.cardCursor += 20;
+  _renderReviewGroups();
+}
+
+// ─── 间隔复习 - 加载/重置 ───
+async function loadSpacedReview(forceRefresh) {
+  var isCourseLevel = _execToolsState.lessonNum == null;
+  if (!isCourseLevel && !_execToolsState.notePath) { showToast('未找到笔记路径', 'error'); return; }
+  showToast('加载中...', 'info');
+  try {
+    if (isCourseLevel) {
+      // 课程级：优先从分析缓存加载（会合并新增元素，保留已有复习记录）
+      var res = await client.api_get('/api/data/courses/' + encodeURIComponent(_execToolsState.courseId) + '/spaced-load');
+      if (res.code === 0) {
+        showToast('已加载 ' + res.data.loaded + ' 个元素', 'success');
+        refreshReviewList();
+        return;
+      }
+      // 分析缓存不可用（未运行课程分析）：回退到 _srm 已有数据
+      if (!forceRefresh) {
+        var existing = await client.api_get('/api/data/spaced-repetition/all');
+        if (existing.code === 0 && existing.data && existing.data.reviews && existing.data.reviews.length > 0) {
+          _execToolsState.reviewData = existing.data;
+          _renderReviewList(existing.data);
+          showToast('已加载 ' + existing.data.reviews.length + ' 个元素', 'success');
+          return;
+        }
+      }
+      // 都不可用时显示原始错误
+      showToast(res.msg || '加载失败', 'error');
+    } else {
+      var res = await client.api('/api/data/spaced-repetition/load', {
+        path: _execToolsState.notePath,
+        course_id: _execToolsState.courseId || '',
+        lesson_num: _execToolsState.lessonNum || 0
+      });
+      if (res.code === 0) {
+        showToast('已加载 ' + res.data.loaded + ' 个元素', 'success');
+        refreshReviewList();
+      } else {
+        showToast(res.msg || '加载失败', 'error');
+      }
+    }
+  } catch(e) {
+    showToast('错误: ' + e.message, 'error');
+  }
+}
+
+async function resetSpacedReview() {
+  if (!await modalConfirm('确定重置所有复习数据？此操作不可撤销。')) return;
+  try {
+    await client.api('/api/data/spaced-repetition/reset', {});
+    showToast('已重置', 'success');
+    refreshReviewList();
+  } catch(e) {
+    showToast('错误: ' + e.message, 'error');
+  }
+}
+
+// ─── 间隔复习 - 卡片视图 ───
+function startCardReview() {
+  if (!_execToolsState.reviewData) {
+    showToast('请先加载复习数据', 'error');
+    return;
+  }
+  // 按课时过滤：如果下拉菜单选中了某个课时，只复习该课时的卡片
+  var lessonFilter = _execToolsState._reviewLessonFilter || '';
+  var dueCards = _execToolsState.reviewData.reviews.filter(function(r) { return r.is_due; });
+  if (lessonFilter) {
+    var parts = lessonFilter.split('|');
+    var filterCourseId = parts[0] || '';
+    var filterLessonNum = parts.length > 1 ? parseInt(parts[1], 10) : null;
+    dueCards = dueCards.filter(function(r) {
+      var elem = r.elem || {};
+      return elem.course_id === filterCourseId && elem.lesson_num === filterLessonNum;
+    });
+  }
+  _execToolsState.cardQueue = dueCards;
+  _execToolsState.cardIndex = 0;
+  if (_execToolsState.cardQueue.length === 0) {
+    showToast(lessonFilter ? '该课时没有待复习的卡片' : '当前没有需要复习的卡片', 'info');
+    return;
+  }
+  document.getElementById('reviewListView').style.display = 'none';
+  document.getElementById('reviewFillView').style.display = 'none';
+  document.getElementById('reviewCardView').style.display = 'block';
+  document.addEventListener('keydown', _onCardKeyDown);
+  showNextCard();
+}
+
+function showNextCard() {
+  if (_execToolsState.cardIndex >= _execToolsState.cardQueue.length) {
+    document.getElementById('reviewCardView').innerHTML =
+      '<div style="text-align:center;padding:40px;"><h3>🎉 复习完成！</h3>' +
+      '<button class="btn" onclick="_backToReviewList()">返回列表</button></div>';
+    document.removeEventListener('keydown', _onCardKeyDown);
+    return;
+  }
+  var item = _execToolsState.cardQueue[_execToolsState.cardIndex];
+  var elem = item.elem || {};
+  var etype = elem.type || elem.elem_type || '';
+  var content = elem.content || '';
+  // 显示课程/课时信息
+  var lessonLabel = '';
+  var cid = elem.course_id || '';
+  var lnum = elem.lesson_num;
+  if (cid && lnum != null) {
+    var gd = _execToolsState._reviewGroupData;
+    var cname = gd ? (gd.courseTitles[cid] || cid) : cid;
+    lessonLabel = cname + ' L' + String(lnum).padStart(2, '0') + ' · ';
+  }
+  document.getElementById('reviewCardView').innerHTML =
+    '<div style="text-align:center;margin-bottom:6px;font-size:11px;color:var(--fg-muted);">' +
+    lessonLabel + '卡片 ' + (_execToolsState.cardIndex + 1) + ' / ' + _execToolsState.cardQueue.length + ' · L' + item.level + '</div>' +
+    '<div class="fill-blank-nav" style="margin-bottom:6px;">' +
+    (_execToolsState.cardIndex > 0
+      ? '<button class="btn small" onclick="_prevCard()">◀ 上一张</button>'
+      : '<span></span>') +
+    '<span></span>' +
+    (_execToolsState.cardIndex < _execToolsState.cardQueue.length - 1
+      ? '<button class="btn small" onclick="_nextCard()">下一张 ▶</button>'
+      : '<span></span>') +
+    '</div>' +
+    '<div class="review-card-container">' +
+    '  <div class="review-card" id="reviewCard" onclick="flipCard()">' +
+    '    <div class="review-card-front">' +
+    '      <div class="review-card-title">' + etype + ' · ' + escapeHtml(elem.title || '') + '</div>' +
+    '      <div class="review-card-body">点击查看内容</div>' +
+    '      <div class="review-card-hint">点击翻转 · 翻面后可评分</div>' +
+    '    </div>' +
+    '    <div class="review-card-back">' +
+    '      <div class="review-card-title">内容</div>' +
+    '      <div class="review-card-body vditor-reset" id="reviewCardBackBody"></div>' +
+    '      <div class="review-card-hint">点击翻回正面</div>' +
+    '    </div>' +
+    '  </div>' +
+    '</div>' +
+    '<div class="quality-btn-grid" id="qualityBtns" style="display:none;">' +
+    '  <button class="quality-btn q0" onclick="submitCardReview(0)">❌ 完全忘记</button>' +
+    '  <button class="quality-btn q1" onclick="submitCardReview(1)">😰 几乎忘记</button>' +
+    '  <button class="quality-btn q2" onclick="submitCardReview(2)">😅 有些模糊</button>' +
+    '  <button class="quality-btn q3" onclick="submitCardReview(3)">🤔 记不清了</button>' +
+    '  <button class="quality-btn q4" onclick="submitCardReview(4)">😊 记住了</button>' +
+    '  <button class="quality-btn q5" onclick="submitCardReview(5)">😄 非常熟悉</button>' +
+    '</div>' +
+    '<div class="card-annotation-section" id="cardAnnotationSection" style="display:none;">' +
+    '  <div class="card-annotation-header">📝 批注</div>' +
+    '  <div id="cardAnnotationList" class="card-annotation-list"></div>' +
+    '  <div class="card-annotation-input-row">' +
+    '    <input id="cardAnnotationInput" class="card-annotation-input" placeholder="添加批注（支持 Markdown / LaTeX）..." ' +
+    '    onkeydown="if(event.key===\'Enter\')_saveCardAnnotation()">' +
+    '    <button class="btn small" onclick="_saveCardAnnotation()">添加</button>' +
+    '  </div>' +
+    '</div>';
+  // 异步渲染背面内容的 markdown（含环境块 + KaTeX）
+  var backBody = document.getElementById('reviewCardBackBody');
+  if (backBody) {
+    _renderMdInto(backBody, content);
+  }
+  // 加载批注
+  _loadCardAnnotations(item.elem_id);
+}
+
+// 双向 3D 翻转：toggle .flipped 类，翻面后才显示评分按钮和批注
+function flipCard() {
+  var card = document.getElementById('reviewCard');
+  var btns = document.getElementById('qualityBtns');
+  var annSection = document.getElementById('cardAnnotationSection');
+  if (!card) return;
+  card.classList.toggle('flipped');
+  var flipped = card.classList.contains('flipped');
+  if (btns) btns.style.display = flipped ? 'grid' : 'none';
+  if (annSection) annSection.style.display = flipped ? 'block' : 'none';
+}
+
+async function submitCardReview(quality) {
+  var item = _execToolsState.cardQueue[_execToolsState.cardIndex];
+  try {
+    await client.api('/api/data/spaced-repetition/review', { elem_id: item.elem_id, quality: quality });
+  } catch(e) { showToast('评分提交失败', 'error'); }
+  _execToolsState.cardIndex++;
+  showNextCard();
+}
+
+function _backToReviewList() {
+  document.getElementById('reviewCardView').style.display = 'none';
+  document.getElementById('reviewListView').style.display = 'block';
+  document.removeEventListener('keydown', _onCardKeyDown);
+  refreshReviewList();
+}
+
+// ─── 卡片批注 ───
+
+// 加载批注
+async function _loadCardAnnotations(elemId) {
+  var listEl = document.getElementById('cardAnnotationList');
+  if (!listEl) return;
+  listEl.innerHTML = '<div style="text-align:center;padding:8px;color:var(--fg-muted);font-size:11px;">加载中...</div>';
+  try {
+    var res = await client.api_get('/api/data/spaced-repetition/annotations?elem_id=' + encodeURIComponent(elemId));
+    if (res.code !== 0) { listEl.innerHTML = ''; return; }
+    _renderAnnotations(listEl, res.data.annotations || []);
+  } catch(e) {
+    listEl.innerHTML = '';
+  }
+}
+
+// 渲染批注列表
+function _renderAnnotations(container, annotations) {
+  if (!annotations || annotations.length === 0) {
+    container.innerHTML = '<div class="card-annotation-empty">暂无批注</div>';
+    return;
+  }
+  var html = annotations.map(function(a, idx) {
+    var time = a.timestamp ? new Date(a.timestamp).toLocaleString('zh-CN') : '';
+    return '<div class="card-annotation-item">' +
+      '<div class="card-annotation-text vditor-reset" id="cardAnnText_' + idx + '"></div>' +
+      '<div class="card-annotation-time">' + escapeHtml(time) + '</div>' +
+      '</div>';
+  }).join('');
+  container.innerHTML = html;
+  // 异步渲染 markdown
+  annotations.forEach(function(a, idx) {
+    var el = document.getElementById('cardAnnText_' + idx);
+    if (el) _renderMdInto(el, a.text || '');
+  });
+}
+
+// 保存批注
+async function _saveCardAnnotation() {
+  var item = _execToolsState.cardQueue && _execToolsState.cardQueue[_execToolsState.cardIndex];
+  if (!item) { showToast('未找到当前卡片', 'error'); return; }
+  var input = document.getElementById('cardAnnotationInput');
+  if (!input) return;
+  var text = input.value.trim();
+  if (!text) { showToast('请输入批注内容', 'info'); return; }
+  input.value = '';
+  try {
+    var res = await client.api('/api/data/spaced-repetition/annotate', {
+      elem_id: item.elem_id,
+      text: text
+    });
+    if (res.code === 0) {
+      _renderAnnotations(document.getElementById('cardAnnotationList'), res.data.annotations || []);
+      showToast('批注已保存', 'success');
+    } else {
+      showToast(res.msg || '保存失败', 'error');
+    }
+  } catch(e) {
+    showToast('保存批注失败: ' + e.message, 'error');
+  }
+}
+
+// 上一张卡片（不评分）
+function _prevCard() {
+  if (_execToolsState.cardIndex <= 0) return;
+  _execToolsState.cardIndex--;
+  showNextCard();
+}
+
+// 下一张卡片（不评分）
+function _nextCard() {
+  if (_execToolsState.cardIndex >= _execToolsState.cardQueue.length - 1) return;
+  _execToolsState.cardIndex++;
+  showNextCard();
+}
+
+// 卡片视图键盘导航
+function _onCardKeyDown(e) {
+  var view = document.getElementById('reviewCardView');
+  if (!view || view.style.display === 'none') return;
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+  if (e.key === 'ArrowLeft') { _prevCard(); e.preventDefault(); }
+  if (e.key === 'ArrowRight') { _nextCard(); e.preventDefault(); }
+}
+
+// ─── 间隔复习 - 填空测验 ───
+// 支持两种模式：
+//   1) 单题模式：从笔记分析侧双击元素启动
+//   2) 队列模式：在 startCardReview 时同步构建 fillBlankQueue，做完整套题
+async function startFillBlank(elemId) {
+  var elem = null;
+  if (_execToolsState.analysisData) {
+    elem = _execToolsState.analysisData.elements.find(function(e) { return e.id === elemId; });
+  }
+  if (!elem && _execToolsState.reviewData) {
+    var r = _execToolsState.reviewData.reviews.find(function(rev) { return rev.elem_id === elemId; });
+    if (r) elem = r.elem;
+  }
+  if (!elem) { showToast('未找到元素', 'error'); return; }
+
+  // 单题模式：队列仅含当前元素
+  _execToolsState.fillBlankQueue = [{ elem_id: elemId, elem: elem }];
+  _execToolsState.fillBlankIndex = 0;
+  _loadFillBlankAt(0);
+}
+
+// 队列模式入口：从卡片复习同步初始化填空队列
+function _startFillBlankQueue() {
+  if (!_execToolsState.cardQueue || _execToolsState.cardQueue.length === 0) {
+    showToast('当前没有需要复习的卡片', 'info');
+    return;
+  }
+  _execToolsState.fillBlankQueue = _execToolsState.cardQueue.map(function(item) {
+    return { elem_id: item.elem_id, elem: item.elem || {} };
+  });
+  _execToolsState.fillBlankIndex = 0;
+  _loadFillBlankAt(0);
+}
+
+async function _loadFillBlankAt(idx) {
+  if (!_execToolsState.fillBlankQueue || idx >= _execToolsState.fillBlankQueue.length) {
+    // 队列完成
+    var view = document.getElementById('reviewFillView');
+    if (view) {
+      view.innerHTML =
+        '<div style="text-align:center;padding:40px;"><h3>🎉 填空测验完成！</h3>' +
+        '<button class="btn" onclick="_exitFillBlank()">返回列表</button></div>';
+    }
+    return;
+  }
+  _execToolsState.fillBlankIndex = idx;
+  var item = _execToolsState.fillBlankQueue[idx];
+  var elem = item.elem || {};
+  try {
+    var res = await client.api('/api/data/notes/fill-blank', { content: elem.content || '' });
+    if (res.code !== 0) { showToast(res.msg || '生成失败', 'error'); return; }
+    _execToolsState.fillBlankData = Object.assign({ elem_id: item.elem_id }, res.data);
+    _renderFillBlank(res.data);
+  } catch(e) {
+    showToast('错误: ' + e.message, 'error');
+  }
+}
+
+function _renderFillBlank(data) {
+  // 切换到复习 Tab
+  var tabBtn = document.querySelectorAll('.exec-tools-tab')[2];
+  if (tabBtn) switchExecToolTab('review', { target: tabBtn });
+  document.getElementById('reviewListView').style.display = 'none';
+  document.getElementById('reviewCardView').style.display = 'none';
+  document.getElementById('reviewFillView').style.display = 'block';
+
+  var total = (_execToolsState.fillBlankQueue || []).length;
+  var cur = (_execToolsState.fillBlankIndex || 0) + 1;
+  var hasPrev = cur > 1;
+  var hasNext = cur < total;
+
+  // 统计占位符数量（◆BLANK_N◆）
+  var blankCount = ((data.masked_text || '').match(/◆BLANK\d+◆/g) || []).length;
+  var blankHint = blankCount > 1 ? '（共' + blankCount + '个空）' : '';
+
+  // 顶部导航栏（常驻显示）
+  var navTop = '';
+  if (total > 1) {
+    navTop += '<div class="fill-blank-nav">';
+    if (hasPrev) navTop += '<button class="btn small" onclick="_prevFillBlank()">◀ 上一题</button>';
+    else navTop += '<span></span>';
+    navTop += '<span class="fill-blank-progress">第 ' + cur + ' / ' + total + ' 题' + blankHint + '</span>';
+    if (hasNext) navTop += '<button class="btn small" onclick="_nextFillBlank()">下一题 ▶</button>';
+    else navTop += '<span></span>';
+    navTop += '</div>';
+  } else {
+    navTop = blankHint
+      ? '<div class="fill-blank-nav"><span></span><span class="fill-blank-progress">' + blankHint + '</span><span></span></div>'
+      : '';
+  }
+
+  // 底部操作区：提交/退出 + 前后翻题按钮
+  var bottomNav = '';
+  if (total > 1) {
+    bottomNav += '<div class="fill-blank-nav" style="margin-top:4px;">';
+    if (hasPrev) bottomNav += '<button class="btn small" onclick="_prevFillBlank()">◀ 上一题</button>';
+    else bottomNav += '<span></span>';
+    if (hasNext) bottomNav += '<button class="btn small" onclick="_nextFillBlank()">下一题 ▶</button>';
+    else bottomNav += '<span></span>';
+    bottomNav += '</div>';
+  }
+
+  document.getElementById('reviewFillView').innerHTML =
+    navTop +
+    '<div class="fill-blank-area">' +
+    '  <div class="fill-blank-text vditor-reset" id="fillBlankText"></div>' +
+    '  <input type="text" class="fill-blank-input" id="fillBlankInput" placeholder="输入答案..." ' +
+    '  onkeydown="if(event.key===\'Enter\')submitFillBlank()">' +
+    '</div>' +
+    '<div class="fill-blank-actions" id="fillBlankActions">' +
+    '  <button class="btn primary" onclick="submitFillBlank()" id="fillBlankSubmitBtn">提交</button>' +
+    '  <button class="btn" onclick="_exitFillBlank()">退出</button>' +
+    '</div>' +
+    bottomNav +
+    '<div id="fillBlankResult"></div>';
+
+  // 用 masked_text 直接渲染（◆BLANK_N◆ 是普通 Unicode，不会被 Markdown/LaTeX 解析）
+  var textEl = document.getElementById('fillBlankText');
+  if (textEl) {
+    var renderContent = data.masked_text || data.full_text || '';
+    _renderMdInto(textEl, renderContent).then(function() {
+      // 渲染完成后，在 DOM 中搜索 ◆BLANK_N◆ 占位符，替换为填空样式
+      _replaceBlanksInDom(textEl);
+    });
+  }
+  var inp = document.getElementById('fillBlankInput');
+  if (inp) inp.focus();
+  // 绑定键盘导航
+  document.addEventListener('keydown', _onFillBlankKeyDown);
+}
+
+// 在渲染后的 DOM 中查找 ◆BLANK_N◆ 占位符并替换为填空样式
+function _replaceBlanksInDom(container) {
+  if (!container) return;
+  var treeWalker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+  var textNodes = [];
+  while (treeWalker.nextNode()) textNodes.push(treeWalker.currentNode);
+
+  textNodes.forEach(function(node) {
+    var text = node.textContent || '';
+    if (text.indexOf('◆BLANK') === -1) return;
+    // 用正则拆分 ◆BLANK_N◆
+    var parts = text.split(/◆BLANK\d+◆/);
+    if (parts.length < 2) return;
+    var frag = document.createDocumentFragment();
+    parts.forEach(function(part, i) {
+      if (part) frag.appendChild(document.createTextNode(part));
+      if (i < parts.length - 1) {
+        var blankSpan = document.createElement('span');
+        blankSpan.className = 'fill-blank-inline';
+        blankSpan.textContent = '______';
+        frag.appendChild(blankSpan);
+      }
+    });
+    node.parentNode.replaceChild(frag, node);
+  });
+}
+
+async function submitFillBlank() {
+  if (!_execToolsState.fillBlankData) return;
+  var input = document.getElementById('fillBlankInput');
+  if (!input) return;
+  var inputVal = input.value.trim();
+  if (!inputVal) { showToast('请先输入答案', 'info'); return; }
+  var answers = _execToolsState.fillBlankData.answers || [];
+  var correct = answers.some(function(a) {
+    return a.trim().toLowerCase() === inputVal.toLowerCase();
+  });
+
+  // 不论对错，输入框保持可编辑，不锁定
+  var total = (_execToolsState.fillBlankQueue || []).length;
+  var cur = (_execToolsState.fillBlankIndex || 0) + 1;
+  var hasPrev = cur > 1;
+  var hasNext = cur < total;
+
+  var resultEl = document.getElementById('fillBlankResult');
+  if (resultEl) {
+    // 结果反馈 + 底部导航
+    var resultHtml = '<div class="fill-blank-result ' + (correct ? 'correct' : 'wrong') + '"></div>';
+    // 单题模式也在结果区放返回按钮
+    if (total <= 1) {
+      resultHtml += '<button class="btn" onclick="_exitFillBlank()" style="margin-top:8px;">返回列表</button>';
+    }
+    resultEl.innerHTML = resultHtml;
+    var renderEl = resultEl.querySelector('.fill-blank-result');
+    var blankCount = answers.length;
+    if (correct) {
+      var detail = blankCount > 1 ? '（共' + blankCount + '个空，匹配其一即正确）' : '';
+      _renderMdInto(renderEl, '✅ **正确！**' + detail);
+    } else {
+      var detail = blankCount > 1 ? '（共' + blankCount + '个空）' : '';
+      // 答案用 markdown+LaTeX 渲染（可能包含数学公式）
+      var answersMd = answers.map(function(a) { return '`' + a + '`'; }).join(' / ');
+      _renderMdInto(renderEl, '❌ **答案**: ' + answersMd + ' ' + detail);
+    }
+  }
+
+  // 答对才记录复习评分，答错不记（允许反复尝试）
+  if (correct) {
+    try {
+      await client.api('/api/data/spaced-repetition/review', {
+        elem_id: _execToolsState.fillBlankData.elem_id, quality: 4
+      });
+    } catch(e) {}
+  }
+}
+
+// 进入下一个填空题
+function _nextFillBlank() {
+  if (!_execToolsState.fillBlankQueue) return;
+  _loadFillBlankAt((_execToolsState.fillBlankIndex || 0) + 1);
+}
+
+// 返回上一个填空题
+function _prevFillBlank() {
+  if (!_execToolsState.fillBlankQueue) return;
+  var idx = (_execToolsState.fillBlankIndex || 0) - 1;
+  if (idx < 0) return;
+  _loadFillBlankAt(idx);
+}
+
+// 填空视图键盘导航（左右键切换题目，输入框聚焦时不触发以免干扰文字编辑）
+function _onFillBlankKeyDown(e) {
+  var view = document.getElementById('reviewFillView');
+  if (!view || view.style.display === 'none') return;
+  if (e.target && e.target.id === 'fillBlankInput') return;  // 输入框内不干扰光标
+  if (e.key === 'ArrowLeft') { _prevFillBlank(); e.preventDefault(); }
+  if (e.key === 'ArrowRight') { _nextFillBlank(); e.preventDefault(); }
+}
+
+function _exitFillBlank() {
+  document.removeEventListener('keydown', _onFillBlankKeyDown);
+  document.getElementById('reviewFillView').style.display = 'none';
+  document.getElementById('reviewListView').style.display = 'block';
+  refreshReviewList();
+}
+
+// ─── 课程总览（聚合分析） ───
+async function loadCourseOverview(forceRefresh) {
+  var courseId = _execToolsState.courseId;
+  if (!courseId) {
+    showToast('未找到课程 ID', 'error');
+    return;
+  }
+  var area = document.getElementById('courseOverviewArea');
+  if (!area) return;
+
+  area.innerHTML = '<div class="overview-loading">📊 ' + (forceRefresh ? '正在重新分析...' : '加载中...') + '</div>';
+
+  try {
+    var res;
+    if (forceRefresh) {
+      res = await client.api('/api/data/courses/' + encodeURIComponent(courseId) + '/analyze-all', {});
+    } else {
+      res = await client.api_get('/api/data/courses/' + encodeURIComponent(courseId) + '/analysis');
+      if (res.code !== 0 || !res.data || !res.data.cached || !res.data.lessons || Object.keys(res.data.lessons).length === 0) {
+        res = await client.api('/api/data/courses/' + encodeURIComponent(courseId) + '/analyze-all', {});
+      }
+    }
+    if (res.code !== 0) {
+      area.innerHTML = '<div class="overview-empty">' + escapeHtml(res.msg || '加载失败') + '</div>';
+      return;
+    }
+    _renderCourseOverview(area, res.data, courseId);
+  } catch(e) {
+    area.innerHTML = '<div class="overview-empty">错误: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function _renderCourseOverview(area, data, courseId) {
+  var stats = data.stats || {};
+  var lessons = data.lessons || {};
+  var byType = stats.by_type || {};
+  var byCategory = stats.by_category || {};
+  var byLesson = stats.by_lesson || {};
+  var totalElements = stats.total_elements || 0;
+  var lessonCount = data.lesson_count || 0;
+  var analyzedCount = data.analyzed_count || 0;
+  var skippedCount = data.skipped_count || 0;
+  var updatedAt = data.updated_at ? new Date(data.updated_at * 1000).toLocaleString('zh-CN') : '未知';
+
+  // 类型徽章颜色映射（与笔记分析一致）
+  var typeColorMap = {
+    definition: 'var(--accent)', theorem: 'var(--purple)', corollary: 'var(--red)',
+    lemma: 'var(--cyan)', proposition: 'var(--accent)', axiom: 'var(--orange)',
+    postulate: 'var(--orange)', example: 'var(--green)', problem: 'var(--yellow)',
+    exercise: 'var(--yellow)', remark: 'var(--red)', note: 'var(--red)',
+    solution: 'var(--cyan)', proof: 'var(--purple)', concept: 'var(--fg-muted)',
+    question: 'var(--yellow)'
+  };
+  var typeNameMap = {
+    definition: '定义', theorem: '定理', corollary: '推论', lemma: '引理',
+    proposition: '命题', axiom: '公理', postulate: '公设', example: '例',
+    problem: '问题', exercise: '练习', remark: '注记', note: '笔记',
+    solution: '解答', proof: '证明', concept: '概念', question: '疑问'
+  };
+
+  // 顶部统计卡片
+  var summaryHtml =
+    '<div class="overview-summary">' +
+    '  <div class="overview-stat-card"><div class="ov-num">' + lessonCount + '</div><div class="ov-label">课时笔记</div></div>' +
+    '  <div class="overview-stat-card"><div class="ov-num">' + totalElements + '</div><div class="ov-label">知识元素</div></div>' +
+    '  <div class="overview-stat-card"><div class="ov-num">' + Object.keys(byType).length + '</div><div class="ov-label">元素类型</div></div>' +
+    '  <div class="overview-stat-card"><div class="ov-num">' + Object.keys(byCategory).length + '</div><div class="ov-label">知识分类</div></div>' +
+    '</div>';
+
+  // 类型分布卡片
+  var typeCards = Object.keys(byType).sort(function(a, b) { return byType[b] - byType[a]; }).map(function(t) {
+    var color = typeColorMap[t] || 'var(--fg-muted)';
+    var name = typeNameMap[t] || t;
+    var cnt = byType[t];
+    return '<div class="overview-type-card" style="border-left: 3px solid ' + color + '">' +
+           '<span class="ov-type-name">' + escapeHtml(name) + '</span>' +
+           '<span class="ov-type-count">' + cnt + '</span></div>';
+  }).join('');
+
+  // 分类分布
+  var categoryCards = Object.keys(byCategory).sort(function(a, b) { return byCategory[b] - byCategory[a]; }).map(function(c) {
+    return '<div class="overview-cat-card"><span class="ov-cat-name">' + escapeHtml(c) + '</span><span class="ov-cat-count">' + byCategory[c] + '</span></div>';
+  }).join('');
+
+  // 按课时分布
+  var lessonRows = Object.keys(lessons).sort(function(a, b) {
+    return (lessons[a].lesson_number || 0) - (lessons[b].lesson_number || 0);
+  }).map(function(key) {
+    var ldata = lessons[key];
+    var lnum = ldata.lesson_number || '?';
+    var ltitle = ldata.lesson_title || '';
+    var cnt = ldata.count || 0;
+    var hasError = ldata.error;
+    var pct = totalElements > 0 ? Math.round(cnt * 100 / totalElements) : 0;
+    return '<div class="overview-lesson-row' + (hasError ? ' has-error' : '') + '">' +
+           '<span class="ov-lesson-num">L' + String(lnum).padStart(2, '0') + '</span>' +
+           '<span class="ov-lesson-title">' + escapeHtml(ltitle) + '</span>' +
+           '<div class="ov-lesson-bar"><div class="ov-lesson-bar-fill" style="width:' + pct + '%"></div></div>' +
+           '<span class="ov-lesson-count">' + (hasError ? '⚠️' : cnt) + '</span>' +
+           '</div>';
+  }).join('');
+
+  // 增量更新提示
+  var refreshHint = '';
+  if (analyzedCount > 0 || skippedCount > 0) {
+    refreshHint = '<div class="overview-refresh-hint">本次分析 ' + analyzedCount + ' 篇 / 复用缓存 ' + skippedCount + ' 篇 · 更新于 ' + updatedAt + '</div>';
+  } else {
+    refreshHint = '<div class="overview-refresh-hint">数据来自缓存 · 更新于 ' + updatedAt + '</div>';
+  }
+
+  area.innerHTML =
+    '<div class="course-overview">' +
+    '  <div class="exec-tools-btnrow">' +
+    '    <button class="btn primary" onclick="loadCourseOverview(true)">🔄 重新分析</button>' +
+    '    <span class="overview-hint">增量更新：仅分析有修改的笔记</span>' +
+    '  </div>' +
+    refreshHint +
+    summaryHtml +
+    '  <div class="overview-section">' +
+    '    <div class="overview-section-title">📊 类型分布</div>' +
+    '    <div class="overview-type-grid">' + (typeCards || '<div class="overview-empty-inline">暂无</div>') + '</div>' +
+    '  </div>' +
+    '  <div class="overview-section">' +
+    '    <div class="overview-section-title">🏷️ 知识分类</div>' +
+    '    <div class="overview-cat-grid">' + (categoryCards || '<div class="overview-empty-inline">暂无</div>') + '</div>' +
+    '  </div>' +
+    '  <div class="overview-section">' +
+    '    <div class="overview-section-title">📚 课时分布</div>' +
+    '    <div class="overview-lesson-list">' + (lessonRows || '<div class="overview-empty-inline">暂无</div>') + '</div>' +
+    '  </div>' +
+    '</div>';
+}
+
+// ─── 定理证明 / 问题解答（重读写入） ───
+// 定理类型中文名映射
+var _THEOREM_TYPE_NAMES = {
+  theorem: '定理', corollary: '推论', lemma: '引理',
+  proposition: '命题', axiom: '公理', postulate: '公设'
+};
+
+// 通用：加载配对列表
+async function _loadNotePairs(pairType, viewId, emptyHint) {
+  var view = document.getElementById(viewId);
+  if (!view) return;
+  view.innerHTML = '<div class="pair-loading">加载中...</div>';
+  try {
+    var isCourseLevel = _execToolsState.lessonNum == null;
+    var res;
+    if (isCourseLevel) {
+      // 课程级：从聚合缓存中提取配对
+      res = await client.api_get('/api/data/courses/' + encodeURIComponent(_execToolsState.courseId) +
+        '/pairs?pair_type=' + encodeURIComponent(pairType));
+    } else {
+      if (!_execToolsState.notePath) {
+        showToast('未找到笔记路径', 'error');
+        return;
+      }
+      res = await client.api('/api/data/notes/pairs', {
+        path: _execToolsState.notePath,
+        course_id: _execToolsState.courseId || '',
+        lesson_num: _execToolsState.lessonNum || 0,
+        pair_type: pairType
+      });
+    }
+    if (res.code !== 0) {
+      view.innerHTML = '<div class="pair-empty">' + escapeHtml(res.msg || '加载失败') + '</div>';
+      return;
+    }
+    _renderPairPanel(view, res.data.pairs || [], pairType, emptyHint);
+  } catch(e) {
+    view.innerHTML = '<div class="pair-empty">错误: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+// 渲染配对面板：左侧列表 + 右侧编辑器
+function _renderPairPanel(view, pairs, pairType, emptyHint) {
+  if (!pairs.length) {
+    view.innerHTML = '<div class="pair-empty">' + emptyHint + '</div>';
+    return;
+  }
+  // 缓存到 _execToolsState 供保存使用
+  _execToolsState._pairCache = _execToolsState._pairCache || {};
+  _execToolsState._pairCache[pairType] = pairs;
+
+  var isTheorem = pairType === 'theorem_proof';
+  var primaryLabel = isTheorem ? '定理内容' : '问题内容';
+  var secondaryLabel = isTheorem ? '证明' : '解答';
+  var primaryTag = isTheorem ? '📐' : '❓';
+  var secondaryTag = isTheorem ? '✏️' : '💡';
+
+  // 搜索状态
+  _execToolsState._pairSearchQuery = _execToolsState._pairSearchQuery || {};
+  _execToolsState._pairSearchQuery[pairType] = _execToolsState._pairSearchQuery[pairType] || '';
+  // 课时过滤状态
+  _execToolsState._pairLessonFilter = _execToolsState._pairLessonFilter || {};
+  _execToolsState._pairLessonFilter[pairType] = _execToolsState._pairLessonFilter[pairType] || '';
+
+  // 分页参数：每次显示 30 个
+  var pageSize = 30;
+  var pairStateKey = '_pairPage_' + pairType;
+  _execToolsState[pairStateKey] = _execToolsState[pairStateKey] || { cursor: 0 };
+
+  // 是否课程级模式（按课时分组）
+  var isCourseLevel = _execToolsState.lessonNum == null;
+
+  // 构建课时过滤下拉选项（课程级模式下可用）
+  var lessonFilterOptions = '';
+  var currentLessonFilter = _execToolsState._pairLessonFilter[pairType] || '';
+  if (isCourseLevel) {
+    var seenLessons = {};
+    lessonFilterOptions = '<option value="">📚 全部课时</option>';
+    pairs.forEach(function(p) {
+      var lnum = (p.primary_lesson || {}).lesson_number;
+      if (lnum == null) lnum = 0;
+      if (seenLessons[lnum]) return;
+      seenLessons[lnum] = true;
+      var ltitle = (p.primary_lesson || {}).lesson_title || '';
+      var label = 'L' + String(lnum).padStart(2, '0');
+      if (ltitle) label += ' ' + ltitle;
+      var selected = String(lnum) === currentLessonFilter ? ' selected' : '';
+      lessonFilterOptions += '<option value="' + lnum + '"' + selected + '>' + escapeHtml(label) + '</option>';
+    });
+  }
+
+  function renderPairPage() {
+    var state = _execToolsState[pairStateKey];
+    var searchQ = (_execToolsState._pairSearchQuery[pairType] || '').toLowerCase();
+
+    // 课时过滤
+    var lessonQ = _execToolsState._pairLessonFilter[pairType] || '';
+    var filtered = pairs;
+    if (searchQ) {
+      filtered = pairs.filter(function(p) {
+        var prim = p.primary || {};
+        var title = (prim.title || '').toLowerCase();
+        var content = (prim.content || '').toLowerCase();
+        return title.indexOf(searchQ) !== -1 || content.indexOf(searchQ) !== -1;
+      });
+    }
+    if (lessonQ) {
+      filtered = filtered.filter(function(p) {
+        return String((p.primary_lesson || {}).lesson_number) === lessonQ;
+      });
+    }
+
+    if (filtered.length === 0) {
+      view.querySelector('.pair-list').innerHTML =
+        '<div class="pair-empty" style="padding:20px;text-align:center;">没有匹配的' + (isTheorem ? '定理' : '问题') + '</div>';
+      return;
+    }
+
+    var totalFiltered = filtered.length;
+    var end = Math.min(state.cursor + pageSize, totalFiltered);
+    var pagePairs = filtered.slice(0, end);
+    var hasMore = end < totalFiltered;
+
+    var listItems = '';
+
+    if (isCourseLevel && !searchQ) {
+      // 课程级模式：按课时分组
+      var lessonGroups = {};
+      pagePairs.forEach(function(p, localIdx) {
+        var lnum = (p.primary_lesson || {}).lesson_number;
+        if (lnum == null) lnum = 0;
+        if (!lessonGroups[lnum]) lessonGroups[lnum] = { lesson_number: lnum, lesson_title: (p.primary_lesson || {}).lesson_title || '', items: [] };
+        lessonGroups[lnum].items.push({ pair: p, localIdx: localIdx });
+      });
+
+      var lessonKeys = Object.keys(lessonGroups).sort(function(a, b) { return a - b; });
+      lessonKeys.forEach(function(lk) {
+        var lg = lessonGroups[lk];
+        listItems +=
+          '<div class="pair-lesson-header" onclick="_togglePairLessonGroup(this)">' +
+          '<span class="pair-lesson-toggle">▼</span>' +
+          '<span class="pair-lesson-label">L' + String(lg.lesson_number).padStart(2, '0') + '</span>' +
+          '<span class="pair-lesson-title">' + escapeHtml(lg.lesson_title) + '</span>' +
+          '<span class="pair-lesson-count">' + lg.items.length + '</span>' +
+          '</div>';
+        lg.items.forEach(function(item) {
+          var origIdx = pairs.indexOf(item.pair);
+          var prim = item.pair.primary || {};
+          var sec = item.pair.secondary;
+          var typeText = isTheorem
+            ? (_THEOREM_TYPE_NAMES[prim.type] || prim.type || '定理')
+            : '问题';
+          var title = prim.title || ('#' + (origIdx + 1));
+          var hasSec = sec ? '<span class="pair-status yes">✅ 已有' + secondaryLabel + '</span>'
+                           : '<span class="pair-status no">无' + secondaryLabel + '</span>';
+          listItems += '<div class="pair-list-item" data-idx="' + origIdx + '" onclick="selectPairItem(\'' + pairType + '\', ' + origIdx + ')">' +
+            '<div class="pair-list-item-header">' +
+            '<span class="pair-type-badge ' + (prim.type || '') + '">' + typeText + '</span>' +
+            '<div class="pair-list-item-title vditor-reset" id="pairItemTitle_' + pairType + '_' + origIdx + '"></div>' +
+            hasSec +
+            '</div>' +
+            '<div class="pair-list-item-preview vditor-reset" id="pairPreview_' + pairType + '_' + origIdx + '"></div>' +
+            '</div>';
+        });
+      });
+    } else {
+      // 课时级或无分组：平铺列表
+      listItems = pagePairs.map(function(p, idx) {
+        var origIdx = pairs.indexOf(p);
+        var prim = p.primary || {};
+        var sec = p.secondary;
+        var typeText = isTheorem
+          ? (_THEOREM_TYPE_NAMES[prim.type] || prim.type || '定理')
+          : '问题';
+        var title = prim.title || ('#' + (origIdx + 1));
+        var hasSec = sec ? '<span class="pair-status yes">✅ 已有' + secondaryLabel + '</span>'
+                         : '<span class="pair-status no">无' + secondaryLabel + '</span>';
+        return '<div class="pair-list-item" data-idx="' + origIdx + '" onclick="selectPairItem(\'' + pairType + '\', ' + origIdx + ')">' +
+               '<div class="pair-list-item-header">' +
+                 '<span class="pair-type-badge ' + (prim.type || '') + '">' + typeText + '</span>' +
+                 '<div class="pair-list-item-title vditor-reset" id="pairItemTitle_' + pairType + '_' + origIdx + '"></div>' +
+                 hasSec +
+               '</div>' +
+               '<div class="pair-list-item-preview vditor-reset" id="pairPreview_' + pairType + '_' + origIdx + '"></div>' +
+               '</div>';
+      }).join('');
+    }
+
+    // 搜索栏 + 下拉过滤 + 加载更多按钮
+    var filterSelectHtml = isCourseLevel
+      ? '<select onchange="_onPairLessonFilter(\'' + pairType + '\')" ' +
+        'style="padding:5px 6px;border:1px solid var(--border);border-radius:4px;' +
+        'background:var(--bg);color:var(--fg);font-size:12px;box-sizing:border-box;max-width:140px;cursor:pointer;">' +
+        lessonFilterOptions + '</select>'
+      : '';
+    var searchBar = '<div style="padding:6px 8px;border-bottom:1px solid var(--border);display:flex;gap:4px;">' +
+      '<input type="text" placeholder="🔍 搜索' + (isTheorem ? '定理' : '问题') + '标题或内容..." ' +
+      'value="' + escapeHtml(_execToolsState._pairSearchQuery[pairType] || '') + '" ' +
+      'oninput="_onPairSearch(\'' + pairType + '\', this.value)" ' +
+      'style="flex:1;min-width:60px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;' +
+      'background:var(--bg);color:var(--fg);font-size:12px;box-sizing:border-box;">' +
+      filterSelectHtml + '</div>';
+
+    if (hasMore) {
+      listItems += '<div style="text-align:center;padding:8px 0">' +
+        '<button class="btn" style="font-size:11px" onclick="_pairLoadMore(\'' + pairType + '\')">📦 加载更多 (' + (totalFiltered - end) + ' 个剩余)</button></div>';
+    } else if (totalFiltered > pageSize) {
+      listItems += '<div style="text-align:center;padding:6px 0;color:var(--fg-muted);font-size:10px;">✅ 已全部显示 (' + totalFiltered + ' 个)</div>';
+    }
+
+    // 只更新左列表，保留右侧编辑器
+    if (view.querySelector('.pair-panel')) {
+      view.querySelector('.pair-list').innerHTML = searchBar + listItems;
+    } else {
+      view.innerHTML =
+        '<div class="pair-panel">' +
+        '  <div class="pair-list">' + searchBar + listItems + '</div>' +
+        '  <div class="pair-editor" id="pairEditor_' + pairType + '">' +
+        '    <div class="pair-editor-hint">← 点击左侧' + (isTheorem ? '定理' : '问题') + '查看并编辑' + secondaryLabel + '</div>' +
+        '  </div>' +
+        '</div>';
+    }
+
+    // 渲染 markdown 标题和预览
+    pagePairs.forEach(function(p) {
+      var origIdx = pairs.indexOf(p);
+      var titleEl = document.getElementById('pairItemTitle_' + pairType + '_' + origIdx);
+      if (titleEl && !titleEl.dataset._rendered) {
+        titleEl.dataset._rendered = '1';
+        _renderMdInto(titleEl, p.primary ? (p.primary.title || '') : '');
+      }
+      if (!titleEl && p.primary) {
+        // 第一次渲染
+        var el2 = document.getElementById('pairItemTitle_' + pairType + '_' + origIdx);
+        if (el2) _renderMdInto(el2, p.primary.title || '');
+      }
+      var prim = p.primary || {};
+      var previewEl = document.getElementById('pairPreview_' + pairType + '_' + origIdx);
+      if (previewEl && !previewEl.dataset._rendered) {
+        previewEl.dataset._rendered = '1';
+        var text = prim.content || '';
+        _renderMdInto(previewEl, text.length > 200 ? text.substring(0, 200) + '\n\n…' : text);
+      }
+    });
+
+    state.cursor = end;
+  }
+
+  renderPairPage();
+}
+
+// 配对搜索输入处理
+function _onPairSearch(pairType, value) {
+  _execToolsState._pairSearchQuery = _execToolsState._pairSearchQuery || {};
+  _execToolsState._pairSearchQuery[pairType] = value;
+  var pairStateKey = '_pairPage_' + pairType;
+  _execToolsState[pairStateKey] = { cursor: 0 };
+  var pairs = (_execToolsState._pairCache || {})[pairType] || [];
+  if (!pairs.length) return;
+  var view = document.getElementById(pairType === 'theorem_proof' ? 'theoremProofView' : 'problemSolutionView');
+  if (view) _renderPairPanel(view, pairs, pairType, '');
+}
+
+// 配对课时过滤
+function _onPairLessonFilter(pairType) {
+  var view = document.getElementById(pairType === 'theorem_proof' ? 'theoremProofView' : 'problemSolutionView');
+  if (!view) return;
+  var sel = view.querySelector('.pair-list select');
+  _execToolsState._pairLessonFilter = _execToolsState._pairLessonFilter || {};
+  _execToolsState._pairLessonFilter[pairType] = sel ? sel.value : '';
+  var pairStateKey = '_pairPage_' + pairType;
+  _execToolsState[pairStateKey] = { cursor: 0 };
+  var pairs = (_execToolsState._pairCache || {})[pairType] || [];
+  if (pairs.length) _renderPairPanel(view, pairs, pairType, '');
+}
+
+// 折叠/展开课时分组
+function _togglePairLessonGroup(headerEl) {
+  var toggle = headerEl.querySelector('.pair-lesson-toggle');
+  if (!toggle) return;
+  var collapsed = toggle.textContent === '▶';
+  toggle.textContent = collapsed ? '▼' : '▶';
+  var sibling = headerEl.nextElementSibling;
+  while (sibling && !sibling.classList.contains('pair-lesson-header')) {
+    sibling.style.display = collapsed ? '' : 'none';
+    sibling = sibling.nextElementSibling;
+  }
+}
+
+function _pairLoadMore(pairType) {
+  var stateKey = '_pairPage_' + pairType;
+  var state = _execToolsState[stateKey];
+  if (!state) return;
+  var pairs = (_execToolsState._pairCache || {})[pairType] || [];
+  if (state.cursor >= pairs.length) return;
+  // 重新触发渲染
+  var view = document.getElementById(pairType === 'theorem_proof' ? 'theoremProofView' : 'problemSolutionView');
+  if (view) _renderPairPanel(view, pairs, pairType, '');
+}
+
+// 选中某个配对项：三模式编辑器（预览/源码/WYSIWYG）
+var _PAIR_VDITOR_THEME = 'dark';
+
+function _destroyPairVditors(pairType) {
+  var vds = _execToolsState._pairVditors && _execToolsState._pairVditors[pairType];
+  if (vds) {
+    if (vds.primary) { try { vds.primary.destroy(); } catch (e) {} }
+    if (vds.secondary) { try { vds.secondary.destroy(); } catch (e) {} }
+    delete _execToolsState._pairVditors[pairType];
+  }
+}
+
+function _destroyAllPairVditors() {
+  if (!_execToolsState._pairVditors) return;
+  Object.keys(_execToolsState._pairVditors).forEach(function(pt) { _destroyPairVditors(pt); });
+  _execToolsState._pairVditors = {};
+}
+
+function _pairGetVditor(pairType, field) {
+  var vds = _execToolsState._pairVditors && _execToolsState._pairVditors[pairType];
+  return vds ? vds[field] : null;
+}
+
+function _pairSetVditor(pairType, field, vd) {
+  _execToolsState._pairVditors = _execToolsState._pairVditors || {};
+  _execToolsState._pairVditors[pairType] = _execToolsState._pairVditors[pairType] || {};
+  _execToolsState._pairVditors[pairType][field] = vd;
+}
+
+// 切换配对编辑器的显示模式
+function switchPairMode(pairType, field, mode) {
+  var stateKey = '_pairMode_' + pairType;
+  _execToolsState[stateKey] = _execToolsState[stateKey] || {};
+  var oldMode = _execToolsState[stateKey][field] || 'preview';
+  if (oldMode === mode) return;
+
+  // 获取三个视图元素
+  var previewEl = document.getElementById('pairPreview_' + pairType + '_' + field);
+  var sourceEl = document.getElementById('pairSource_' + pairType + '_' + field);
+  var wysiwygEl = document.getElementById('pairWysiwyg_' + pairType + '_' + field);
+  if (!sourceEl) return;
+
+  // 从旧模式同步内容到 textarea（规范源）
+  if (oldMode === 'wysiwyg') {
+    var vd = _pairGetVditor(pairType, field);
+    if (vd) sourceEl.value = vd.getValue();
+  }
+  // preview 模式：内容不变，textarea 是源
+  // source 模式：textarea 本身就是源
+
+  // 隐藏所有视图
+  if (previewEl) previewEl.style.display = 'none';
+  sourceEl.style.display = 'none';
+  if (wysiwygEl) wysiwygEl.style.display = 'none';
+
+  // 显示目标视图并填充内容
+  if (mode === 'preview' && previewEl) {
+    previewEl.style.display = '';
+    _renderMdInto(previewEl, sourceEl.value);
+  } else if (mode === 'source') {
+    sourceEl.style.display = '';
+  } else if (mode === 'wysiwyg') {
+    wysiwygEl.style.display = '';
+    // Vditor 延迟初始化：检查是否已创建
+    var vd = _pairGetVditor(pairType, field);
+    if (!vd) {
+      var theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'classic' : 'dark';
+      var label = field === 'primary'
+        ? (pairType === 'theorem_proof' ? '定理内容' : '问题内容')
+        : (pairType === 'theorem_proof' ? '证明' : '解答');
+      var h = field === 'primary' ? 180 : 260;
+      vd = new Vditor('pairWysiwyg_' + pairType + '_' + field, {
+        height: h,
+        mode: 'wysiwyg',
+        theme: theme,
+        icon: 'material',
+        cdn: '/static/vditor',
+        cache: { enable: false },
+        toolbar: ['bold', 'italic', 'strike', '|', 'list', 'ordered-list', 'check', '|', 'code', 'inline-code', 'quote', '|', 'undo', 'redo'],
+        preview: { theme: { current: theme === 'classic' ? 'light' : 'dark' }, hljs: { style: theme === 'classic' ? 'github' : 'tokyo-night-dark' } },
+        placeholder: label + '...',
+        value: sourceEl.value,
+        after: function () {
+          _pairSetVditor(pairType, field, vd);
+          // 缩小 WYSIWYG 编辑区字体
+          var wrapper = wysiwygEl.querySelector('.vditor-ir, .vditor-wysiwyg');
+          if (wrapper) wrapper.style.fontSize = '13px';
+        }
+      });
+    } else {
+      vd.setValue(sourceEl.value);
+      // 字体缩小
+      var wrapper = wysiwygEl.querySelector('.vditor-ir, .vditor-wysiwyg');
+      if (wrapper) wrapper.style.fontSize = '13px';
+    }
+  }
+
+  // 更新按钮状态
+  var container = sourceEl.parentElement;
+  if (container) {
+    container.querySelectorAll('.pair-mode-btn').forEach(function(b) { b.classList.remove('active'); });
+    var btn = container.querySelector('.pair-mode-btn[data-mode="' + mode + '"]');
+    if (btn) btn.classList.add('active');
+  }
+
+  _execToolsState[stateKey][field] = mode;
+}
+
+function selectPairItem(pairType, idx) {
+  var cache = (_execToolsState._pairCache || {})[pairType] || [];
+  if (idx < 0 || idx >= cache.length) return;
+  var pair = cache[idx];
+  var prim = pair.primary || {};
+  var sec = pair.secondary;
+  var isTheorem = pairType === 'theorem_proof';
+  var primaryLabel = isTheorem ? '定理内容' : '问题内容';
+  var secondaryLabel = isTheorem ? '证明' : '解答';
+
+  // 销毁旧 Vditor 实例
+  _destroyPairVditors(pairType);
+
+  var editor = document.getElementById('pairEditor_' + pairType);
+  if (!editor) return;
+  editor.innerHTML =
+    '<div class="pair-editor-section">' +
+    '  <div class="pair-editor-label-row">' +
+    '    <span class="pair-editor-label">' + primaryLabel + '</span>' +
+    '    <div class="pair-mode-btns">' +
+    '      <button class="btn pair-mode-btn active" data-mode="preview" onclick="switchPairMode(\'' + pairType + '\',\'primary\',\'preview\')">👁 预览</button>' +
+    '      <button class="btn pair-mode-btn" data-mode="source" onclick="switchPairMode(\'' + pairType + '\',\'primary\',\'source\')">✏️ 源码</button>' +
+    '      <button class="btn pair-mode-btn" data-mode="wysiwyg" onclick="switchPairMode(\'' + pairType + '\',\'primary\',\'wysiwyg\')">📝 编辑</button>' +
+    '    </div>' +
+    '  </div>' +
+    '  <div class="pair-render-view vditor-reset" id="pairPreview_' + pairType + '_primary"></div>' +
+    '  <textarea class="pair-editor-textarea" id="pairSource_' + pairType + '_primary" rows="6" style="display:none">' + escapeHtml(prim.content || '') + '</textarea>' +
+    '  <div id="pairWysiwyg_' + pairType + '_primary" style="display:none"></div>' +
+    '</div>' +
+    '<div class="pair-editor-section">' +
+    '  <div class="pair-editor-label-row">' +
+    '    <span class="pair-editor-label">' + secondaryLabel + '</span>' +
+    '    <div class="pair-mode-btns">' +
+    '      <button class="btn pair-mode-btn active" data-mode="preview" onclick="switchPairMode(\'' + pairType + '\',\'secondary\',\'preview\')">👁 预览</button>' +
+    '      <button class="btn pair-mode-btn" data-mode="source" onclick="switchPairMode(\'' + pairType + '\',\'secondary\',\'source\')">✏️ 源码</button>' +
+    '      <button class="btn pair-mode-btn" data-mode="wysiwyg" onclick="switchPairMode(\'' + pairType + '\',\'secondary\',\'wysiwyg\')">📝 编辑</button>' +
+    '    </div>' +
+    '  </div>' +
+    '  <div class="pair-render-view vditor-reset" id="pairPreview_' + pairType + '_secondary"></div>' +
+    '  <textarea class="pair-editor-textarea" id="pairSource_' + pairType + '_secondary" rows="10" style="display:none">' + escapeHtml(sec ? sec.content : '') + '</textarea>' +
+    '  <div id="pairWysiwyg_' + pairType + '_secondary" style="display:none"></div>' +
+    '</div>' +
+    '<div class="exec-tools-btnrow">' +
+    '  <button class="btn primary" onclick="savePair(\'' + pairType + '\', ' + idx + ')">💾 保存/更新</button>' +
+    '  <button class="btn" onclick="clearPairSecondary(\'' + pairType + '\')">🗑️ 清空' + secondaryLabel + '</button>' +
+    '</div>';
+
+  // 初始化模式状态：默认预览
+  var stateKey = '_pairMode_' + pairType;
+  _execToolsState[stateKey] = { primary: 'preview', secondary: 'preview' };
+
+  // 渲染预览内容
+  var primPreview = document.getElementById('pairPreview_' + pairType + '_primary');
+  if (primPreview) _renderMdInto(primPreview, prim.content || '');
+  var secPreview = document.getElementById('pairPreview_' + pairType + '_secondary');
+  if (secPreview) _renderMdInto(secPreview, sec ? sec.content : '');
+
+  // 记录当前选中的 idx
+  _execToolsState._pairCurrentIdx = _execToolsState._pairCurrentIdx || {};
+  _execToolsState._pairCurrentIdx[pairType] = idx;
+
+  // 高亮选中项
+  var view = document.getElementById(isTheorem ? 'theoremProofView' : 'problemSolutionView');
+  if (view) {
+    view.querySelectorAll('.pair-list-item').forEach(function(el) { el.classList.remove('selected'); });
+    var sel = view.querySelector('.pair-list-item[data-idx="' + idx + '"]');
+    if (sel) sel.classList.add('selected');
+  }
+}
+
+// 保存配对（重读写入笔记）
+async function savePair(pairType, idx) {
+  if (!_execToolsState.notePath) {
+    showToast('未找到笔记文件路径（课程级模式下无法保存到单篇笔记）', 'error');
+    return;
+  }
+  var vds = _execToolsState._pairVditors && _execToolsState._pairVditors[pairType];
+  var cache = (_execToolsState._pairCache || {})[pairType] || [];
+  if (idx < 0 || idx >= cache.length) return;
+  var pair = cache[idx];
+  var prim = pair.primary || {};
+  var sec = pair.secondary;
+  var secondaryLabel = pairType === 'theorem_proof' ? '证明' : '解答';
+
+  // 根据当前模式读取内容：WYSIWYG → Vditor，否则 → textarea
+  var stateKey = '_pairMode_' + pairType;
+  var mode = _execToolsState[stateKey] || {};
+  var primaryContent, secondaryContent;
+
+  if (mode.primary === 'wysiwyg' && vds.primary) {
+    primaryContent = vds.primary.getValue().trim();
+  } else {
+    var ps = document.getElementById('pairSource_' + pairType + '_primary');
+    primaryContent = ps ? ps.value.trim() : '';
+  }
+
+  if (mode.secondary === 'wysiwyg' && vds.secondary) {
+    secondaryContent = vds.secondary.getValue().trim();
+  } else {
+    var ss = document.getElementById('pairSource_' + pairType + '_secondary');
+    secondaryContent = ss ? ss.value.trim() : '';
+  }
+
+  if (!primaryContent) { showToast('定理/问题内容不能为空', 'error'); return; }
+
+  try {
+    var res = await client.api('/api/data/notes/pairs/save', {
+      path: _execToolsState.notePath,
+      pair_type: pairType,
+      index: idx,
+      primary_content: primaryContent,
+      secondary_content: secondaryContent,
+      primary_raw_start: prim.raw_start || 0,
+      primary_raw_end: prim.raw_end || 0,
+      secondary_raw_start: sec ? (sec.raw_start || -1) : -1,
+      secondary_raw_end: sec ? (sec.raw_end || -1) : -1,
+      primary_elem_type: prim.type || ''
+    });
+    if (res.code === 0) {
+      showToast('已保存（重读写入）', 'success');
+      // 重新加载
+      if (pairType === 'theorem_proof') loadTheoremProofs();
+      else loadProblemSolutions();
+    } else {
+      showToast(res.msg || '保存失败', 'error');
+    }
+  } catch(e) {
+    showToast('错误: ' + e.message, 'error');
+  }
+}
+
+function secondaryLabelEmptyHint(pairType) {
+  return pairType === 'theorem_proof' ? '证明内容不能为空' : '解答内容不能为空';
+}
+
+function clearPairSecondary(pairType) {
+  // 清除 textarea（规范源）
+  var ss = document.getElementById('pairSource_' + pairType + '_secondary');
+  if (ss) ss.value = '';
+  // 如有 Vditor 也清除
+  var vds = _execToolsState._pairVditors && _execToolsState._pairVditors[pairType];
+  if (vds && vds.secondary) { vds.secondary.setValue(''); }
+}
+
+// 入口：加载定理-证明
+function loadTheoremProofs() {
+  _loadNotePairs('theorem_proof', 'theoremProofView', '暂无定理/推论，请先在笔记中使用 ::: theorem 等环境块');
+}
+
+// 入口：加载问题-解答
+function loadProblemSolutions() {
+  _loadNotePairs('problem_solution', 'problemSolutionView', '暂无问题，请先在笔记中使用 ::: problem 环境块');
+}
+
+// ─── 知识图谱 ───
+async function loadKnowledgeGraph() {
+  if (typeof cytoscape === 'undefined') {
+    showToast('Cytoscape.js 未加载，请检查网络连接', 'error');
+    return;
+  }
+  try {
+    var isCourseLevel = _execToolsState.lessonNum == null;
+    var res;
+    if (isCourseLevel) {
+      res = await client.api_get('/api/data/courses/' + encodeURIComponent(_execToolsState.courseId) + '/graph');
+    } else {
+      res = await client.api_get('/api/data/spaced-repetition/graph');
+    }
+    if (res.code !== 0) { showToast(res.msg || '加载失败', 'error'); return; }
+    var data = res.data;
+    var container = document.getElementById('execGraphContainer');
+    container.innerHTML = '';
+    container.style.height = '50vh';
+    container.style.minHeight = '320px';
+    container.style.background = 'var(--bg)';
+    container.style.border = '1px solid var(--border)';
+    container.style.borderRadius = 'var(--radius)';
+
+    // 按元素类型着色（比 categories 更直观）
+    var typeColor = {
+      definition: '#1565c0', theorem: '#7b1fa2', corollary: '#ad1457',
+      lemma: '#5e35b1', proposition: '#3949ab', axiom: '#bf360c', postulate: '#bf360c',
+      example: '#2e7d32', problem: '#e65100', exercise: '#f57f17',
+      remark: '#c62828', note: '#c62828', solution: '#006064', proof: '#4527a0',
+      concept: '#565f89'
+    };
+    var elements = [];
+    (data.nodes || []).forEach(function(n) {
+      var t = n.data.type || 'concept';
+      var color = typeColor[t] || '#565f89';
+      elements.push({
+        data: { id: n.data.id, label: n.data.label, type: t },
+        style: { 'background-color': color }
+      });
+    });
+    (data.edges || []).forEach(function(e) {
+      elements.push({ data: { source: e.data.source, target: e.data.target, label: e.data.label } });
+    });
+    if (elements.length === 0) {
+      container.innerHTML = '<p style="text-align:center;color:var(--fg-muted);padding:40px;">' +
+        (isCourseLevel ? '暂无图谱数据，请先运行课程聚合分析' : '暂无图谱数据，请先加载笔记到复习系统') +
+        '</p>';
+      return;
+    }
+    // 读取当前主题的实际颜色值（CSS 变量在 canvas 中不会被解析）
+    var cssVars = getComputedStyle(document.documentElement);
+    var fgColor = cssVars.getPropertyValue('--fg').trim() || '#c0caf5';
+    var fgMutedColor = cssVars.getPropertyValue('--fg-muted').trim() || '#565f89';
+    var accentColor = cssVars.getPropertyValue('--accent').trim() || '#7aa2f7';
+    var bgColor = cssVars.getPropertyValue('--bg').trim() || '#1a1b26';
+
+    cytoscape({
+      container: container,
+      elements: elements,
+      style: [
+        { selector: 'node', style: {
+          'label': 'data(label)',
+          'width': 40, 'height': 40,
+          'text-valign': 'bottom', 'text-margin-y': 4,
+          'text-wrap': 'wrap', 'text-max-width': 80,
+          'color': fgColor, 'font-size': '11px', 'font-weight': 600,
+          'text-outline-color': bgColor, 'text-outline-width': 3,
+          'background-color': accentColor, 'background-opacity': 0.85
+        } },
+        { selector: 'edge', style: {
+          'width': 2, 'line-color': fgMutedColor, 'target-arrow-color': fgMutedColor,
+          'target-arrow-shape': 'triangle', 'curve-style': 'bezier',
+          'label': 'data(label)', 'font-size': '10px', 'color': fgColor,
+          'text-rotation': 'autorotate',
+          'text-outline-color': bgColor, 'text-outline-width': 2,
+          'text-background-color': bgColor, 'text-background-opacity': 0.8,
+          'text-background-padding': 2, 'text-background-shape': 'roundrectangle'
+        } }
+      ],
+      layout: { name: 'cose', animate: true, padding: 10, idealEdgeLength: 100 }
+    });
+  } catch(e) {
+    showToast('错误: ' + e.message, 'error');
+  }
+}
+
+// 挂载到全局
+Object.assign(window, {
+  openExecToolsModal: openExecToolsModal,
+  switchExecToolTab: switchExecToolTab,
+  loadNotePreview: loadNotePreview,
+  analyzeNote: analyzeNote,
+  exportNoteAnalysis: exportNoteAnalysis,
+  loadSpacedReview: loadSpacedReview,
+  resetSpacedReview: resetSpacedReview,
+  refreshReviewList: refreshReviewList,
+  startCardReview: startCardReview,
+  showNextCard: showNextCard,
+  flipCard: flipCard,
+  submitCardReview: submitCardReview,
+  startFillBlank: startFillBlank,
+  submitFillBlank: submitFillBlank,
+  _nextFillBlank: _nextFillBlank,
+  _prevFillBlank: _prevFillBlank,
+  loadKnowledgeGraph: loadKnowledgeGraph,
+  _backToReviewList: _backToReviewList,
+  _exitFillBlank: _exitFillBlank
+});
 
 init().catch(function(e) { showToast('初始化失败: ' + (e.message || '未知错误'), 'error'); });
