@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import shutil
 import socket
@@ -41,7 +42,7 @@ except ImportError:
     logger_json = "json"
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Form
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.gzip import GZipMiddleware
@@ -141,6 +142,19 @@ class TaskDeleteRequest(BaseModel):
     id: str
 
 
+class BookmarkAddRequest(BaseModel):
+    """添加书签请求"""
+    name: str
+    url: str
+    category: str = "其他"
+    icon: str = "🔖"
+
+
+class BookmarkDeleteRequest(BaseModel):
+    """删除书签请求"""
+    id: str
+
+
 class CourseProgressRequest(BaseModel):
     """课程进度请求"""
     course_id: str
@@ -187,6 +201,63 @@ class TimetableSetActiveRequest(BaseModel):
 class TimetableDeleteRequest(BaseModel):
     """课程表删除请求"""
     timetable_id: str
+
+
+class NoteAnalyzeRequest(BaseModel):
+    """笔记分析请求"""
+    path: str
+    course_id: str = ""
+    lesson_num: int = 0
+
+
+class FillBlankRequest(BaseModel):
+    """填空题生成请求"""
+    content: str
+
+
+class SpacedReviewRequest(BaseModel):
+    """间隔复习评分请求"""
+    elem_id: str
+    quality: int
+
+
+class SpacedLoadRequest(BaseModel):
+    """间隔复习加载请求"""
+    path: str
+    course_id: str = ""
+    lesson_num: int = 0
+
+
+class SpacedAnnotateRequest(BaseModel):
+    """间隔复习批注请求"""
+    elem_id: str
+    text: str
+
+
+class NotePairsRequest(BaseModel):
+    """获取笔记中定理-证明/问题-解答配对"""
+    path: str
+    course_id: str = ""
+    lesson_num: int = 0
+    pair_type: str = "theorem_proof"  # theorem_proof | problem_solution
+
+
+class NotePairSaveRequest(BaseModel):
+    """重读写入定理/证明或问题/解答到笔记"""
+    path: str
+    pair_type: str  # theorem_proof | problem_solution
+    # 元素在配对列表中的索引
+    index: int
+    # 用户编辑后的定理/问题内容（raw）
+    primary_content: str
+    # 用户编辑后的证明/解答内容（raw）
+    secondary_content: str
+    # 原始配对信息（含 raw_start/raw_end 用于定位替换）
+    primary_raw_start: int
+    primary_raw_end: int
+    secondary_raw_start: int = -1
+    secondary_raw_end: int = -1
+    primary_elem_type: str = ""  # 定理类型（theorem/corollary/lemma/...）或 "problem"
 
 
 class AgentChatRequest(BaseModel):
@@ -373,60 +444,47 @@ def _get_all_auth_codes(config: dict) -> set:
     return codes
 
 async def check_auth(request: Request, config: dict) -> bool:
-    """鉴权检查：localhost 免检，无 auth_code/api_token 时远程也免检。
-    token 和 auth_code 是与逻辑：两者都配置时必须同时满足，只配置其一则只需满足那一个。"""
     client_host = request.client.host if request.client else "127.0.0.1"
+    # localhost 免检
     if client_host in ("127.0.0.1", "::1", "localhost"):
         return True
 
     api_token = config.get("api_token", "")
     auth_codes = _get_all_auth_codes(config)
 
-    # 没有任何授权要求时放行
+    # 如果未配置任何凭证，则放行
     if not api_token and not auth_codes:
         return True
 
-    # 检查 token
+    # --- 通用 Token 检查 ---
     token_ok = False
-    code_ok = False
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith(("Token ", "Bearer ")):
         token_val = auth_header.split(" ", 1)[1]
         if token_val == api_token and api_token:
             token_ok = True
-        # Token header 中的值也可匹配 auth_code（兼容旧 APK 或 file:// 场景）
-        if not token_ok and not api_token and auth_codes and token_val in auth_codes:
-            code_ok = True
+    # 兼容 query param
     if not token_ok and request.query_params.get("token") == api_token and api_token:
         token_ok = True
-    # query param token 也可匹配 auth_code（兼容旧前端 downloadFile）
-    if not token_ok and not api_token and request.query_params.get("token", "") in auth_codes:
-        code_ok = True
+    # 兼容 session cookie（如果 cookie 中存的是 token）
     if not token_ok:
         session_token = request.cookies.get("ts2_session", "")
         if session_token:
             sess_code = _get_session_code(session_token)
-            if sess_code:
-                if sess_code == api_token and api_token:
-                    token_ok = True
+            if sess_code and sess_code == api_token:
+                token_ok = True
 
-    # 检查 auth_code
+    # --- Code 检查（仅用于登录端点） ---
+    code_ok = False
     if auth_codes:
-        # Cookie session 中的 code 匹配
+        # 从 cookie 或 header 或 Basic 中提取 code
         session_token = request.cookies.get("ts2_session", "")
         if session_token:
             sess_code = _get_session_code(session_token)
             if sess_code and sess_code in auth_codes:
                 code_ok = True
-            # session 中已认证过工作区
-            if not code_ok:
-                sess = _sessions.get(session_token)
-                if sess and sess.get("authed"):
-                    code_ok = True
-        # X-Auth-Code header（前端 axios 拦截器注入，与 token 同时发送）
         if not code_ok and request.headers.get("x-auth-code", "") in auth_codes:
             code_ok = True
-        # Basic Auth
         if not code_ok and auth_header.startswith("Basic "):
             import base64
             try:
@@ -436,17 +494,28 @@ async def check_auth(request: Request, config: dict) -> bool:
             except Exception:
                 pass
 
-    # 与逻辑：两者都配置时必须都满足，只配置一则满足那一个即可
-    need_token = bool(api_token)
-    need_code = bool(auth_codes)
-    if need_token and need_code:
-        return token_ok and code_ok
-    if need_token:
+    # --- 根据路径决定鉴权策略 ---
+    path = request.url.path
+
+    # 登录端点：必须同时满足（与逻辑）
+    if path == "/api/system/loginAuth":
+        need_token = bool(api_token)
+        need_code = bool(auth_codes)
+        if need_token and need_code:
+            return token_ok and code_ok
+        if need_token:
+            return token_ok
+        if need_code:
+            return code_ok
+        return True
+
+    # 普通端点：仅验证 token（如果配置了 token）；否则退化为验证 code
+    if api_token:
         return token_ok
-    if need_code:
+    if auth_codes:
+        # 为了兼容旧逻辑，如果未配置 token，则使用 code
         return code_ok
     return True
-
 
 def _check_ws_auth(websocket: WebSocket, config: dict) -> bool:
     """WebSocket 鉴权：同 check_auth，但基于 WebSocket 的 query_params 和 cookies"""
@@ -548,26 +617,38 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     # 反射 Origin + credentials=True，methods/headers 用显式值（w3c 规范要求）
     @app.middleware("http")
     async def cors_middleware(request: Request, call_next):
+        # 获取 Origin
         origin = request.headers.get("origin", "")
+        # 判断是否为 file:// 或 null 来源
+        is_null_or_file = origin in ("null", "file://", "file:", "")
+        effective_origin = "*" if is_null_or_file else origin
+
+        # 无 Origin 直接放行（非浏览器请求）
         if not origin:
             return await call_next(request)
+
         methods = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
         headers = "Content-Type, Authorization, X-Auth-Code, X-Requested-With, Range, If-None-Match"
+
+        # OPTIONS 预检请求
         if request.method == "OPTIONS":
             resp = JSONResponse(content="")
-            resp.headers["Access-Control-Allow-Origin"] = origin
-            resp.headers["Access-Control-Allow-Credentials"] = "true"
+            resp.headers["Access-Control-Allow-Origin"] = effective_origin
+            if not is_null_or_file:
+                resp.headers["Access-Control-Allow-Credentials"] = "true"
             resp.headers["Access-Control-Allow-Methods"] = methods
             resp.headers["Access-Control-Allow-Headers"] = headers
             resp.headers["Access-Control-Max-Age"] = "86400"
             return resp
+
+        # 实际业务请求
         response = await call_next(request)
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Origin"] = effective_origin
+        if not is_null_or_file:
+            response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = methods
         response.headers["Access-Control-Allow-Headers"] = headers
         return response
-
     # GZip 压缩中间件
     app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -632,6 +713,8 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     # ─── 鉴权中间件（OPTIONS 已由 cors_middleware 在之前处理）──────
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
         path = request.url.path
         # 静态文件和非 API 路由直接放行（让前端页面能加载）
         if not path.startswith("/api/"):
@@ -847,6 +930,29 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
     def err(code: int = -1, msg: str = "") -> dict:
         return {"code": code, "msg": msg, "data": None}
+
+    # ─── note_analyzer / 间隔重复管理器初始化 ──────────────────
+    _note_analyzer_ready = False
+    _srm = None
+    try:
+        import sys as _sys
+        _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        if _project_root not in _sys.path:
+            _sys.path.insert(0, _project_root)
+        from note_analyzer import NoteAnalyzer, NoteElement, SpacedRepetitionManager, KnowledgeGraph, KnowledgeCategory
+        from pathlib import Path as _Path
+        _srm_data_path = _Path(os.path.join(workspace_dir, 'data', 'spaced_review_data.json'))
+        _srm = SpacedRepetitionManager(_srm_data_path)
+        _note_analyzer_ready = True
+        logger.info("note_analyzer loaded, SRM data: %s", _srm_data_path)
+    except Exception as _e:
+        logger.warning("note_analyzer import failed: %s", _e)
+
+    def _resolve_ws_path(rel_path: str) -> str:
+        """将相对路径解析为工作区绝对路径"""
+        if os.path.isabs(rel_path):
+            return rel_path
+        return os.path.join(workspace_dir, rel_path)
 
     # ─── Vue SPA 挂载（必须在 catch-all 路由之前）─────────────
     static_dir = Path(__file__).parent / "static"
@@ -1237,6 +1343,205 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         engine: FileSyncEngine = app.state.sync_engine
         results = await _run_file(engine.search_files, req.query, req.subdir)
         return ok(data=[e.to_dict() for e in results])
+
+    @app.post("/api/file/stat")
+    async def file_stat(req: FileReadRequest):
+        """返回文件元信息（mtimeMs/size/exists），供 texpile 等编辑器使用"""
+        if not check_path_access(req.path, "read"):
+            return err(403, "路径不在允许的读取目录中")
+        engine: FileSyncEngine = app.state.sync_engine
+        # 复用 get_file，但只取元信息不读 content（开销略高但实现简单）
+        result = await _run_file(engine.get_file, req.path)
+        if result is None:
+            return ok(data={"exists": False, "mtimeMs": 0, "size": 0})
+        _content, entry = result
+        return ok(data={
+            "exists": True,
+            "mtimeMs": int(entry.modified * 1000),
+            "size": entry.size,
+        })
+
+    # ─── Texpile LaTeX 编译 API（可拔插）───────────────────────
+    # 集成模式下，TS2 后端代替 Electron 主进程：
+    #   /api/texpile/compile  → draft 引擎全量编译（lualatex + shipout 钩子提取 records）
+    #   /api/texpile/typeset  → draft daemon 单段排版（常驻 lualatex，~1-2ms/段）
+    #   /api/texpile/stop     → 终止所有运行中的编译/daemon
+    #   /api/texpile/synctex  → SyncTeX 源↔PDF 跳转（调用 synctex CLI）
+    # Lua 提取脚本位于 mcp/server/draft/（walker.lua / page-extract.lua / texd-loop.lua），
+    # 原样从 texpile 原版 electron/lua/ 复制，未做修改。
+
+    import asyncio.subprocess as _asub  # noqa: F401  确保 asyncio.subprocess 加载
+    import time as _time_texpile
+    from .draft import compile_draft, typeset_paragraph, stop_draft, get_engine_dir
+
+    def _resolve_main_file(engine_sync: "FileSyncEngine", root_abs: Path, main_file: str) -> Path:
+        """把 texpile 传来的 mainFile 解析成绝对路径。
+
+        texpile 前端始终发送 **相对 root** 的 mainFile（源码 Cu(mainFile, root)），
+        对嵌套项目（tex 位于 root 的子目录）也是如此，例如 root='Notes'、
+        mainFile='chapters/main.tex'。因此一律按 root_abs / main_file 解析，
+        绝不当作相对 workspace 的路径处理（否则子目录场景会找错目录，
+        导致 lualatex "在当前目录找不到 tex 文件"）。
+        仅当 mainFile 本身是绝对路径时才直接使用。
+        """
+        mf = (main_file or "").replace("\\", "/").lstrip("/")
+        p = Path(main_file)
+        if p.is_absolute():
+            return p.resolve()
+        return (root_abs / mf).resolve()
+
+    @app.post("/api/texpile/compile")
+    async def texpile_compile(req: Request):
+        """Draft 全量编译：调 lualatex + shipout 钩子提取每页 records。
+        Body: { root, mainFile, engine? }
+        返回 DraftResult: { ok, ms, passes, count, paperW, paperH, colW, marginX, marginY, pages }
+        或 { ok:false, error, ms, log?, superseded? }
+        """
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        root = body.get("root") or ""
+        main_file = body.get("mainFile") or ""
+        engine = body.get("engine") or "lualatex"
+
+        if not root or not main_file:
+            return err(msg="root and mainFile are required")
+
+        # 先解析成绝对路径再鉴权：root 是相对 workspace 的路径，
+        # check_path_access 直接对相对路径 resolve() 会用服务端 cwd，可能误判。
+        engine_sync: FileSyncEngine = app.state.sync_engine
+        root_abs = engine_sync._absolute_path(root)
+        if not check_path_access(str(root_abs), "read") or not check_path_access(str(root_abs), "write"):
+            return err(403, "工作目录不在允许的访问范围内")
+        if not root_abs.exists() or not root_abs.is_dir():
+            return err(msg=f"工作目录不存在: {root}")
+
+        # texpile 始终发送相对 root 的 mainFile（前端 Cu(mainFile, root) 计算），
+        # 故一律按 root_abs / main_file 解析；仅在绝对路径时才直接使用。
+        main_abs = _resolve_main_file(engine_sync, root_abs, main_file)
+        if not main_abs.exists():
+            return err(msg=f"主文件不存在: {main_file}")
+
+        # draft 模块需要 root 的绝对路径，main_file 相对 root
+        try:
+            main_rel = str(main_abs.relative_to(root_abs)).replace("\\", "/")
+        except ValueError:
+            main_rel = main_file.replace("\\", "/")
+
+        try:
+            result = await compile_draft(
+                root=str(root_abs),
+                main_file=main_rel,
+                engine=engine,
+                engine_dir=get_engine_dir(),
+            )
+            return ok(data=result)
+        except Exception as e:
+            return ok(data={"ok": False, "error": str(e), "ms": 0})
+
+    @app.post("/api/texpile/stop")
+    async def texpile_stop():
+        """终止运行中的 draft 编译和 daemon。"""
+        try:
+            result = await stop_draft()
+            return ok(data=result)
+        except Exception as e:
+            return ok(data={"ok": False, "error": str(e)})
+
+    @app.post("/api/texpile/synctex")
+    async def texpile_synctex(req: Request):
+        """SyncTeX 转发：源↔PDF 跳转。调用系统 synctex CLI。
+        Body: { root, file, line, side?: 'src'|'pdf', pdf? }
+        返回: { ok, output?, page?, x?, y?, file?, line?, column? }
+        """
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        root = body.get("root") or ""
+        if not root or not check_path_access(root, "read"):
+            return err(403, "工作目录不在允许的访问范围内")
+        engine_sync: FileSyncEngine = app.state.sync_engine
+        root_abs = engine_sync._absolute_path(root)
+        synctex_path = root_abs / "_draft" / "draft.synctex.gz"
+        if not synctex_path.exists():
+            # fallback: output/draft.synctex.gz
+            synctex_path = root_abs / "output" / "draft.synctex.gz"
+        if not synctex_path.exists():
+            return ok(data={"ok": False, "error": "synctex 文件不存在（请先编译）"})
+
+        side = body.get("side") or "src"
+        try:
+            if side == "src":
+                # 源 → PDF：synctex view -i line:col:file -o output.pdf -d synctex
+                file_abs = engine_sync._absolute_path(body.get("file") or "")
+                line = int(body.get("line") or 1)
+                col = int(body.get("column") or 0)
+                args = ["view", "-i", f"{line}:{col}:{file_abs}", "-o",
+                        str(root_abs / "_draft" / "draft.pdf")]
+            else:
+                # PDF → 源：synctex edit -o page:x:y:file.pdf
+                page = int(body.get("page") or 1)
+                x = float(body.get("x") or 0)
+                y = float(body.get("y") or 0)
+                args = ["edit", "-o", f"{page}:{x}:{y}:{root_abs / '_draft' / 'draft.pdf'}"]
+            proc = await asyncio.create_subprocess_exec(
+                "synctex", *args, "-d", str(root_abs / "_draft"),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=10)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return ok(data={"ok": False, "error": "synctex 超时"})
+            output = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
+            return ok(data={"ok": proc.returncode == 0, "output": output})
+        except FileNotFoundError:
+            return ok(data={"ok": False, "error": "synctex 未安装（请安装 TeX Live / MiKTeX）"})
+        except Exception as e:
+            return ok(data={"ok": False, "error": str(e)})
+
+    @app.post("/api/texpile/typeset")
+    async def texpile_typeset(req: Request):
+        """增量段落排版（draft daemon）。常驻 lualatex 进程，单段 ~1-2ms。
+        Body: { root, mainFile, text, hsize? }
+        返回 ParagraphResult: { ok, records, stats, hsize, textheight }
+        """
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        root = body.get("root") or ""
+        main_file = body.get("mainFile") or ""
+        text = body.get("text") or ""
+        hsize = body.get("hsize")
+
+        if not root or not main_file:
+            return err(msg="root and mainFile are required")
+        engine_sync: FileSyncEngine = app.state.sync_engine
+        root_abs = engine_sync._absolute_path(root)
+        if not check_path_access(str(root_abs), "read"):
+            return err(403, "工作目录不在允许的访问范围内")
+        # texpile 始终发送相对 root 的 mainFile（见 texpile Cu(mainFile, root)）
+        main_abs = _resolve_main_file(engine_sync, root_abs, main_file)
+        try:
+            main_rel = str(main_abs.relative_to(root_abs)).replace("\\", "/")
+        except ValueError:
+            main_rel = main_file.replace("\\", "/")
+
+        try:
+            result = await typeset_paragraph(
+                root=str(root_abs),
+                main_file=main_rel,
+                text=text,
+                hsize=hsize,
+                engine_dir=get_engine_dir(),
+            )
+            return ok(data=result)
+        except Exception as e:
+            return ok(data={"ok": False, "error": str(e)})
 
     # ─── 文件下载 API ───────────────────────────────────────
 
@@ -1841,7 +2146,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
     @app.websocket("/api/terminal")
     async def terminal_ws(websocket: WebSocket):
-        """xterm.js 终端 WebSocket — 桥接 shell stdio（使用 PTY 支持交互式 shell）"""
+        """xterm.js 终端 WebSocket — 桥接 shell stdio（使用 PTY 支持交互式 shell）
+
+        Query params:
+            cwd: 工作目录（绝对路径或相对 workspace_dir 的路径，可选）
+            cols/rows: 初始 PTY 尺寸（可选，默认 100x30）
+        """
         # 鉴权检查
         config = load_api_config()
         if not _check_ws_auth(websocket, config):
@@ -1850,6 +2160,28 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
         await websocket.accept()
         loop = asyncio.get_event_loop()
+
+        # ── 解析 cwd（支持 texpile 在工作目录启 shell）──
+        cwd_param = websocket.query_params.get("cwd", "").strip()
+        cwd_abs: Optional[Path] = None
+        if cwd_param:
+            try:
+                engine: FileSyncEngine = app.state.sync_engine
+                cwd_abs = engine._absolute_path(cwd_param)
+                # 如果路径已经是绝对路径且存在，直接用
+                if not cwd_abs.exists() or not cwd_abs.is_dir():
+                    p = Path(cwd_param)
+                    if p.is_absolute() and p.exists() and p.is_dir():
+                        cwd_abs = p
+                    else:
+                        cwd_abs = None
+            except Exception:
+                # 退化：尝试当绝对路径用
+                p = Path(cwd_param)
+                if p.is_absolute() and p.exists() and p.is_dir():
+                    cwd_abs = p
+                else:
+                    cwd_abs = None
 
         # ── 检测 conda 环境 ──
         conda_prefix = os.environ.get("CONDA_PREFIX", "")
@@ -1866,12 +2198,24 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             condabin_dir = os.path.join(conda_base, "condabin")
             proc_env["PATH"] = f"{scripts_dir};{condabin_dir};{proc_env.get('PATH', '')}"
 
+        # 工作目录：优先用 cwd_param，否则用 workspace_dir
+        spawn_cwd = str(cwd_abs) if cwd_abs else str(app.state.workspace_dir)
+
         # ── 尝试 PTY 路径 ──
+        # 初始尺寸：texpileTerminal spawn 时传入 cols/rows；xterm.js 端用默认值
+        try:
+            init_cols = int(websocket.query_params.get("cols", "100"))
+            init_rows = int(websocket.query_params.get("rows", "30"))
+        except Exception:
+            init_cols, init_rows = 100, 30
+        if init_cols < 1 or init_rows < 1:
+            init_cols, init_rows = 100, 30
+
         import winpty as _winpty
         pty = None
         def _create_pty():
-            p = _winpty.PTY(100, 30)
-            p.spawn(shell)
+            p = _winpty.PTY(init_cols, init_rows)
+            p.spawn(shell, cwd=spawn_cwd, env=proc_env)
             return p
         try:
             pty = await loop.run_in_executor(None, _create_pty)
@@ -1881,6 +2225,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         if pty is not None:
             async def _run(method, *args):
                 return await loop.run_in_executor(None, getattr(pty, method), *args)
+
+            # 第一条消息：告知前端 shell 名（texpile 用来选 sentinel 语法）
+            try:
+                await websocket.send_text("__shell__:" + shell)
+            except Exception:
+                pass
 
             async def read_pty():
                 while True:
@@ -1932,7 +2282,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=app.state.workspace_dir,
+                cwd=spawn_cwd,
                 env=proc_env,
             )
         except FileNotFoundError:
@@ -1942,9 +2292,15 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=app.state.workspace_dir,
+                cwd=spawn_cwd,
                 env=proc_env,
             )
+
+        # 第一条消息：告知前端 shell 名（fallback 路径也要告知）
+        try:
+            await websocket.send_text("__shell__:" + shell)
+        except Exception:
+            pass
 
         async def read_proc():
             while True:
@@ -2426,6 +2782,30 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         data = await _run_data(_read_bookmarks_data, app.state.workspace_dir)
         return ok(data=data)
 
+    @app.post("/api/data/bookmarks/add")
+    async def data_bookmarks_add(req: BookmarkAddRequest):
+        """添加书签"""
+        bookmark = {
+            "name": req.name,
+            "url": req.url,
+            "category": req.category,
+            "icon": req.icon or "🔖",
+            "color": "#3498db",
+            "children": [],
+        }
+        result, error = await _run_data(_add_bookmark_data, app.state.workspace_dir, bookmark)
+        if error:
+            return err(msg=error)
+        return ok(data=result)
+
+    @app.post("/api/data/bookmarks/delete")
+    async def data_bookmarks_delete(req: BookmarkDeleteRequest):
+        """删除书签"""
+        result, error = await _run_data(_delete_bookmark_data, app.state.workspace_dir, req.id)
+        if error:
+            return err(msg=error)
+        return ok(data={"id": req.id})
+
     @app.post("/api/data/projects")
     async def data_projects(request: Request):
         """获取项目列表"""
@@ -2548,6 +2928,133 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             return ok(data={"files": all_files, "courses": courses})
         except Exception as e:
             return ok(data={"files": [], "courses": [], "error": str(e)})
+
+    # ─── Bilibili 代理（浏览器端绕过 CORS） ─────────────────────
+
+    class BiliProxyRequest(BaseModel):
+        url: str
+        method: str = "GET"
+        headers: Dict[str, str] = {}
+        body: Optional[str] = None
+
+    @app.post("/api/extractor/biliProxy")
+    @app.get("/api/extractor/biliProxy")
+    async def bili_proxy(req: Optional[BiliProxyRequest] = None, url: str = "", method: str = "GET"):
+        """代理 Bilibili API 请求，解决浏览器 CORS 限制"""
+        import httpx
+        target = req.url if req else url
+        if not target:
+            return err(msg="Missing 'url' parameter")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com",
+            "Origin": "https://www.bilibili.com",
+        }
+        if req and req.headers:
+            headers.update(req.headers)
+        http_method = (req.method if req else method).upper()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                if http_method == "POST":
+                    resp = await client.post(target, headers=headers, content=req.body if req else None)
+                else:
+                    resp = await client.get(target, headers=headers)
+                try:
+                    return JSONResponse(content=resp.json())
+                except Exception:
+                    return JSONResponse(content={"code": -1, "msg": f"Non-JSON response: {resp.text[:500]}", "data": None})
+            except Exception as e:
+                return err(msg=f"Bilibili proxy failed: {e}")
+
+    @app.get("/api/extractor/imageProxy")
+    async def image_proxy(url: str = ""):
+        """代理 Bilibili 图片，解决浏览器 CORS/Referer 限制"""
+        if not url:
+            return JSONResponse(content={"error": "Missing url"}, status_code=400)
+        import httpx
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                resp = await client.get(url, headers=headers)
+                content_type = resp.headers.get("content-type", "image/webp")
+                return Response(content=resp.content, media_type=content_type)
+            except Exception as e:
+                return JSONResponse(content={"error": str(e)}, status_code=502)
+
+    @app.get("/api/browser/proxy")
+    async def browser_proxy(url: str = ""):
+        """代理网页浏览，绕过 X-Frame-Options 限制"""
+        if not url:
+            return HTMLResponse(content="<html><body>错误：缺少 url 参数</body></html>", status_code=200)
+        import httpx
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=False) as client:
+            try:
+                resp = await client.get(url, headers=headers)
+                ct = resp.headers.get("content-type", "").lower()
+                if "text/html" in ct or "application/xhtml" in ct:
+                    body = resp.text
+                    base_tag = f'<base href="{url}">'
+                    # 移除常见 frame-busting 脚本
+                    body = re.sub(
+                        r'<script[^>]*>[\s\S]*?(?:'
+                        r'window\.top\s*(?:!==?|!=)\s*window|'
+                        r'top\s*(?:!==?|!=)\s*self|'
+                        r'(?:self|window)\s*(?:!==?|!=)\s*top|'
+                        r'top\.location\s*[=.]|'
+                        r'parent\.location\s*[=.]|'
+                        r'window\.top\.location\s*[=.]|'
+                        r'top\[[\'"]location[\'"]\]\s*[=.]|'
+                        r'parent\[[\'"]location[\'"]\]\s*[=.]'
+                        r')[\s\S]*?</script>',
+                        '<script>/*fb-stripped*/</script>',
+                        body,
+                        flags=re.IGNORECASE,
+                        count=30
+                    )
+                    proxy_inject = (
+                        '<script>'
+                        '(function(){'
+                        'var P="/api/browser/proxy?url=";'
+                        'document.addEventListener("click",function(e){'
+                        'var a=e.target.closest("a");'
+                        'if(a&&a.href&&!a.href.startsWith(P)&&a.target!=="_blank"){'
+                        'e.preventDefault();'
+                        'window.location.href=P+encodeURIComponent(a.href);'
+                        '}'
+                        '});'
+                        'document.addEventListener("submit",function(e){'
+                        'var f=e.target;'
+                        'if(f&&f.action&&!f.action.startsWith(P)){'
+                        'e.preventDefault();'
+                        'var fd=new FormData(f);var q=[];'
+                        'fd.forEach(function(v,k){q.push(encodeURIComponent(k)+"="+encodeURIComponent(v));});'
+                        'var sep=f.action.includes("?")?"&":"?";'
+                        'window.location.href=P+encodeURIComponent(f.action+sep+q.join("&"));'
+                        '}'
+                        '});'
+                        '})();'
+                        '</script>'
+                    )
+                    if "<head>" in body:
+                        body = body.replace("<head>", f"<head>{base_tag}{proxy_inject}", 1)
+                    elif "<html>" in body:
+                        body = body.replace("<html>", f"<html><head>{base_tag}{proxy_inject}</head>", 1)
+                    else:
+                        body = f"<head>{base_tag}{proxy_inject}</head>{body}"
+                    return HTMLResponse(content=body, status_code=200)
+                else:
+                    return Response(content=resp.content, media_type=ct or "application/octet-stream", status_code=200)
+            except Exception as e:
+                err_html = f"<html><body>代理错误：{str(e)}</body></html>"
+                return HTMLResponse(content=err_html, status_code=200)
 
     @app.post("/api/data/courses")
     async def data_courses():
@@ -3627,8 +4134,10 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     def _get_push_dashboard(workspace_dir: str):
         """聚合推送数据：待办任务、待复习课程、课程资源更新、近期截止任务"""
         result = {
-            "due_tasks": [],        # 近期截止的任务
+            "due_tasks": [],        # 近期截止的任务（今日或3天内）
             "overdue_tasks": [],    # 已超期的任务
+            "in_progress_tasks": [],# 进行中的任务（截止日较远或无截止日）
+            "pending_tasks": [],    # 其他待办任务
             "due_reviews": [],      # 待复习课时
             "recent_resources": [], # 最近添加的课程资源
             "today_stats": {},      # 今日统计
@@ -3643,35 +4152,52 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             try:
                 tasks = _json_loads(tb_path.read_text(encoding="utf-8"))
                 if isinstance(tasks, list):
+                    _changed = False
                     for task in tasks:
                         status = task.get("status", "")
                         if status in ("已完成", "done", "completed"):
                             continue
+                        # 已过开始时间但状态仍为"待办"的，自动改为"进行中"
+                        start_time = task.get("start_time", "")
+                        if status == "待办" and start_time and start_time <= today:
+                            status = "进行中"
+                            task["status"] = "进行中"
+                            _changed = True
                         due_date = task.get("due_date", "")
                         if due_date:
+                            _task_base = {
+                                "id": task.get("id", ""),
+                                "title": task.get("title", ""),
+                                "due_date": due_date,
+                                "priority": task.get("priority", "中"),
+                                "start_time": task.get("start_time", ""),
+                                "duration": task.get("duration", 0),
+                            }
                             if due_date < today:
-                                result["overdue_tasks"].append({
-                                    "id": task.get("id", ""),
-                                    "title": task.get("title", ""),
-                                    "due_date": due_date,
-                                    "priority": task.get("priority", "中"),
-                                    "overdue_days": (datetime.date.today() - datetime.date.fromisoformat(due_date)).days if len(due_date) == 10 else 0,
-                                })
+                                _task_base["overdue_days"] = (datetime.date.today() - datetime.date.fromisoformat(due_date)).days if len(due_date) == 10 else 0
+                                result["overdue_tasks"].append(_task_base)
                             elif due_date <= today:
-                                result["due_tasks"].append({
-                                    "id": task.get("id", ""),
-                                    "title": task.get("title", ""),
-                                    "due_date": due_date,
-                                    "priority": task.get("priority", "中"),
-                                })
-                            # 未来3天内截止
+                                result["due_tasks"].append(_task_base)
                             elif due_date <= (datetime.date.today() + datetime.timedelta(days=3)).isoformat():
-                                result["due_tasks"].append({
-                                    "id": task.get("id", ""),
-                                    "title": task.get("title", ""),
-                                    "due_date": due_date,
-                                    "priority": task.get("priority", "中"),
-                                })
+                                result["due_tasks"].append(_task_base)
+                            else:
+                                target = "in_progress_tasks" if status == "进行中" else "pending_tasks"
+                                result[target].append(_task_base)
+                        else:
+                            target = "in_progress_tasks" if status == "进行中" else "pending_tasks"
+                            result[target].append({
+                                "id": task.get("id", ""),
+                                "title": task.get("title", ""),
+                                "due_date": "",
+                                "priority": task.get("priority", "中"),
+                                "start_time": task.get("start_time", ""),
+                                "duration": task.get("duration", 0),
+                            })
+                    if _changed:
+                        try:
+                            tb_path.write_text(_json_dumps(tasks), encoding="utf-8")
+                        except Exception as e:
+                            logger.warning(f"Push dashboard: write tasks failed: {e}")
             except Exception as e:
                 logger.warning(f"Push dashboard: read tasks failed: {e}")
 
@@ -3732,6 +4258,8 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         result["today_stats"] = {
             "overdue_tasks_count": len(result["overdue_tasks"]),
             "due_tasks_count": len(result["due_tasks"]),
+            "in_progress_tasks_count": len(result["in_progress_tasks"]),
+            "pending_tasks_count": len(result["pending_tasks"]),
             "due_reviews_count": len(result["due_reviews"]),
         }
 
@@ -5245,6 +5773,567 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # ─── 静态资源禁用浏览器强缓存（开发期避免加载到旧的 app.js / index.html）────
+    @app.middleware("http")
+    async def _no_cache_static(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    # ─── SaberSystem 路由挂载（必须在 SPA fallback 之前）──────────────
+    try:
+        from mcp.server.saber.api import create_saber_router
+        app.include_router(create_saber_router())
+    except Exception as _e:
+        # SaberSystem 模块加载失败不应阻断主应用启动
+        pass
+
+    # ─── 笔记分析 & 间隔重复 API（必须在 SPA fallback 之前）──────────
+    @app.post("/api/data/notes/analyze")
+    async def notes_analyze(req: NoteAnalyzeRequest):
+        """分析笔记：解析 :::env 环境，自动分类，提取三元组"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        full_path = _resolve_ws_path(req.path)
+        if not os.path.exists(full_path):
+            return err(msg="笔记文件不存在: " + req.path)
+        try:
+            from pathlib import Path as _P
+            elements = await _run_data(NoteAnalyzer.extract_from_file, _P(full_path), req.course_id, req.lesson_num)
+            NoteAnalyzer.auto_classify_elements(elements)
+            NoteAnalyzer.auto_extract_triples(elements)
+            by_type = {}
+            by_category = {}
+            for e in elements:
+                by_type[e.elem_type] = by_type.get(e.elem_type, 0) + 1
+                for c in (e.categories or []):
+                    by_category[c] = by_category.get(c, 0) + 1
+            return ok(data={
+                "elements": [e.to_dict() for e in elements],
+                "stats": {"total": len(elements), "by_type": by_type, "by_category": by_category}
+            })
+        except Exception as e:
+            return err(msg=f"分析失败: {e}")
+
+    @app.post("/api/data/notes/fill-blank")
+    async def notes_fill_blank(req: FillBlankRequest):
+        """生成填空题"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        try:
+            masked, answers, full = NoteAnalyzer.generate_fill_in_blank(req.content)
+            # 将 ___ 替换为 ◆BLANK_N◆ 占位符，避免破坏 LaTeX/Markdown 语法
+            import re
+            _counter = [0]
+            def _ph(m):
+                r = f"◆BLANK{_counter[0]}◆"
+                _counter[0] += 1
+                return r
+            masked = re.sub(r'___', _ph, masked)
+            # 修复被 ◆BLANK 破坏的 LaTeX 公式：移除孤立的 $ 定界符
+            # 例如 $E=◆BLANK_0◆$ → E=◆BLANK_0◆（占位符作为普通文本）
+            masked = re.sub(r'\$\$([^$]*◆BLANK[^$]*)\$\$', r'\1', masked)
+            masked = re.sub(r'\$([^$]*◆BLANK[^$]*)\$', r'\1', masked)
+            masked = re.sub(r'\\\[([^\\]*◆BLANK[^\\]*)\\\]', r'\1', masked)
+            masked = re.sub(r'\\\(([^\\]*◆BLANK[^\\]*)\\\)', r'\1', masked)
+            return ok(data={"masked_text": masked, "answers": answers, "full_text": full})
+        except Exception as e:
+            return err(msg=f"生成填空失败: {e}")
+
+    @app.post("/api/data/notes/pairs")
+    async def notes_pairs(req: NotePairsRequest):
+        """获取笔记中定理-证明 / 问题-解答配对"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        full_path = _resolve_ws_path(req.path)
+        if not os.path.exists(full_path):
+            return err(msg="笔记文件不存在: " + req.path)
+        try:
+            from pathlib import Path as _P
+            elements = await _run_data(NoteAnalyzer.extract_from_file, _P(full_path), req.course_id, req.lesson_num)
+            if req.pair_type == "problem_solution":
+                pairs = NoteAnalyzer.find_problem_solution_pair(elements)
+            else:
+                pairs = NoteAnalyzer.find_theorem_proof_pair(elements)
+            # 序列化（包含 raw_start/raw_end 供后续保存定位）
+            pair_list = []
+            for primary, secondary in pairs:
+                pair_list.append({
+                    "primary": primary.to_dict(include_raw_pos=True),
+                    "secondary": secondary.to_dict(include_raw_pos=True) if secondary else None,
+                })
+            return ok(data={"pairs": pair_list, "total": len(pair_list)})
+        except Exception as e:
+            return err(msg=f"获取配对失败: {e}")
+
+    @app.post("/api/data/notes/pairs/save")
+    async def notes_pairs_save(req: NotePairSaveRequest):
+        """重读写入定理/证明 或 问题/解答到笔记文件"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        full_path = _resolve_ws_path(req.path)
+        if not os.path.exists(full_path):
+            return err(msg="笔记文件不存在: " + req.path)
+        try:
+            from pathlib import Path as _P
+            path = _P(full_path)
+            note_content = path.read_text(encoding="utf-8")
+
+            # 决定环境类型标签
+            if req.pair_type == "problem_solution":
+                primary_tag = "problem"
+                secondary_tag = "solution"
+            else:
+                # 定理类：用原始 elem_type（theorem/corollary/lemma/...）
+                primary_tag = req.primary_elem_type or "theorem"
+                secondary_tag = "proof"
+
+            primary_env = f"::: {primary_tag}\n{req.primary_content}\n:::"
+            has_secondary = bool(req.secondary_content and req.secondary_content.strip())
+
+            start_replace = req.primary_raw_start
+            if req.secondary_raw_start >= 0 and req.secondary_raw_end >= 0:
+                # 已有证明/解答段落
+                if has_secondary:
+                    # 替换从 primary 开始到 secondary 结束的整段
+                    end_replace = req.secondary_raw_end
+                    combined_env = primary_env + "\n\n" + f"::: {secondary_tag}\n{req.secondary_content}\n:::"
+                    new_content = note_content[:start_replace] + combined_env + note_content[end_replace:]
+                else:
+                    # secondary 为空：只替换 primary 部分，保留原 secondary 不变
+                    end_replace = req.primary_raw_end
+                    new_content = note_content[:start_replace] + primary_env + note_content[end_replace:]
+            else:
+                # 无旧证明/解答
+                if has_secondary:
+                    # 替换 primary 自身，然后在其后插入 secondary
+                    end_replace = req.primary_raw_end
+                    temp_content = note_content[:start_replace] + primary_env + note_content[end_replace:]
+                    insert_pos = start_replace + len(primary_env)
+                    new_content = temp_content[:insert_pos] + "\n\n" + f"::: {secondary_tag}\n{req.secondary_content}\n:::" + temp_content[insert_pos:]
+                else:
+                    # 只替换 primary
+                    end_replace = req.primary_raw_end
+                    new_content = note_content[:start_replace] + primary_env + note_content[end_replace:]
+
+            path.write_text(new_content, encoding="utf-8")
+            return ok(data={"saved": True, "length": len(new_content)})
+        except Exception as e:
+            return err(msg=f"保存失败: {e}")
+
+    # ─── 课程级聚合分析（持久化 + 增量更新） ─────────────────────────
+    def _course_analysis_path(workspace_dir: str, course_id: str) -> str:
+        """课程聚合分析的持久化路径"""
+        safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in course_id)[:80] or "unknown"
+        return os.path.join(workspace_dir, "data", f"course_analysis_{safe_id}.json")
+
+    def _resolve_course_note_path(workspace_dir: str, course: dict, lesson: dict) -> str:
+        """复刻前端 getNotePath 逻辑生成笔记路径"""
+        title = course.get("course_title") or course.get("title") or "unknown"
+        safe_title = "".join(c if c not in '\\/:*?"<>|' else "_" for c in title)[:40]
+        lnum = lesson.get("lesson_number")
+        if lnum is None:
+            lnum = lesson.get("number")
+        if lnum is None:
+            lnum = 1
+        raw_title = lesson.get("lesson_title") or lesson.get("title") or ""
+        import re as _re
+        ltitle = _re.sub(r'^L\d+[_\s]*', '', raw_title, flags=_re.IGNORECASE)
+        safe_ltitle = "".join(c if c not in '\\/:*?"<>|' else "_" for c in ltitle)[:30]
+        num_str = str(lnum).zfill(2)
+        fn = f"L{num_str}_{safe_ltitle}.Rmd" if safe_ltitle else f"L{num_str}.Rmd"
+        return os.path.join(workspace_dir, "Notes", safe_title, fn)
+
+    def _scan_course_note_paths(workspace_dir: str, course: dict) -> list:
+        """扫描课程目录下所有 L*.Rmd 笔记，返回 [{path, lesson_number, lesson_title}]"""
+        title = course.get("course_title") or course.get("title") or "unknown"
+        safe_title = "".join(c if c not in '\\/:*?"<>|' else "_" for c in title)[:40]
+        notes_dir = os.path.join(workspace_dir, "Notes", safe_title)
+        result = []
+        if not os.path.isdir(notes_dir):
+            return result
+        import re as _re
+        for name in sorted(os.listdir(notes_dir)):
+            if not name.lower().endswith(".rmd"):
+                continue
+            m = _re.match(r'L(\d+)', name, _re.IGNORECASE)
+            if not m:
+                continue
+            lnum = int(m.group(1))
+            ltitle = _re.sub(r'^L\d+[_\s]*', '', os.path.splitext(name)[0], flags=_re.IGNORECASE)
+            result.append({
+                "path": os.path.join(notes_dir, name),
+                "rel_path": f"Notes/{safe_title}/{name}",
+                "lesson_number": lnum,
+                "lesson_title": ltitle
+            })
+        return result
+
+    @app.post("/api/data/courses/{course_id}/analyze-all")
+    async def course_analyze_all(course_id: str):
+        """触发课程级聚合分析（增量更新，返回最新已持久化的结果）"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+
+        # 复用 _read_courses_data（多源合并，同 /api/data/courses 逻辑）
+        data = _read_courses_data(workspace_dir)
+        courses = data.get("courses", [])
+        course = None
+        for c in courses:
+            cid = c.get("note_id") or c.get("id") or c.get("_id") or c.get("course_title") or ""
+            if str(cid) == str(course_id):
+                course = c
+                break
+        if not course:
+            return err(msg="课程未找到: " + course_id)
+        course_title = course.get("course_title") or course.get("title") or ""
+        note_files = _scan_course_note_paths(workspace_dir, course)
+        try:
+            # 读取已持久化的旧数据（用于增量对比）
+            cache_path = _course_analysis_path(workspace_dir, course_id)
+            old_cache = {}
+            if os.path.exists(cache_path):
+                try:
+                    old_cache = _json_loads(Path(cache_path).read_text(encoding="utf-8"))
+                except Exception:
+                    old_cache = {}
+
+            # 增量分析：仅对新增/修改过的笔记重新分析
+            import time as _time
+            lesson_results = old_cache.get("lessons", {}) if isinstance(old_cache, dict) else {}
+            new_lessons = {}
+            stats = {"total_elements": 0, "by_type": {}, "by_category": {}, "by_lesson": {}}
+            analyzed_count = 0
+            skipped_count = 0
+            for nf in note_files:
+                full_path = nf["path"]
+                try:
+                    mtime = os.path.getmtime(full_path)
+                except Exception:
+                    mtime = 0
+                cache_key = nf["rel_path"]
+                old_entry = lesson_results.get(cache_key)
+                # 若文件未修改且已有缓存，直接复用
+                if old_entry and old_entry.get("mtime") == mtime and old_entry.get("elements"):
+                    new_lessons[cache_key] = old_entry
+                    skipped_count += 1
+                else:
+                    # 重新分析
+                    try:
+                        elements = await _run_data(
+                            NoteAnalyzer.extract_from_file,
+                            _Path(full_path),
+                            course_id,
+                            nf["lesson_number"]
+                        )
+                        NoteAnalyzer.auto_classify_elements(elements)
+                        NoteAnalyzer.auto_extract_triples(elements)
+                        new_lessons[cache_key] = {
+                            "lesson_number": nf["lesson_number"],
+                            "lesson_title": nf["lesson_title"],
+                            "path": nf["rel_path"],
+                            "mtime": mtime,
+                            "analyzed_at": _time.time(),
+                            "elements": [e.to_dict() for e in elements],
+                            "count": len(elements)
+                        }
+                        analyzed_count += 1
+                    except Exception as e:
+                        new_lessons[cache_key] = {
+                            "lesson_number": nf["lesson_number"],
+                            "lesson_title": nf["lesson_title"],
+                            "path": nf["rel_path"],
+                            "mtime": mtime,
+                            "error": str(e),
+                            "elements": [],
+                            "count": 0
+                        }
+
+            # 汇总统计
+            for lkey, ldata in new_lessons.items():
+                cnt = ldata.get("count", 0)
+                stats["total_elements"] += cnt
+                stats["by_lesson"][str(ldata.get("lesson_number", "?"))] = cnt
+                for e in ldata.get("elements", []):
+                    t = e.get("type", "unknown")
+                    stats["by_type"][t] = stats["by_type"].get(t, 0) + 1
+                    for c in e.get("categories", []):
+                        stats["by_category"][c] = stats["by_category"].get(c, 0) + 1
+
+            cache_data = {
+                "course_id": course_id,
+                "course_title": course_title,
+                "updated_at": _time.time(),
+                "lessons": new_lessons,
+                "stats": stats,
+                "lesson_count": len(note_files),
+                "analyzed_count": analyzed_count,
+                "skipped_count": skipped_count
+            }
+
+            # 持久化
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                Path(cache_path).write_text(
+                    json.dumps(cache_data, ensure_ascii=False, indent=2),
+                    encoding="utf-8"
+                )
+            except Exception as e:
+                logger.warning("持久化课程分析失败: %s", e)
+
+            return ok(data=cache_data)
+        except Exception as e:
+            return err(msg=f"课程聚合分析失败: {e}")
+
+    @app.get("/api/data/courses/{course_id}/analysis")
+    async def course_analysis_get(course_id: str):
+        """读取已持久化的课程聚合分析数据"""
+        cache_path = _course_analysis_path(workspace_dir, course_id)
+        if not os.path.exists(cache_path):
+            return ok(data={"cached": False, "lessons": {}, "stats": {"total_elements": 0, "by_type": {}, "by_category": {}, "by_lesson": {}}})
+        try:
+            cache = _json_loads(Path(cache_path).read_text(encoding="utf-8"))
+            cache["cached"] = True
+            return ok(data=cache)
+        except Exception as e:
+            return err(msg=f"读取课程分析数据失败: {e}")
+
+    @app.get("/api/data/courses/{course_id}/analysis-data")
+    async def course_analysis_data(course_id: str):
+        """课程级笔记分析：从持久化缓存中提取所有课时元素并展平"""
+        cache_path = _course_analysis_path(workspace_dir, course_id)
+        if not os.path.exists(cache_path):
+            return err(msg="请先运行课程聚合分析")
+        try:
+            cache = _json_loads(Path(cache_path).read_text(encoding="utf-8"))
+            lessons = cache.get("lessons", {})
+            all_elements = []
+            by_type = {}
+            by_category = {}
+            lesson_titles = {}
+            for lkey, ldata in lessons.items():
+                ltitle = ldata.get("lesson_title") or ""
+                lesson_titles[lkey] = ltitle
+                for e in ldata.get("elements", []):
+                    all_elements.append(e)
+                    t = e.get("type", "unknown")
+                    by_type[t] = by_type.get(t, 0) + 1
+                    for c in e.get("categories", []):
+                        by_category[c] = by_category.get(c, 0) + 1
+            return ok(data={
+                "elements": all_elements,
+                "lesson_titles": lesson_titles,
+                "stats": {"total": len(all_elements), "by_type": by_type, "by_category": by_category}
+            })
+        except Exception as e:
+            return err(msg=f"读取课程分析数据失败: {e}")
+
+    @app.get("/api/data/courses/{course_id}/pairs")
+    async def course_pairs(course_id: str, pair_type: str = "theorem_proof"):
+        """课程级定理-证明/问题-解答配对：从缓存元素中提取"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        cache_path = _course_analysis_path(workspace_dir, course_id)
+        if not os.path.exists(cache_path):
+            return err(msg="请先运行课程聚合分析")
+        try:
+            cache = _json_loads(Path(cache_path).read_text(encoding="utf-8"))
+            lessons = cache.get("lessons", {})
+            all_elements = []
+            lesson_map = {}
+            for lkey, ldata in lessons.items():
+                lnum = ldata.get("lesson_number", 0)
+                ltitle = ldata.get("lesson_title") or ""
+                for ed in ldata.get("elements", []):
+                    elem = NoteElement.from_dict(ed)
+                    all_elements.append(elem)
+                    lesson_map[elem.id] = {"lesson_number": lnum, "lesson_title": ltitle}
+            if pair_type == "problem_solution":
+                pairs = NoteAnalyzer.find_problem_solution_pair(all_elements)
+            else:
+                pairs = NoteAnalyzer.find_theorem_proof_pair(all_elements)
+            pair_list = []
+            for primary, secondary in pairs:
+                pair_list.append({
+                    "primary": primary.to_dict(),
+                    "secondary": secondary.to_dict() if secondary else None,
+                    "primary_lesson": lesson_map.get(primary.id, {}),
+                    "secondary_lesson": lesson_map.get(secondary.id, {}) if secondary else None,
+                })
+            return ok(data={"pairs": pair_list, "total": len(pair_list)})
+        except Exception as e:
+            return err(msg=f"获取课程级配对失败: {e}")
+
+    @app.get("/api/data/courses/{course_id}/graph")
+    async def course_graph(course_id: str):
+        """课程级知识图谱：从缓存元素中构建"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        cache_path = _course_analysis_path(workspace_dir, course_id)
+        if not os.path.exists(cache_path):
+            return err(msg="请先运行课程聚合分析")
+        try:
+            cache = _json_loads(Path(cache_path).read_text(encoding="utf-8"))
+            lessons = cache.get("lessons", {})
+            all_elements = []
+            for ldata in lessons.values():
+                for ed in ldata.get("elements", []):
+                    all_elements.append(NoteElement.from_dict(ed))
+            kg = KnowledgeGraph()
+            kg.build_from_elements(all_elements)
+            cyto = kg.to_cytoscape_json()
+            stats = kg.get_statistics()
+            return ok(data={"nodes": cyto.get("nodes", []), "edges": cyto.get("edges", []), "stats": stats})
+        except Exception as e:
+            return err(msg=f"课程级图谱生成失败: {e}")
+
+    @app.get("/api/data/courses/{course_id}/spaced-load")
+    async def course_spaced_load(course_id: str):
+        """课程级：从聚合缓存中加载所有元素到间隔复习系统"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        if not _srm:
+            return err(msg="间隔重复模块未初始化")
+        cache_path = _course_analysis_path(workspace_dir, course_id)
+        if not os.path.exists(cache_path):
+            return err(msg="请先运行课程聚合分析")
+        try:
+            cache = _json_loads(Path(cache_path).read_text(encoding="utf-8"))
+            lessons = cache.get("lessons", {})
+            count = 0
+            for ldata in lessons.values():
+                for ed in ldata.get("elements", []):
+                    elem = NoteElement.from_dict(ed)
+                    _srm.add_element(elem)
+                    count += 1
+            return ok(data={"loaded": count, "course_id": course_id})
+        except Exception as e:
+            return err(msg=f"课程级加载复习数据失败: {e}")
+
+    @app.get("/api/data/spaced-repetition/all")
+    async def spaced_all():
+        """获取所有复习卡片"""
+        if not _srm:
+            return err(msg="间隔重复模块未初始化")
+        from datetime import datetime as _dt
+        def _check_due(next_review_str):
+            if not next_review_str:
+                return True
+            try:
+                return _dt.now() >= _dt.fromisoformat(next_review_str)
+            except Exception:
+                return True
+        reviews = []
+        levels = [0] * 7
+        due_count = 0
+        for elem_id, item in _srm.review_data.get("reviews", {}).items():
+            is_due = _check_due(item.get("next_review"))
+            if is_due:
+                due_count += 1
+            lv = min(item.get("level", 0), 6)
+            levels[lv] += 1
+            reviews.append({
+                "elem_id": elem_id,
+                "elem": item.get("elem", {}),
+                "level": item.get("level", 0),
+                "next_review": item.get("next_review"),
+                "is_due": is_due,
+                "history_count": len(item.get("history", []))
+            })
+        return ok(data={"reviews": reviews, "stats": {"total": len(reviews), "due": due_count, "levels": levels}})
+
+    @app.post("/api/data/spaced-repetition/review")
+    async def spaced_review(req: SpacedReviewRequest):
+        """提交复习评分（SM-2 quality 0-5）"""
+        if not _srm:
+            return err(msg="间隔重复模块未初始化")
+        try:
+            _srm.review(req.elem_id, req.quality)
+            item = _srm.review_data["reviews"].get(req.elem_id, {})
+            return ok(data={"new_level": item.get("level", 0), "next_review": item.get("next_review")})
+        except Exception as e:
+            return err(msg=f"评分失败: {e}")
+
+    @app.post("/api/data/spaced-repetition/load")
+    async def spaced_load(req: SpacedLoadRequest):
+        """从笔记文件加载复习卡片"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        full_path = _resolve_ws_path(req.path)
+        if not os.path.exists(full_path):
+            return err(msg="笔记文件不存在: " + req.path)
+        try:
+            from pathlib import Path as _P
+            elements = await _run_data(NoteAnalyzer.extract_from_file, _P(full_path), req.course_id, req.lesson_num)
+            NoteAnalyzer.auto_classify_elements(elements)
+            NoteAnalyzer.auto_extract_triples(elements)
+            count = 0
+            for e in elements:
+                _srm.add_element(e)
+                count += 1
+            return ok(data={"loaded": count})
+        except Exception as e:
+            return err(msg=f"加载失败: {e}")
+
+    @app.post("/api/data/spaced-repetition/reset")
+    async def spaced_reset():
+        """重置所有复习数据"""
+        if not _srm:
+            return err(msg="间隔重复模块未初始化")
+        _srm.review_data["reviews"] = {}
+        _srm._save()
+        return ok(data={"reset": True})
+
+    @app.get("/api/data/spaced-repetition/graph")
+    async def spaced_graph():
+        """获取知识图谱（Cytoscape.js 格式）"""
+        if not _note_analyzer_ready:
+            return err(msg="note_analyzer 模块未加载")
+        try:
+            elements = _srm.get_all_elements()
+            kg = KnowledgeGraph()
+            kg.build_from_elements(elements)
+            cyto = kg.to_cytoscape_json()
+            stats = kg.get_statistics()
+            return ok(data={"nodes": cyto.get("nodes", []), "edges": cyto.get("edges", []), "stats": stats})
+        except Exception as e:
+            return err(msg=f"图谱生成失败: {e}")
+
+    @app.post("/api/data/spaced-repetition/annotate")
+    async def spaced_annotate(req: SpacedAnnotateRequest):
+        """保存卡片批注"""
+        if not _srm:
+            return err(msg="间隔重复模块未初始化")
+        try:
+            import datetime
+            reviews = _srm.review_data.setdefault("reviews", {})
+            if req.elem_id not in reviews:
+                return err(msg="卡片不存在")
+            ann = reviews[req.elem_id].setdefault("annotations", [])
+            entry = {
+                "text": req.text,
+                "timestamp": datetime.datetime.now().isoformat(timespec="seconds")
+            }
+            ann.append(entry)
+            _srm._save()
+            return ok(data={"annotations": ann})
+        except Exception as e:
+            return err(msg=f"保存批注失败: {e}")
+
+    @app.get("/api/data/spaced-repetition/annotations")
+    async def spaced_annotations(elem_id: str):
+        """获取卡片批注"""
+        if not _srm:
+            return err(msg="间隔重复模块未初始化")
+        try:
+            reviews = _srm.review_data.get("reviews", {})
+            item = reviews.get(elem_id, {})
+            ann = item.get("annotations", [])
+            return ok(data={"annotations": ann})
+        except Exception as e:
+            return err(msg=f"获取批注失败: {e}")
+
     # ─── SPA fallback（必须在所有 API 路由和 mount 之后）──────────────
     @app.get("/{path:path}", response_class=HTMLResponse)
     async def spa_fallback(path: str):
@@ -5487,3 +6576,6 @@ def run_server_in_thread(workspace_dir: Optional[str] = None,
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_server()
+
+
+
