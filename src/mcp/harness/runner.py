@@ -18,8 +18,12 @@ class HarnessRunner:
         hook_pipeline=None,
         session_store=None,
         use_global_approval=True,
+        use_model_selector=False,
+        _model_selector=None,
     ):
         self.llm = llm
+        self.use_model_selector = use_model_selector
+        self._model_selector = _model_selector
         self.tool_registry = tool_registry or {}
         self.event_stream = event_stream or EventStream()
         self.hooks = hook_pipeline or HookPipeline()
@@ -41,21 +45,26 @@ class HarnessRunner:
         session_id=None,
     ) -> TurnResult:
         turn = Turn()
-        self._active_turns[turn.id] = turn
+        self._active_turns[turn.turn_id] = turn
         try:
             turn.start()
-            self.event_stream.emit(EventType.TURN_START, turn_id=turn.id)
+            self.event_stream.emit(EventType.TURN_START, turn_id=turn.turn_id)
 
-            if not self.llm:
+            if not self.llm and not self.use_model_selector:
                 turn.fail("LLM未配置")
-                self.event_stream.emit(EventType.TURN_ERROR, turn_id=turn.id, error="LLM未配置")
+                self.event_stream.emit(EventType.TURN_ERROR, turn_id=turn.turn_id, error="LLM未配置")
                 return turn.result
 
-            self.event_stream.emit(EventType.LLM_REQUEST, turn_id=turn.id, messages=messages)
+            self.event_stream.emit(EventType.LLM_REQUEST, turn_id=turn.turn_id, messages=messages)
 
-            response = self.llm.chat(messages, tools=tools)
+            if self.use_model_selector:
+                from ..model_selector import get_model_selector
+                selector = self._model_selector or get_model_selector()
+                response = selector.chat(messages, tools=tools, session_id=session_id)
+            else:
+                response = self.llm.chat(messages, tools=tools)
 
-            self.event_stream.emit(EventType.LLM_RESPONSE, turn_id=turn.id, response=response)
+            self.event_stream.emit(EventType.LLM_RESPONSE, turn_id=turn.turn_id, response=response)
 
             if isinstance(response, dict):
                 content = response.get("content")
@@ -76,7 +85,7 @@ class HarnessRunner:
             if tool_calls:
                 executed_tool_calls = []
                 for tc in tool_calls:
-                    result = self._execute_tool_with_pipeline(tc, turn.id)
+                    result = self._execute_tool_with_pipeline(tc, turn.turn_id)
                     if result is None:
                         turn.cancel()
                         break
@@ -97,10 +106,10 @@ class HarnessRunner:
                     reasoning_content=reasoning_content,
                 )
 
-            self.event_stream.emit(EventType.TURN_COMPLETE, turn_id=turn.id, result=turn.result)
+            self.event_stream.emit(EventType.TURN_COMPLETE, turn_id=turn.turn_id, result=turn.result)
             return turn.result
         finally:
-            self._active_turns.pop(turn.id, None)
+            self._active_turns.pop(turn.turn_id, None)
 
     def cancel_turn(self, turn_id: str):
         turn = self._active_turns.get(turn_id)
@@ -146,7 +155,7 @@ class HarnessRunner:
         if hook_result.decision == HookDecision.MODIFY and hook_result.modified_input is not None:
             tool_args = hook_result.modified_input
 
-        high_risk_tools = {"bash", "shell", "execute", "write_file"}
+        high_risk_tools = {"bash", "shell", "execute", "write_file", "sandbox_execute"}
         risk_level = "high" if tool_name in high_risk_tools else "medium"
 
         approval_decision = self.approval.request_approval(

@@ -683,6 +683,225 @@ def gt_evolution_prove_workflow() -> WorkflowDefinition:
     )
 
 
+
+def _load_rmd_prompt(name: str) -> str:
+    """从 rmd-note-workflow 目录读取角色提示词（外挂单一来源，注册时嵌入）"""
+    try:
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "rmd-note-workflow" / "core" / "prompts" / f"{name}.md"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return f"(提示词文件缺失: {path})"
+    except Exception as e:
+        return f"(提示词加载失败: {e})"
+
+
+def rmd_workflow_workflow() -> WorkflowDefinition:
+    """Rmd 写作工作流 — 基于 rmd-note-workflow 插件的完整流水线
+
+    Architect → Writer → Review(5角色并发) → Gate → Compile → Report
+    提示词外挂在 rmd-note-workflow/core/prompts/，注册时读取嵌入，运行时自包含。
+    """
+    from pathlib import Path
+    # ── 注册时嵌入提示词（外挂单一来源） ──
+    ARCHITECT_PROMPT = _load_rmd_prompt("architect")
+    WRITER_PROMPT = _load_rmd_prompt("writer")
+    FACT_PROMPT = _load_rmd_prompt("fact-reviewer")
+    COHERENCE_PROMPT = _load_rmd_prompt("coherence-reviewer")
+    NECESSITY_PROMPT = _load_rmd_prompt("necessity-reviewer")
+    CONTINUITY_PROMPT = _load_rmd_prompt("continuity-reviewer")
+    DEBUG_PROMPT = _load_rmd_prompt("debugger-compiler")
+    QUALITY_STD = (Path(__file__).resolve().parent.parent / "rmd-note-workflow" / "core" / "quality" / "quality-standards.md")
+    FAIL_THRESHOLDS = (Path(__file__).resolve().parent.parent / "rmd-note-workflow" / "core" / "quality" / "fail-thresholds.md")
+    YAML_DEFAULT = (Path(__file__).resolve().parent.parent / "rmd-note-workflow" / "core" / "templates" / "yaml-default.yml")
+
+    def _sec(title: str) -> str:
+        return f"\n\n===== {title} =====\n"
+
+    return WorkflowDefinition(
+        workflow_id="wf_rmd_workflow",
+        name="Rmd写作工作流",
+        description="使用 rmd-workflow 插件编排：Architect→Writer→Review(5角色并发)→Gate→Compile→Report，基于 RE:KCTSW 叙事哲学",
+        entry_step="architect",
+        checkpoint_after={"architect", "writer", "review", "gate"},
+        steps=[
+            StepDefinition(
+                step_id="architect",
+                name="架构设计 (Architect)",
+                step_type=StepType.AGENT,
+                prompt_template=(
+                    "你是 Rmd 写作工作流的 **Architect**。"
+                    + _sec("角色提示词（完整嵌入，严格遵守）") + ARCHITECT_PROMPT
+                    + _sec("质量标准 RE:KCTSW") + QUALITY_STD.read_text(encoding="utf-8")
+                    + _sec("YAML 默认模板") + YAML_DEFAULT.read_text(encoding="utf-8")
+                    + _sec("写作项目信息")
+                    + "- 项目类型: {project_type|default(课程笔记)}\n"
+                    + "- 项目名称: {project_name|default(未命名)}\n"
+                    + "- 输出目录: {output_dir|default(Notes)}\n"
+                    + "- 源材料/课程大纲: {source_material}\n"
+                    + "- 参考范本路径: {reference_lesson|default(无)}\n\n"
+                    + "你的任务（依据上述角色提示词）：\n"
+                    + "1. 通读源材料，拆解为课时/章节单元（batch，每批 3-6 个）\n"
+                    + "2. 按 RE:KCTSW 设计每个 batch 的 framework\n"
+                    + "3. 生成 framework.md（按 batch 分节）到输出目录\n"
+                    + "4. 输出 dispatch plan（哪些 batch 可并发 Writer）\n\n"
+                    + "产出格式：先给出 framework 文件路径，再给出 dispatch plan 列表。"
+                ),
+                tools=["read_file", "write_file", "list_directory", "ws2_search_courses", "ws2_get_course_detail"],
+            ),
+            StepDefinition(
+                step_id="writer",
+                name="写作 (Writer)",
+                step_type=StepType.AGENT,
+                prompt_template=(
+                    "你是 Rmd 写作工作流的 **Writer**。"
+                    + _sec("角色提示词（完整嵌入，严格遵守）") + WRITER_PROMPT
+                    + _sec("审查标准（了解 FactReviewer 避免踩坑）") + FACT_PROMPT
+                    + _sec("质量标准") + QUALITY_STD.read_text(encoding="utf-8")
+                    + _sec("YAML 默认模板") + YAML_DEFAULT.read_text(encoding="utf-8")
+                    + _sec("已生成的 framework")
+                    + "{step_results.architect}\n\n"
+                    + _sec("写作任务")
+                    + "- batch 编号: {batch|default(1)}\n"
+                    + "- 课时列表: {lessons}\n"
+                    + "- 输出目录: {output_dir|default(Notes)}\n\n"
+                    + "要求（依据上述角色提示词）：\n"
+                    + "1. 严格遵守 framework 的每个课时设计（中心问题、学习目标、结构）\n"
+                    + "2. 每个课时输出一个 .Rmd 文件，命名规则：L+课时号+下划线+标题缩写+.Rmd\n"
+                    + "3. YAML 头必须包含 title/date/output 等必要字段\n"
+                    + "4. 正文按 RE:KCTSW 展开，代码块可运行\n"
+                    + "5. 偏离 framework 的地方必须记录到 Framework Delta 小节\n"
+                    + "6. 写完报告文件清单和字数统计"
+                ),
+                tools=["read_file", "write_file", "list_directory"],
+            ),
+            StepDefinition(
+                step_id="review",
+                name="五角色并发审查",
+                step_type=StepType.PARALLEL,
+                parallel_steps=[
+                    StepDefinition(
+                        step_id="fact_review",
+                        name="事实审查 (FactReviewer)",
+                        step_type=StepType.AGENT,
+                        prompt_template=(
+                            "你是 **FactReviewer**。"
+                            + _sec("角色提示词（完整嵌入，严格遵守）") + FACT_PROMPT
+                            + _sec("审查目标 Rmd") + "{step_results.writer}\n\n"
+                            + "审查维度：数学/事实准确、YAML 合法、代码可运行、framework 覆盖。\n"
+                            + "输出：逐文件 PASS/FAIL + 问题清单。"
+                        ),
+                        tools=["read_file", "list_directory"],
+                    ).to_dict(),
+                    StepDefinition(
+                        step_id="coherence_review",
+                        name="连贯性审查 (CoherenceReviewer)",
+                        step_type=StepType.AGENT,
+                        prompt_template=(
+                            "你是 **CoherenceReviewer**。"
+                            + _sec("角色提示词（完整嵌入，严格遵守）") + COHERENCE_PROMPT
+                            + _sec("审查目标 Rmd") + "{step_results.writer}\n\n"
+                            + "审查维度：叙事连贯、节间因果、RE:KCTSW 的 W 收束。\n"
+                            + "输出：逐文件 PASS/FAIL + 问题清单。"
+                        ),
+                        tools=["read_file", "list_directory"],
+                    ).to_dict(),
+                    StepDefinition(
+                        step_id="necessity_review",
+                        name="必要性审查 (NecessityReviewer)",
+                        step_type=StepType.AGENT,
+                        prompt_template=(
+                            "你是 **NecessityReviewer**。"
+                            + _sec("角色提示词（完整嵌入，严格遵守）") + NECESSITY_PROMPT
+                            + _sec("审查目标 Rmd") + "{step_results.writer}\n\n"
+                            + "审查维度：每段服务中心问题、无 filler 冗余。\n"
+                            + "输出：逐文件 PASS/FAIL + 问题清单。"
+                        ),
+                        tools=["read_file", "list_directory"],
+                    ).to_dict(),
+                    StepDefinition(
+                        step_id="continuity_review",
+                        name="连续性审查 (ContinuityReviewer)",
+                        step_type=StepType.AGENT,
+                        prompt_template=(
+                            "你是 **ContinuityReviewer**。"
+                            + _sec("角色提示词（完整嵌入，严格遵守）") + CONTINUITY_PROMPT
+                            + _sec("审查目标 Rmd") + "{step_results.writer}\n\n"
+                            + "审查维度：跨文档术语/符号/引用一致。\n"
+                            + "输出：逐文件 PASS/FAIL + 问题清单。"
+                        ),
+                        tools=["read_file", "list_directory"],
+                    ).to_dict(),
+                    StepDefinition(
+                        step_id="debug_compile",
+                        name="调试/编译审查 (Debugger)",
+                        step_type=StepType.AGENT,
+                        prompt_template=(
+                            "你是 **Debugger/Compiler**。"
+                            + _sec("角色提示词（完整嵌入，严格遵守）") + DEBUG_PROMPT
+                            + _sec("审查目标 Rmd") + "{step_results.writer}\n\n"
+                            + "审查维度：代码可运行、Rmd 可编译（pandoc/knitr）。\n"
+                            + "输出：逐文件 PASS/FAIL + 编译错误清单。"
+                        ),
+                        tools=["read_file", "list_directory", "cli_execute"],
+                    ).to_dict(),
+                ],
+            ),
+            StepDefinition(
+                step_id="gate",
+                name="质量门禁 (Gate)",
+                step_type=StepType.AGENT,
+                prompt_template=(
+                    "你是 Rmd 工作流的 **Gate 判定器**。"
+                    + _sec("FAIL 阈值（完整嵌入，严格遵守）") + FAIL_THRESHOLDS.read_text(encoding="utf-8")
+                    + _sec("审查结果汇总") + "{step_results.review}\n\n"
+                    + "任务：\n"
+                    + "1. 逐条对照 FAIL 阈值判定每个 batch\n"
+                    + "2. 汇总 5 个审查角色的结果\n"
+                    + "3. 输出 Gate 结论：PASSED / PENDING / STOPPED\n\n"
+                    + "输出格式：Gate 结论 + 失败项清单 + 修正建议。"
+                ),
+                tools=["read_file"],
+            ),
+            StepDefinition(
+                step_id="compile",
+                name="编译 Rmd",
+                step_type=StepType.TOOL,
+                config={
+                    "tool_name": "cli_execute",
+                    "args": {
+                        "command": "python -m rmd_note_workflow.scripts.compiler --dir {output_dir|default(Notes)} --format pdf",
+                    },
+                },
+            ),
+            StepDefinition(
+                step_id="report",
+                name="生成报告",
+                step_type=StepType.AGENT,
+                prompt_template=(
+                    "基于 Rmd 写作工作流全过程，生成总结报告：\n\n"
+                    + "- framework: {step_results.architect}\n"
+                    + "- 写作产出: {step_results.writer}\n"
+                    + "- 审查结果: {step_results.review}\n"
+                    + "- Gate 结论: {step_results.gate}\n"
+                    + "- 编译结果: {step_results.compile}\n\n"
+                    + "报告结构：\n"
+                    + "1. 项目概览（类型/名称/课时数）\n"
+                    + "2. 各阶段状态（Architect/Writer/Review/Gate/Compile）\n"
+                    + "3. 质量得分（对照 RE:KCTSW）\n"
+                    + "4. 剩余问题与下一步\n"
+                    + "5. 产物文件清单\n\n"
+                    + "输出 Markdown 格式报告。"
+                ),
+                tools=["write_file"],
+            ),
+        ],
+    )
+
+
+# ============================================================
+# Lean4 证明检查工作流
+# ============================================================
 # ============================================================
 # Lean4 证明检查工作流
 # ============================================================
@@ -1413,6 +1632,7 @@ WORKFLOW_REGISTRY: Dict[str, WorkflowDefinition] = {
     "course_mode": course_mode_workflow(),
     "gt_basic_prove": gt_basic_prove_workflow(),
     "gt_evolution_prove": gt_evolution_prove_workflow(),
+    "rmd_workflow": rmd_workflow_workflow(),
     "lean4_proof_check": lean4_proof_check_workflow(),
     "lean4_lake_build": lean4_lake_build_workflow(),
     "lean4_formalize": lean4_formalize_workflow(),
@@ -1447,7 +1667,7 @@ def register_workflow(wf: WorkflowDefinition, registry_key: Optional[str] = None
 __all__ = [
     "code_analysis_workflow", "research_workflow",
     "note_generation_workflow", "code_review_workflow",
-    "dependency_scan_workflow",
+    "dependency_scan_workflow", "rmd_workflow_workflow",
     "WORKFLOW_REGISTRY", "get_workflow", "list_workflows",
     "register_workflow",
 ]

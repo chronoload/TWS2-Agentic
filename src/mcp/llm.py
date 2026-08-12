@@ -160,6 +160,12 @@ def _sanitize_messages(messages: list[dict], model_info: 'ModelInfo | None' = No
     for msg in messages:
         msg_copy = dict(msg)
         content = msg_copy.get("content")
+        # 跳过 system-reminder 伪消息：role=user 但内容是 <system-reminder>...</system-reminder>
+        # 包装（如 <current_date>），避免把环境元信息当作真实用户消息发给 LLM
+        if msg_copy.get("role") == "user" and isinstance(content, str):
+            stripped = content.strip()
+            if stripped.startswith("<system-reminder>") and stripped.endswith("</system-reminder>"):
+                continue
         if content is None:
             msg_copy["content"] = ""
         elif isinstance(content, list):
@@ -421,7 +427,7 @@ PROVIDER_DEFAULT_MODELS: Dict[ProviderType, List[str]] = {
     ProviderType.QWEN_CODE: ["qwen-coder-turbo"],
     ProviderType.DOUBAO: ["doubao-pro-32k", "doubao-lite-32k"],
     ProviderType.MISTRAL: ["mistral-large-2411", "mistral-small-2503"],
-    ProviderType.OLLAMA: ["llama3.3", "qwen2.5", "gemma2"],
+    ProviderType.OLLAMA: ["llama3.3", "qwen2.5", "gemma2", "Qwopus-GLM-18B", "AgentCMP-Report", "AgentCMP-Explor"],
     ProviderType.LM_STUDIO: ["local-model"],
     ProviderType.GEMINI: ["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro"],
     ProviderType.OPENROUTER: ["anthropic/claude-3.5-sonnet", "openai/gpt-4o"],
@@ -497,6 +503,10 @@ DEFAULT_MODEL_INFOS: Dict[str, ModelInfo] = {
     # 阶跃星辰 Step
     "step-2-16k": ModelInfo(name="step-2-16k", provider=ProviderType.STEP, max_tokens=4096, context_window=16000, pricing_input=0.5, pricing_output=2.0, supports_image_input=True),
     "step-1-8k": ModelInfo(name="step-1-8k", provider=ProviderType.STEP, max_tokens=4096, context_window=8000, pricing_input=0.2, pricing_output=0.8),
+    # 本地 Ollama 自建模型（context_window=0 时由 fetch_model_info_from_provider 自动探测）
+    "Qwopus-GLM-18B": ModelInfo(name="Qwopus-GLM-18B", provider=ProviderType.OLLAMA, max_tokens=8192, context_window=32768, supports_tools=True),
+    "AgentCMP-Report": ModelInfo(name="AgentCMP-Report", provider=ProviderType.OLLAMA, max_tokens=8192, context_window=32768, supports_tools=False),
+    "AgentCMP-Explor": ModelInfo(name="AgentCMP-Explor", provider=ProviderType.OLLAMA, max_tokens=8192, context_window=32768, supports_tools=True),
 }
 
 
@@ -937,8 +947,15 @@ class LLM(BaseLLMProvider):
         else:
             params["max_tokens"] = self.config.max_tokens
             extra_body = None
-        if tools:
+            if self.config.provider == ProviderType.OLLAMA:
+                # Ollama 按请求动态分配 KV cache（上限为模型原生上下文），
+                # 无需重建模型；用模型上下文上限作为本次 num_ctx。
+                _ctx = self.config.model_info.context_window or 32768
+                extra_body = {"num_ctx": _ctx}
+        if tools and self.config.model_info.supports_tools:
             params["tools"] = tools
+        elif tools and not self.config.model_info.supports_tools:
+            logger.info(f"[LLM.chat] 模型 {self.config.model} 不支持工具调用，已跳过 tools 下发")
 
         try:
             params["stream_options"] = {"include_usage": True}
@@ -1382,8 +1399,23 @@ class MultiProviderManager:
 _default_provider: Optional[BaseLLMProvider] = None
 
 
+def get_model_selector():
+    """延迟导入避免循环依赖；返回 ModelSelector 单例。"""
+    from .model_selector import get_model_selector as _gs
+    return _gs()
+
+
 def get_model_provider() -> Optional[BaseLLMProvider]:
     global _default_provider
+    try:
+        selector = get_model_selector()
+        provider = selector.resolve()
+        if provider is not None:
+            _default_provider = provider
+            return provider
+    except Exception as e:
+        logger.warning(f"get_model_provider: selector 解析失败: {e}")
+    # 路由模式且 selector 未返回 → 保持原有 fallback 逻辑
     if _default_provider is not None and _default_provider.is_available():
         return _default_provider
     try:

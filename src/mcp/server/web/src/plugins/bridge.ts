@@ -2,7 +2,8 @@ import { registerPlugin } from '@capacitor/core'
 import { UserAction } from '../utils/error'
 import { request } from './request'
 import { isNativeApp } from '../api'
-import { isBilibiliUrl, resolveBilibiliUrl, webGetChannelInfo, webGetChannelTabPage, webGetStreamInfo, webSearch, webSearchMore, webGetComments, webGetMoreComments, webGetMoreChannelItems } from '../extractor/BilibiliWebAdapter'
+import { isBilibiliUrl, resolveBilibiliUrl, webGetChannelInfo, webGetChannelTabPage, webGetStreamInfo, webSearch, webSearchMore, webGetComments, webGetMoreComments, webGetMoreChannelItems, webGetPlaylistInfo, webGetMorePlaylistItems } from '../extractor/BilibiliWebAdapter'
+import { isYoutubeUrl, resolveYoutubeUrl, webYoutubeSearch, webYoutubeSearchMore, webYoutubeGetStreamInfo, webYoutubeGetChannelInfo, webYoutubeGetChannelTabPage, webYoutubeGetComments, webYoutubeGetMoreComments, webYoutubeGetFeed, webYoutubeGetPlaylistInfo, webYoutubeGetMorePlaylistItems } from '../extractor/youtube/YoutubeWebAdapter'
 
 interface PipePipePlugin {
   echo(options: {}): Promise<{ ok: boolean; message?: string; initialized?: boolean; proxyPort?: number }>
@@ -104,23 +105,36 @@ async function nativeOrFallback<T>(nativeFn: () => Promise<T>, fallbackFn: () =>
   }
 }
 
-// Bilibili Web 适配器：浏览器直接调用 extractor，不经过后端
+// Web 适配器：浏览器直接调用 extractor，不经过后端
 const BILIBILI_SID = 5
-async function biliFallback<T>(urlOrSid: string | number | undefined, fn: () => Promise<T>): Promise<T | null> {
-  const isBili = typeof urlOrSid === 'string'
-    ? isBilibiliUrl(urlOrSid) || urlOrSid.includes('/videos')
-    : urlOrSid === BILIBILI_SID
-  if (isBili) {
-    try { return await fn() } catch { return null }
+const YOUTUBE_SID = 0
+
+function detectService(urlOrSid: string | number | undefined): 'bilibili' | 'youtube' | null {
+  if (typeof urlOrSid === 'string') {
+    if (isBilibiliUrl(urlOrSid) || urlOrSid.includes('/videos')) return 'bilibili'
+    if (isYoutubeUrl(urlOrSid)) return 'youtube'
+    return null
   }
+  if (urlOrSid === BILIBILI_SID) return 'bilibili'
+  if (urlOrSid === YOUTUBE_SID) return 'youtube'
   return null
+}
+
+async function webFallback<T>(urlOrSid: string | number | undefined, fn: (service: 'bilibili' | 'youtube') => Promise<T>): Promise<T | null> {
+  const service = detectService(urlOrSid)
+  if (!service) return null
+  try { return await fn(service) } catch { return null }
 }
 
 // 封装对标 Android: ErrorInfo + UserAction, DownloaderImpl.execute()
 export const api = {
   async resolveUrl(url: string) {
-    const bili = await biliFallback(url, async () => resolveBilibiliUrl(url))
-    if (bili) return bili
+    const web = await webFallback(url, async (svc) => {
+      if (svc === 'bilibili') return resolveBilibiliUrl(url)
+      const yt = resolveYoutubeUrl(url)
+      return yt || { serviceId: 0, serviceName: 'YouTube', linkType: 'stream' }
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.resolveUrl({ url })),
       () => fallbackFetch<{ serviceId: number; serviceName: string; linkType: string }>('resolveUrl', { url }, UserAction.SOMETHING_ELSE)
@@ -128,8 +142,11 @@ export const api = {
   },
 
   async getStreamInfo(url: string, serviceId: number, _forceLoad?: boolean) {
-    const bili = await biliFallback(url, async () => webGetStreamInfo(url))
-    if (bili) return bili
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webGetStreamInfo(url)
+      return webYoutubeGetStreamInfo(url)
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.getStreamInfo({ url, serviceId })),
       () => fallbackFetch<any>('streamInfo', { url, serviceId }, UserAction.REQUESTED_STREAM)
@@ -137,8 +154,11 @@ export const api = {
   },
 
   async getChannelInfo(url: string, serviceId?: number, forceLoad?: boolean) {
-    const bili = await biliFallback(url, async () => webGetChannelInfo(url, serviceId))
-    if (bili) return bili
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webGetChannelInfo(url, serviceId)
+      return webYoutubeGetChannelInfo(url)
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.getChannelInfo({ url, serviceId, forceLoad })),
       () => fallbackFetch<any>('channelInfo', { url, serviceId, forceLoad }, UserAction.REQUESTED_CHANNEL)
@@ -153,29 +173,47 @@ export const api = {
   },
 
   async getChannelTabPage(options: { tabUrl: string; tabId?: string; serviceId?: number; nextPageUrl?: string; forceLoad?: boolean; tabName?: string; page?: Page }) {
-    const bili = await biliFallback(options.tabUrl, async () => webGetChannelTabPage(options))
-    if (bili) return bili
+    const web = await webFallback(options.serviceId, async (svc) => {
+      if (svc === 'bilibili') return webGetChannelTabPage(options)
+      return webYoutubeGetChannelTabPage(options.tabUrl)
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.getChannelTabPage(options)),
       () => fallbackFetch<any>('channelTabPage', { tabUrl: options.tabUrl, serviceId: options.serviceId, nextPageUrl: options.nextPageUrl, forceLoad: options.forceLoad }, UserAction.REQUESTED_CHANNEL)
     )
   },
 
-  getPlaylistInfo(url: string, serviceId?: number, forceLoad?: boolean) {
+  async getPlaylistInfo(url: string, serviceId?: number, _forceLoad?: boolean) {
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webGetPlaylistInfo(url)
+      return webYoutubeGetPlaylistInfo(url)
+    })
+    if (web) return web
     return nativeOrFallback(
-      () => withRetry(() => PipePipe.getPlaylistInfo({ url, serviceId, forceLoad })),
-      () => fallbackFetch<any>('playlistInfo', { url, serviceId, forceLoad }, UserAction.REQUESTED_PLAYLIST)
+      () => withRetry(() => PipePipe.getPlaylistInfo({ url, serviceId })),
+      () => fallbackFetch<any>('playlistInfo', { url, serviceId }, UserAction.REQUESTED_PLAYLIST)
     )
   },
 
-  getMorePlaylistItems(url: string, serviceId?: number, nextPageUrl?: string, page?: Page) {
+  async getMorePlaylistItems(url: string, serviceId?: number, _nextPageUrl?: string, page?: Page) {
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webGetMorePlaylistItems(url, page)
+      return webYoutubeGetMorePlaylistItems(url, page)
+    })
+    if (web) return web
     return nativeOrFallback(
-      () => withRetry(() => PipePipe.getMorePlaylistItems({ url, serviceId, nextPageUrl, page })),
-      () => fallbackFetch<any>('morePlaylistItems', { url, serviceId, nextPageUrl }, UserAction.REQUESTED_PLAYLIST)
+      () => withRetry(() => PipePipe.getMorePlaylistItems({ url, serviceId, nextPageUrl: _nextPageUrl, page })),
+      () => fallbackFetch<any>('morePlaylistItems', { url, serviceId, nextPageUrl: _nextPageUrl }, UserAction.REQUESTED_PLAYLIST)
     )
   },
 
-  getFeedInfo(url: string, serviceId?: number, forceLoad?: boolean) {
+  async getFeedInfo(url: string, serviceId?: number, forceLoad?: boolean) {
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'youtube') return webYoutubeGetFeed()
+      return null
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.getFeedInfo({ url, serviceId, forceLoad })),
       () => fallbackFetch<any>('feedInfo', { url, serviceId, forceLoad }, UserAction.REQUESTED_FEED)
@@ -183,8 +221,11 @@ export const api = {
   },
 
   async getMoreChannelItems(url: string, serviceId?: number, nextPageUrl?: string, page?: Page) {
-    const bili = await biliFallback(url, async () => webGetMoreChannelItems(url, serviceId, nextPageUrl, page))
-    if (bili) return bili
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webGetMoreChannelItems(url, serviceId, nextPageUrl, page)
+      return null
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.getMoreChannelItems({ url, serviceId, nextPageUrl, page })),
       () => fallbackFetch<any>('moreChannelItems', { url, serviceId, nextPageUrl }, UserAction.REQUESTED_CHANNEL)
@@ -192,8 +233,11 @@ export const api = {
   },
 
   async search(query: string, serviceId: number, contentFilter?: string, sortFilter?: string, durationFilter?: string) {
-    const bili = await biliFallback(serviceId, async () => webSearch(query, serviceId))
-    if (bili) return bili
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webSearch(query, serviceId)
+      return webYoutubeSearch(query)
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.search({ query, serviceId, contentFilter, sortFilter, durationFilter })),
       () => fallbackFetch<any>('search', { query, serviceId, contentFilter, sortFilter, durationFilter }, UserAction.SEARCHED)
@@ -201,8 +245,11 @@ export const api = {
   },
 
   async searchMore(query: string, serviceId: number, page?: Page, contentFilter?: string, sortFilter?: string, durationFilter?: string) {
-    const bili = await biliFallback(serviceId, async () => webSearchMore(query, serviceId, page))
-    if (bili) return bili
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webSearchMore(query, serviceId, page)
+      return webYoutubeSearchMore(query, page)
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.searchMore({ query, serviceId, page, contentFilter, sortFilter, durationFilter })),
       () => fallbackFetch<any>('searchMore', { query, serviceId, contentFilter, sortFilter, durationFilter }, UserAction.SEARCHED)
@@ -223,14 +270,21 @@ export const api = {
     )
   },
 
+  async echo() {
+    return PipePipe.echo({})
+  },
+
   clearCache() {
     if (isNativeApp()) return PipePipe.clearCache({})
     return Promise.resolve()
   },
 
   async getComments(url: string, serviceId: number, forceLoad?: boolean) {
-    const bili = await biliFallback(url, async () => webGetComments(url, serviceId))
-    if (bili) return bili
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webGetComments(url, serviceId)
+      return webYoutubeGetComments(url)
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.getComments({ url, serviceId, forceLoad })),
       () => fallbackFetch<any>('comments', { url, serviceId, forceLoad }, UserAction.REQUESTED_COMMENTS)
@@ -238,8 +292,11 @@ export const api = {
   },
 
   async getMoreComments(url: string, serviceId: number, page?: Page) {
-    const bili = await biliFallback(url, async () => webGetMoreComments(url, serviceId, page))
-    if (bili) return bili
+    const web = await webFallback(serviceId, async (svc) => {
+      if (svc === 'bilibili') return webGetMoreComments(url, serviceId, page)
+      return webYoutubeGetMoreComments(url, page)
+    })
+    if (web) return web
     return nativeOrFallback(
       () => withRetry(() => PipePipe.getMoreComments({ url, serviceId, page })),
       () => fallbackFetch<any>('moreComments', { url, serviceId }, UserAction.REQUESTED_COMMENTS)
@@ -254,243 +311,8 @@ export const api = {
   },
 }
 
-// ── 类型（最小必要集） ──
-
-export interface Page {
-  url: string
-  id?: string
-  ids?: string[]
-  cookies?: Record<string, string>
-  body?: string
-}
-
-export interface StreamInfoItem {
-  name: string
-  url: string
-  thumbnailUrl: string
-  type?: string
-  uploaderName?: string
-  uploaderUrl?: string
-  uploaderAvatarUrl?: string
-  viewCount?: number
-  duration?: number
-  textualUploadDate?: string
-  shortDescription?: string
-  uploaderVerified?: boolean
-  streamType?: string
-  description?: string
-  subscriberCount?: number
-  streamCount?: number
-  verified?: boolean
-  playlistType?: string
-}
-
-export interface SearchResult {
-  query: string
-  suggestion: string | null
-  items: StreamInfoItem[]
-  isCorrectedSearch?: boolean
-  _hasNextPage?: boolean
-  _nextPageUrl?: string
-  _page?: Page
-  _error?: string
-  extractionErrors?: string[]
-}
-
-export interface StreamInfoResult {
-  _error?: string
-  _partialRecovery?: boolean
-  _errorType?: string
-  name: string
-  url: string
-  thumbnailUrl: string
-  duration: number
-  streamType: string
-  ageLimit: number
-  startPosition: number
-  startAt: number
-  description?: string
-  descriptionType?: string
-  uploaderName: string
-  uploaderUrl: string
-  uploaderAvatarUrl: string
-  uploaderVerified: boolean
-  uploaderSubscriberCount: number
-  subChannelName: string
-  subChannelUrl: string
-  textualUploadDate: string
-  viewCount: number
-  likeCount: number
-  dislikeCount: number
-  category: string
-  licence: string
-  host: string
-  tags?: string[]
-  supportComments: boolean
-  supportRelatedItems: boolean
-  isRoundPlayStream: boolean
-  shortFormContent: boolean
-  membersOnly?: boolean
-  hlsUrl: string
-  videoStreams: VideoStreamInfo[]
-  videoOnlyStreams: VideoStreamInfo[]
-  audioStreams: AudioStreamInfo[]
-  sortedVideoStreams: VideoStreamInfo[]
-  sortedAudioStreams: AudioStreamInfo[]
-  progressiveStreams: { url: string; resolution: string; quality: string; codec: string; formatId: number }[]
-  recommendedVideoIndex?: number
-  subtitles?: SubtitlesStreamInfo[]
-  relatedItems?: any[]
-  streamSegments?: any[]
-  extractionErrors?: string[]
-}
-
-export interface VideoStreamInfo {
-  id: string
-  url: string
-  isUrl: boolean
-  resolution: string
-  isVideoOnly: boolean
-  codec: string
-  bitrate: number
-  quality: string
-  fps: number
-  width: number
-  height: number
-  deliveryMethod: string
-  manifestUrl: string
-  initStart: number
-  initEnd: number
-  indexStart: number
-  indexEnd: number
-  audioTrackId?: string
-  audioTrackName?: string
-  audioLocale?: string
-  formatId: number
-  formatName: string
-  mimeType: string
-}
-
-export interface AudioStreamInfo {
-  id: string
-  url: string
-  isUrl: boolean
-  averageBitrate: number
-  bitrate: number
-  codec: string
-  quality: string
-  deliveryMethod: string
-  manifestUrl: string
-  initStart: number
-  initEnd: number
-  indexStart: number
-  indexEnd: number
-  mimeType: string
-  audioTrackId?: string
-  audioTrackName?: string
-  audioLocale?: string
-}
-
-export interface SubtitlesStreamInfo {
-  url: string
-  languageCode: string
-  displayName: string
-  autoGenerated: boolean
-  mimeType?: string
-  suffix?: string
-}
-
-export interface ChannelInfoResult {
-  _error?: string
-  _partialRecovery?: boolean
-  extractionErrors?: string[]
-  serviceId?: number
-  name: string
-  url: string
-  avatarUrl: string
-  bannerUrl: string
-  subscriberCount: number
-  description: string
-  verified: boolean
-  parentChannelName?: string
-  parentChannelUrl?: string
-  parentChannelAvatarUrl?: string
-  items: StreamInfoItem[]
-  tabs?: ChannelTab[]
-  _hasNextPage?: boolean
-  _nextPageUrl?: string
-  _page?: Page
-}
-
-export interface ChannelTab {
-  name: string
-  url: string
-  tabId?: string
-  _tabId?: string
-  _originalUrl?: string
-  _token?: string
-}
-
-// 兼容旧名
-export type ChannelTabInfoResult = ChannelTab
-
-export interface PlaylistInfoResult {
-  _error?: string
-  extractionErrors?: string[]
-  serviceId?: number
-  name: string
-  url: string
-  thumbnailUrl: string
-  bannerUrl?: string
-  uploaderName: string
-  uploaderUrl?: string
-  uploaderAvatarUrl?: string
-  streamCount: number
-  playlistType?: string
-  subChannelName?: string
-  subChannelUrl?: string
-  subChannelAvatarUrl?: string
-  items: StreamInfoItem[]
-  _hasNextPage?: boolean
-  _nextPageUrl?: string
-  _page?: Page
-}
-
-export interface FeedInfoResult {
-  _error?: string
-  _partialRecovery?: boolean
-  extractionErrors?: string[]
-  serviceId?: number
-  name?: string
-  url?: string
-  items: StreamInfoItem[]
-  _hasNextPage?: boolean
-  _nextPageUrl?: string
-  _page?: Page
-}
-
-export interface CommentsResult {
-  _error?: string
-  extractionErrors?: string[]
-  items: CommentsInfoItem[]
-  _hasNextPage?: boolean
-  _nextPageUrl?: string
-  _page?: Page
-}
-
-export interface CommentsInfoItem {
-  commentId: string
-  commentText: string
-  uploaderName: string
-  uploaderAvatarUrl: string
-  textualUploadDate: string
-  likeCount: number
-  replyCount: number
-  heartedByUploader: boolean
-  pinned: boolean
-  streamPosition: number
-  uploaderUrl: string
-}
+// Types moved to src/types/extraction.ts
+import type { Page } from '../types/extraction'
 
 // ── 工具函数 ──
 

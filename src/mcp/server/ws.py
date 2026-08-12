@@ -185,8 +185,8 @@ class WebSocketManager:
         await self.broadcast("statusbar", 0, msg)
 
     async def push_reload_filetree(self):
-        """推送文件树刷新"""
-        await self.broadcast_by_type("filetree", "reloadFiletree")
+        """推送文件树刷新（全树重建信号：filetree 专用客户端 + 主界面 main 类型都需接收）"""
+        await self.broadcast("reloadFiletree")
 
     async def push_reload_editor(self, path: str):
         """推送编辑器刷新"""

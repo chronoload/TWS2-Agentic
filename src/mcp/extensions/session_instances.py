@@ -96,14 +96,18 @@ class SessionInstanceManager:
             instance = self.create_instance(conversation_id, title)
         return instance
     
-    def set_active_instance(self, conversation_id: str) -> bool:
-        """设置活动会话"""
+    def set_active_instance(self, conversation_id: str, title: str = "会话") -> bool:
+        """设置活动会话（如果不存在则自动创建）"""
         with self._lock:
             if conversation_id not in self.instances:
-                logger.error(f"会话 {conversation_id} 不存在")
-                return False
+                self.instances[conversation_id] = ConversationInstance(
+                    conversation_id=conversation_id,
+                    title=title,
+                    created_at=datetime.now().timestamp(),
+                    updated_at=datetime.now().timestamp()
+                )
+                logger.info(f"自动创建会话实例: {conversation_id[:8]}")
             
-            # 更新激活状态
             for conv_id, inst in self.instances.items():
                 inst.is_active = (conv_id == conversation_id)
             
@@ -135,16 +139,28 @@ class SessionInstanceManager:
             instance.updated_at = datetime.now().timestamp()
             return True
     
-    def associate_agent(self, conversation_id: str, agent: Any) -> bool:
-        """为会话关联 Agent 实例"""
+    def associate_agent(self, conversation_id: str, agent: Any, title: str = "会话") -> bool:
+        """为会话关联 Agent 实例（如果不存在则自动创建）"""
         with self._lock:
-            instance = self.instances.get(conversation_id)
-            if not instance:
-                return False
+            if conversation_id not in self.instances:
+                self.instances[conversation_id] = ConversationInstance(
+                    conversation_id=conversation_id,
+                    title=title,
+                    created_at=datetime.now().timestamp(),
+                    updated_at=datetime.now().timestamp()
+                )
+                logger.info(f"自动创建会话实例用于关联Agent: {conversation_id[:8]}")
             
-            instance.agent_instance = agent
-            logger.debug(f"关联 Agent 到会话: {instance.title}")
+            self.instances[conversation_id].agent_instance = agent
+            logger.debug(f"关联 Agent 到会话: {self.instances[conversation_id].title}")
             return True
+    
+    def get_agent(self, conversation_id: str) -> Optional[Any]:
+        """获取会话关联的 Agent 实例"""
+        instance = self.get_instance(conversation_id)
+        if instance:
+            return instance.agent_instance
+        return None
     
     def add_message(self, conversation_id: str, message: Dict) -> bool:
         """添加消息到会话"""
@@ -160,12 +176,18 @@ class SessionInstanceManager:
     
     def create_background_task(self, conversation_id: str, task_type: str, 
                              target_func: Callable, *args, **kwargs) -> Optional[BackgroundTask]:
-        """创建后台任务"""
+        """创建后台任务（如果会话不存在则自动创建）"""
         with self._lock:
-            instance = self.instances.get(conversation_id)
-            if not instance:
-                logger.error(f"会话 {conversation_id} 不存在")
-                return None
+            if conversation_id not in self.instances:
+                self.instances[conversation_id] = ConversationInstance(
+                    conversation_id=conversation_id,
+                    title="会话",
+                    created_at=datetime.now().timestamp(),
+                    updated_at=datetime.now().timestamp()
+                )
+                logger.info(f"自动创建会话实例用于后台任务: {conversation_id[:8]}")
+            
+            instance = self.instances[conversation_id]
             
             task_id = str(uuid.uuid4())
             task = BackgroundTask(

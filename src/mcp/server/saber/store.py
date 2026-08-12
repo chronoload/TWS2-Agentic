@@ -153,8 +153,10 @@ def _get_db_path() -> str:
 
 
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_get_db_path())
+    conn = sqlite3.connect(_get_db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -188,27 +190,35 @@ class SaberStore:
 
     def _init_db(self):
         conn = _get_conn()
-        conn.executescript(_INIT_SQL)
-        conn.commit()
-        conn.close()
+        try:
+            conn.executescript(_INIT_SQL)
+            conn.commit()
+        finally:
+            conn.close()
 
     def _save(self, table: str, id_col: str, obj_id: str, data: dict):
         conn = _get_conn()
-        conn.execute(f"INSERT OR REPLACE INTO {table} ({id_col}, data) VALUES (?, ?)",
-                     (obj_id, _serialize(data)))
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(f"INSERT OR REPLACE INTO {table} ({id_col}, data) VALUES (?, ?)",
+                         (obj_id, _serialize(data)))
+            conn.commit()
+        finally:
+            conn.close()
 
     def _delete_row(self, table: str, id_col: str, obj_id: str):
         conn = _get_conn()
-        conn.execute(f"DELETE FROM {table} WHERE {id_col}=?", (obj_id,))
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE {id_col}=?", (obj_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
     def _load_table(self, table: str, id_col: str) -> list[dict]:
         conn = _get_conn()
-        rows = conn.execute(f"SELECT {id_col}, data FROM {table}").fetchall()
-        conn.close()
+        try:
+            rows = conn.execute(f"SELECT {id_col}, data FROM {table}").fetchall()
+        finally:
+            conn.close()
         result = []
         for r in rows:
             try:

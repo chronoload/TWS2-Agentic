@@ -48,11 +48,33 @@ class SandboxExecutor:
                 error="Command denied by sandbox policy",
             )
         if permission == Permission.ASK:
-            return ExecutionResult(
-                command=command,
-                exit_code=-1,
-                error="Command requires approval",
-            )
+            # 与 harness 统一审批：未分类命令走同一套 ApprovalManager，
+            # tkinter / web 前端弹窗授权（与工具级审批同源，不另起一套）。
+            base = command.strip().split()[0] if command.strip() else command
+            base = base.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].lower()
+            try:
+                from ..harness import get_global_approval_manager, ApprovalDecision
+                approval = get_global_approval_manager()
+                decision = approval.request_approval(
+                    tool_name=f"sandbox_cmd:{base}",
+                    tool_input={"command": command[:400]},
+                    reason=f"沙箱命令需授权: {base}",
+                    risk_level="high",
+                )
+                if decision == ApprovalDecision.DENY:
+                    return ExecutionResult(
+                        command=command,
+                        exit_code=-1,
+                        error="Command requires approval",
+                    )
+            except Exception:
+                # 审批系统不可用时保守拒绝
+                return ExecutionResult(
+                    command=command,
+                    exit_code=-1,
+                    error="Command requires approval",
+                )
+            # 批准后继续执行（APPROVE / ALWAYS_APPROVE）
 
         merged_env = dict(os.environ)
         merged_env.update(self.policy.env_vars)

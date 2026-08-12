@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { StreamInfoResult } from '../plugins/bridge'
+import type { StreamInfoResult } from '../types/extraction'
 import { streamStateRepo } from '../db'
 
 const STORAGE_KEY = 'ts2_playqueue'

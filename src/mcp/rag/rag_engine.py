@@ -107,7 +107,7 @@ class RAGEngine:
             raise FileNotFoundError(f"目录不存在: {directory_path}")
         
         if extensions is None:
-            extensions = ['.txt', '.md', '.json']
+            extensions = ['.txt', '.md', '.json', '.rmd']
         
         results = {}
         

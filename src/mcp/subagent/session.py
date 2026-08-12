@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
@@ -16,18 +18,33 @@ class SessionAgent:
         llm: Any = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_executor: Optional[Callable] = None,
+        cancel_event: Optional[threading.Event] = None,
+        on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         self.spec = spec
         self.llm = llm
         self.tools = tools or []
         self.tool_executor = tool_executor
+        self.cancel_event = cancel_event or threading.Event()
+        self.on_event = on_event  # 执行进度事件回调（转发到主 Agent 流式通道）
         self.session_id = uuid.uuid4().hex[:12]
         self.messages: List[Dict[str, Any]] = []
         self._cancelled = False
+        self._timeout = spec.timeout_seconds
+        self._start_time: float = 0
         self._result = SubAgentResult(
             agent_name=spec.name,
             role=spec.role,
         )
+
+    def _emit(self, event: Dict[str, Any]):
+        """安全触发执行进度事件（自动附加 agent 名）"""
+        if not self.on_event:
+            return
+        try:
+            self.on_event({**event, "agent": self.spec.name})
+        except Exception as e:
+            logger.debug(f"SessionAgent on_event error: {e}")
 
     @property
     def is_busy(self) -> bool:
@@ -35,10 +52,29 @@ class SessionAgent:
 
     def cancel(self):
         self._cancelled = True
+        self.cancel_event.set()
         self._result.mark_cancelled()
+
+    def _check_cancelled(self) -> bool:
+        if self._cancelled or self.cancel_event.is_set():
+            if self._result.status == SubAgentStatus.RUNNING:
+                self._result.mark_cancelled(messages=list(self.messages))
+            return True
+        # 超时检查
+        if self._timeout and self._start_time:
+            elapsed = time.time() - self._start_time
+            if elapsed > self._timeout:
+                logger.warning(f"SessionAgent {self.spec.name} timed out after {elapsed:.1f}s (limit={self._timeout}s)")
+                self._result.mark_failed(
+                    error=f"执行超时（{elapsed:.1f}s > {self._timeout}s）",
+                    messages=list(self.messages)
+                )
+                return True
+        return False
 
     def run(self, prompt: str, context: Optional[Dict[str, Any]] = None) -> SubAgentResult:
         self._result.mark_started()
+        self._start_time = time.time()
         self.messages = []
 
         system_msg = {"role": "system", "content": self.spec.system_prompt}
@@ -52,17 +88,13 @@ class SessionAgent:
 
         try:
             for turn in range(self.spec.max_turns):
-                if self._cancelled:
+                if self._check_cancelled():
                     break
 
+                self._emit({"event": "llm", "turn": turn + 1})
                 response = self._call_llm()
                 if not response:
                     break
-
-                if hasattr(response, "message"):
-                    self.messages.append(response.message)
-                elif hasattr(response, "content"):
-                    self.messages.append({"role": "assistant", "content": str(response.content)})
 
                 self._result.prompt_tokens += getattr(response, "prompt_tokens", 0)
                 self._result.completion_tokens += getattr(response, "completion_tokens", 0)
@@ -75,18 +107,48 @@ class SessionAgent:
                     content = ""
                     if hasattr(response, "content"):
                         content = response.content
-                    elif isinstance(response, dict):
+                    elif isinstance(response, "dict"):
                         content = response.get("content", "")
-                    self._result.mark_completed(content=str(content))
+                    # 追加纯文本 assistant 消息
+                    self.messages.append({"role": "assistant", "content": str(content)})
+                    self._result.mark_completed(content=str(content), messages=list(self.messages))
+                    self._emit({"event": "end", "status": "completed", "content": str(content)[:300]})
                     return self._result
 
-                for tc in getattr(response, "tool_calls", []):
-                    if self._cancelled:
+                # 将 assistant 消息（含 tool_calls）加入历史
+                assistant_msg = {"role": "assistant", "content": getattr(response, "content", "") or ""}
+                tool_calls_list = getattr(response, "tool_calls", [])
+                if tool_calls_list:
+                    import json as _json
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tc.id if hasattr(tc, "id") else "",
+                            "type": "function",
+                            "function": {
+                                "name": tc.name if hasattr(tc, "name") else "",
+                                "arguments": _json.dumps(tc.arguments, ensure_ascii=False) if isinstance(getattr(tc, "arguments", None), dict) else getattr(tc, "arguments", "{}"),
+                            },
+                        }
+                        for tc in tool_calls_list
+                    ]
+                self.messages.append(assistant_msg)
+
+                for tc in tool_calls_list:
+                    if self._check_cancelled():
                         break
+                    tc_name = tc.name if hasattr(tc, "name") else ""
+                    tc_args = tc.arguments if hasattr(tc, "arguments") else {}
+                    self._emit({"event": "tool_call", "turn": turn + 1, "tool_name": tc_name, "tool_args": tc_args})
                     tool_result = self._execute_tool(tc)
+                    self._emit({
+                        "event": "tool_result", "turn": turn + 1,
+                        "tool_name": tc_name,
+                        "preview": str(tool_result)[:200],
+                    })
+                    tc_id = tc.id if hasattr(tc, "id") else ""
                     self.messages.append({
                         "role": "tool",
-                        "tool_call_id": tc.id if hasattr(tc, "id") else "",
+                        "tool_call_id": tc_id,
                         "content": str(tool_result),
                     })
 
@@ -96,11 +158,13 @@ class SessionAgent:
                     if msg.get("role") == "assistant" and msg.get("content"):
                         last_content = msg["content"]
                         break
-                self._result.mark_completed(content=last_content or "达到最大轮次限制")
+                self._result.mark_completed(content=last_content or "达到最大轮次限制", messages=list(self.messages))
+                self._emit({"event": "end", "status": "completed", "content": last_content[:300]})
 
         except Exception as e:
             logger.error(f"SessionAgent {self.spec.name} failed: {e}")
-            self._result.mark_failed(error=str(e))
+            self._result.mark_failed(error=str(e), messages=list(self.messages))
+            self._emit({"event": "end", "status": "failed", "error": str(e)[:200]})
 
         return self._result
 
@@ -120,4 +184,13 @@ class SessionAgent:
                 return self.tool_executor(tool_call)
             except Exception as e:
                 return f"tool error: {e}"
-        return f"tool {getattr(tool_call, 'name', 'unknown')} no executor"
+
+        # 解析工具名
+        if isinstance(tool_call, dict):
+            name = tool_call.get("name", "") or tool_call.get("function", {}).get("name", "")
+        else:
+            name = getattr(tool_call, "name", "")
+            if not name and hasattr(tool_call, "function"):
+                name = getattr(tool_call.function, "name", "")
+
+        return f"tool '{name}' no executor"

@@ -114,16 +114,20 @@ class StreamSession:
                     for mw in self.agent._middleware_chain._middlewares:
                         from ..middleware.shadow_checkpoint import CheckpointMiddleware
                         if isinstance(mw, CheckpointMiddleware):
+                            # 优先整数 checkpoint id（与 /diff 接口 int() 主路径匹配），
+                            # 无则回退 git hash（历史/手动快照）
                             cp_id = getattr(mw, '_last_checkpoint_id', 0)
                             if cp_id and cp_id > 0:
                                 cp_hash = str(cp_id)
+                            else:
+                                cp_hash = getattr(mw, '_last_hash', '') or ''
                             break
             except Exception:
                 pass
             self._put({
                 "type": "tool_result",
                 "name": name,
-                "result": result[:500],
+                "result": result,
                 "checkpoint_hash": cp_hash,
             })
         return _on_tool_result

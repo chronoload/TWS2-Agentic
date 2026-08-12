@@ -108,7 +108,7 @@ class GitSearcher:
              max_results: int = 50,
              context_lines: int = 3) -> List[SearchResult]:
         """
-        git grep 文本搜索
+        git grep 文本搜索（优先 ripgrep 加速，失败回退 git grep）
 
         Args:
             repo_path: 仓库本地路径
@@ -118,10 +118,39 @@ class GitSearcher:
             context_lines: 上下文行数
         """
         repo = Path(repo_path)
+        results: List[SearchResult] = []
+
+        # ── rg 加速：不要求 .git，支持忽略文件，比 git grep 快数倍（零新增依赖）──
+        # context_lines 传 0：SearchResult 只存单行内容（与 git grep 原解析行为一致）
+        try:
+            from .rg_search import rg_grep
+            rg_ret = rg_grep(
+                query, str(repo),
+                globs=file_patterns if file_patterns else None,
+                context_lines=0,
+                max_results=max_results,
+            )
+            if rg_ret is not None:
+                match_count, _, rg_lines = rg_ret
+                for ln in rg_lines:
+                    # 格式 'path:line: content'（无上下文）或 'path:\n  >>> ...'（有上下文）
+                    m = re.match(r"^(.*?):(\d+): (.*)$", ln)
+                    if m:
+                        results.append(SearchResult(
+                            repository=str(repo),
+                            file_path=m.group(1),
+                            line_number=int(m.group(2)),
+                            content=m.group(3).strip(),
+                        ))
+                        if len(results) >= max_results:
+                            break
+                return results
+        except Exception:
+            pass
+
         if not (repo / ".git").exists():
             return []
 
-        results: List[SearchResult] = []
         cmd = ["git", "grep", "-n", "--color=never"]
 
         if context_lines > 0:

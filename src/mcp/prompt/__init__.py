@@ -16,6 +16,7 @@ from .components import (
     PromptComponentRegistry,
     get_agent_role,
     get_tool_use_section,
+    get_dynamic_tool_use_section,
     get_rules_section,
     get_capabilities_section,
     get_editing_files_section,
@@ -27,6 +28,7 @@ from .components import (
     get_skills_section,
     get_mcp_section,
     get_act_vs_plan_section,
+    get_context_sources_section,
 )
 from .templates import TemplateEngine, STANDARD_PLACEHOLDERS
 from .variants import (
@@ -38,9 +40,8 @@ from .variants import (
 from .builder import PromptBuilder, build_system_prompt
 from .context_window import (
     resolve_context_tokens,
-    estimate_message_tokens,
+    estimate_messages_tokens,
     MODEL_CONTEXT_WINDOWS,
-    compact_messages,
     should_compact,
     auto_compact,
 )
@@ -49,12 +50,19 @@ from .workspace import (
     WorkspaceFiles,
     resolve_workspace_injection,
 )
+from .context_provider import (
+    ContextProvider,
+    ContextSection,
+    ContextBundle,
+    create_context_provider,
+)
 
 __all__ = [
     "PromptComponent",
     "PromptComponentRegistry",
     "get_agent_role",
     "get_tool_use_section",
+    "get_dynamic_tool_use_section",
     "get_rules_section",
     "get_capabilities_section",
     "get_editing_files_section",
@@ -66,6 +74,7 @@ __all__ = [
     "get_skills_section",
     "get_mcp_section",
     "get_act_vs_plan_section",
+    "get_context_sources_section",
     "TemplateEngine",
     "STANDARD_PLACEHOLDERS",
     "PromptVariant",
@@ -75,12 +84,15 @@ __all__ = [
     "PromptBuilder",
     "build_system_prompt",
     "resolve_context_tokens",
-    "estimate_message_tokens",
+    "estimate_messages_tokens",
     "MODEL_CONTEXT_WINDOWS",
-    "compact_messages",
     "should_compact",
     "auto_compact",
     "load_workspace_files",
     "WorkspaceFiles",
     "resolve_workspace_injection",
+    "ContextProvider",
+    "ContextSection",
+    "ContextBundle",
+    "create_context_provider",
 ]

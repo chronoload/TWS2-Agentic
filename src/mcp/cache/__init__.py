@@ -34,6 +34,7 @@ from .context_reloader import (
     ContextReloader,
     ContextCheckpoint,
     ConversationSnapshot,
+    get_context_reloader,
 )
 from .ui_state import (
     UIStateManager,
@@ -64,6 +65,7 @@ __all__ = [
     "ContextReloader",
     "ContextCheckpoint",
     "ConversationSnapshot",
+    "get_context_reloader",
     "UIStateManager",
     "WindowGeometry",
     "UIState",

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { StreamInfoItem } from '../plugins/bridge'
+import type { StreamInfoItem } from '../types/extraction'
 import { localPlaylistRepo, remotePlaylistRepo } from '../db'
 
 // ─── Types ────────────────────────────────────────────────────────────

@@ -74,6 +74,18 @@ def load_workspace_files(workspace_root: str) -> WorkspaceFiles:
                     except Exception:
                         pass
 
+    # 加载 .ts2rules/ 目录中的规则文件
+    ts2rules_dir = root / ".ts2rules"
+    if ts2rules_dir.exists() and ts2rules_dir.is_dir():
+        for f in sorted(ts2rules_dir.iterdir()):
+            if f.is_file() and f.suffix.lower() in (".md", ".txt", ".mdc"):
+                try:
+                    content = f.read_text(encoding="utf-8").strip()
+                    if content:
+                        result.skills.append(f"[规则: {f.stem}]\n{content}")
+                except Exception:
+                    pass
+
     return result
 
 

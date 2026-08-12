@@ -92,14 +92,17 @@ class SkillCreationResult:
 
 
 class SkillCreator:
-    def __init__(self, skills_dir: Path, llm=None):
+    def __init__(self, skills_dir: Path, llm=None, auto_confirm: bool = False):
+        """auto_confirm=False（默认）：对话自动链路不落盘，仅生成草稿，需显式 SaveSkillTool 确认。"""
         if skills_dir is None:
             self.skills_dir = None
             self._llm = llm
+            self.auto_confirm = auto_confirm
             return
         self.skills_dir = Path(skills_dir)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
         self._llm = llm
+        self.auto_confirm = auto_confirm
 
     def _should_skip_trigger(self, trigger: str) -> bool:
         """检查触发词是否在黑名单中"""
@@ -233,6 +236,15 @@ class SkillCreator:
 
         Agent/用户审核并可能修改 content 后调用此方法保存。
         """
+        # 返回注入闸门：非 auto_confirm 模式下，自动链路调用会被拒绝（需显式确认）
+        if not self.auto_confirm:
+            return SkillCreationResult(
+                skill_name=skill_name,
+                skill_dir=Path("."),
+                skill_md_path=Path("SKILL.md"),
+                success=False,
+                error="技能创建需人工确认（auto_confirm=False 拒绝自动落盘）",
+            )
         if self.skills_dir is None:
             return SkillCreationResult(
                 skill_name=skill_name,
@@ -402,7 +414,12 @@ class SaveSkillTool:
         creator = self._creator_getter()
         if not creator:
             return json.dumps({"success": False, "error": "SkillCreator 未初始化"}, ensure_ascii=False)
-        result = creator.save_skill(content, skill_name)
+        # 显式人工确认工具：绕过 auto_confirm 闸门（用户/Agent 主动调用即视为确认）
+        creator.auto_confirm = True
+        try:
+            result = creator.save_skill(content, skill_name)
+        finally:
+            creator.auto_confirm = False
         return json.dumps({
             "success": result.success,
             "skill_name": result.skill_name,

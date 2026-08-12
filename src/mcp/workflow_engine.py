@@ -159,6 +159,13 @@ class WorkflowContext:
     def set_var(self, key: str, value: Any):
         self.variables[key] = value
 
+    # 别名：`set_variable`/`get_variable`（调用方习惯写法）
+    def set_variable(self, key: str, value: Any):
+        self.variables[key] = value
+
+    def get_variable(self, key: str, default: Any = None) -> Any:
+        return self.variables.get(key, default)
+
     def to_dict(self) -> dict:
         return {
             "instance_id": self.instance_id,
@@ -1559,8 +1566,13 @@ class WorkflowRunner:
 
     def _render_string(self, s: str) -> str:
         result = s
+        # context.variables 优先（执行器写入的 gt_xxx / lean4_xxx 等）
         for key, val in self.context.variables.items():
-            result = result.replace(f"{{{{{key}}}}}", str(val))
+            result = result.replace("{" + key + "}", str(val))
+        # input_data 也参与 {key} 替换：预定义工作流模板依赖
+        # {source_code} / {workspace} / {course_title} 等来自调用方输入
+        for key, val in self.context.input_data.items():
+            result = result.replace("{" + key + "}", str(val))
         result = result.replace("{query}", self.context.input_data.get("query", ""))
         result = result.replace("{task}", self.context.input_data.get("task", ""))
         result = result.replace("{input_json}",

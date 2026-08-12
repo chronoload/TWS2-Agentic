@@ -70,7 +70,7 @@ def get_agent_role(variant=None, context: Optional[Dict] = None) -> str:
     """Agent 角色定义"""
     ctx = context or {}
     default_template = (
-        "你是 WS2 Agent，一个强大的 AI 学习助手，由 SOLO 提供技术支持。\n"
+        "你是 WS2 Agent，一个强大的 AI 学习助手。\n"
         "你拥有广泛的知识，涵盖物理学、计算机科学、数学等多个学科领域。\n"
         "你的核心职责是帮助用户管理课程学习、复习进度、笔记和项目。"
     )
@@ -80,6 +80,173 @@ def get_agent_role(variant=None, context: Optional[Dict] = None) -> str:
     ).get("template", default_template) if variant else default_template
 
     return TemplateEngine().resolve(template, ctx)
+
+
+def get_dynamic_tool_use_section(active_tools, inactive_summaries: Optional[Dict[str, str]] = None) -> str:
+    """动态生成工具使用说明 — 只列出当前活跃工具 + 未激活工具摘要
+
+    Args:
+        active_tools: 当前活跃的 Tool 实例列表
+        inactive_summaries: 未激活工具的 {name: 一句话摘要} 字典
+    """
+    from ..tool_search import _classify_tool, _get_group_label, _get_available_prefix_rules
+
+    # 按类别分组活跃工具
+    categories = {
+        "文件操作": [],
+        "搜索": [],
+        "网络": [],
+        "计算与分析": [],
+        "终端与系统": [],
+        "配置与技能": [],
+        "RAG检索": [],
+        "沙箱": [],
+        "MCP客户端": [],
+        "WS2 课程管理": [],
+        "WS2 课时与复习": [],
+        "WS2 资源与笔记": [],
+        "WS2 项目与任务": [],
+        "WS2 数据库": [],
+        "数据枢纽": [],
+        "学术搜索": [],
+        "Wolfram 数学": [],
+        "Lean4 证明": [],
+        "Manim 动画": [],
+        "MathLens": [],
+        "AutoResearch": [],
+        "飞书": [],
+        "GT 课程追踪": [],
+        "子Agent": [],
+        "开发工具": [],
+        "其他": [],
+    }
+
+    # 分类映射 — 使用 _classify_tool 自动分类
+    _group_to_category = {
+        "core": None,  # 需要细分
+        "ws2": None,   # 需要细分
+        "datahub_core": "数据枢纽",
+        "datahub_pro": "数据枢纽",
+        "scholar": "学术搜索",
+        "wolfram": "Wolfram 数学",
+        "lean4": "Lean4 证明",
+        "manim": "Manim 动画",
+        "mathlens": "MathLens",
+        "autoresearch": "AutoResearch",
+        "feishu": "飞书",
+        "gt": "GT 课程追踪",
+        "other": "其他",
+    }
+
+    def _classify(tool_name: str) -> str:
+        # 核心工具细分
+        if tool_name in ("read_file", "write_file", "edit_file", "search_files",
+                         "list_directory", "file_info", "diff_files", "move_file",
+                         "copy_file", "open_file"):
+            return "文件操作"
+        if tool_name in ("grep", "glob"):
+            return "搜索"
+        if tool_name in ("web_search", "fetch_url"):
+            return "网络"
+        if tool_name in ("calculate", "analyze_paper"):
+            return "计算与分析"
+        if tool_name in ("cli_execute", "terminal_open"):
+            return "终端与系统"
+        if tool_name in ("config_manage", "search_configs", "skill_manager", "search_skills"):
+            return "配置与技能"
+        if tool_name in ("rag_retrieval", "search_documents"):
+            return "RAG检索"
+        if tool_name == "sandbox_execute":
+            return "沙箱"
+        if tool_name in ("mcp_client", "search_mcp_tools"):
+            return "MCP客户端"
+        if tool_name == "sub_agent":
+            return "子Agent"
+        if tool_name == "macdev":
+            return "开发工具"
+        if tool_name == "workflow":
+            return "开发工具"
+
+        # WS2 工具细分
+        if tool_name.startswith("ws2_hub_"):
+            return "数据枢纽"
+        if tool_name.startswith("ws2_") or tool_name in ("search_courses", "search_sessions"):
+            if any(kw in tool_name for kw in ("lesson", "review", "progress", "next_lesson", "timetable", "course_slot", "semester")):
+                return "WS2 课时与复习"
+            if any(kw in tool_name for kw in ("resource", "bookmark", "note", "rmd", "knit")):
+                return "WS2 资源与笔记"
+            if any(kw in tool_name for kw in ("project", "task", "automation")):
+                return "WS2 项目与任务"
+            if any(kw in tool_name for kw in ("db", "reload", "source", "rag_")):
+                return "WS2 数据库"
+            return "WS2 课程管理"
+
+        # 其他按前缀分组
+        group = _classify_tool(tool_name)
+        cat = _group_to_category.get(group)
+        if cat:
+            return cat
+        return "其他"
+
+    for tool in active_tools:
+        cat = _classify(tool.name)
+        categories[cat].append(tool)
+
+    # 生成活跃工具说明
+    lines = ["TOOL USE", ""]
+    lines.append("你可以使用以下工具帮助用户完成任务。工具参数详见工具定义。")
+
+    for cat_name, tools_in_cat in categories.items():
+        if not tools_in_cat:
+            continue
+        lines.append(f"\n【{cat_name}】")
+        for tool in tools_in_cat:
+            desc = tool.description
+            # 截断过长的描述为一行
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            lines.append(f"- {tool.name}：{desc}")
+
+    # 未激活工具摘要 — 按前缀规则自动分组
+    if inactive_summaries:
+        lines.append("\n【其他可用工具（提及相关关键词时自动激活）】")
+        # 收集所有意图组（有 keywords 的组，仅包含实际有工具的组）
+        intent_groups: Dict[str, Dict] = {}
+        for rule in _get_available_prefix_rules():
+            g = rule["group"]
+            if g not in intent_groups and rule.get("keywords"):
+                intent_groups[g] = {"label": rule["label"], "prefix": rule["prefix"], "tools": set()}
+
+        # 将未激活工具归入对应组
+        for name in inactive_summaries:
+            for g, gdef in intent_groups.items():
+                if name.startswith(gdef["prefix"]):
+                    gdef["tools"].add(name)
+                    break
+
+        for g, gdef in intent_groups.items():
+            if gdef["tools"]:
+                names = ", ".join(sorted(gdef["tools"]))
+                lines.append(f"- {gdef['label']}：{names}")
+
+        # 不属于任何意图组的未激活工具
+        grouped_names = set()
+        for gdef in intent_groups.values():
+            grouped_names.update(gdef["tools"])
+        ungrouped = {n: s for n, s in inactive_summaries.items() if n not in grouped_names}
+        if ungrouped:
+            names = ", ".join(sorted(ungrouped.keys()))
+            lines.append(f"- 其他：{names}")
+
+    lines.append("\n工具调用规则：")
+    lines.append("- 每个工具使用后，等待结果再继续")
+    lines.append("- 并行工具调用可以同时发出")
+    lines.append("- 不要编造工具名，只使用上述列出的工具")
+    lines.append("- 优先使用 search_* 替代全量 list 操作，以节省上下文空间")
+    lines.append("- 需要完整详情时再使用对应的 list/get 工具")
+    lines.append("- 需要使用未列出的专业工具时，先用 activate_tool_group 激活对应工具组")
+
+    return "\n".join(lines)
 
 
 def get_tool_use_section(variant=None, context: Optional[Dict] = None) -> str:
@@ -106,6 +273,17 @@ def get_tool_use_section(variant=None, context: Optional[Dict] = None) -> str:
 【搜索工具】
 - grep：在文件中搜索文本（参数：pattern, path可选, case_sensitive可选）
 - glob：按模式匹配文件（参数：pattern, path可选）
+
+【Search 工具（推荐替代全量列表）】
+优先使用 search_* 系列工具替代对应的 list 操作（节省上下文）：
+- search_files：搜索文件（关键词/扩展名/路径过滤，分页），替代 list_directory
+- search_courses：搜索课程（关键词过滤），替代 ws2_list_courses
+- search_sessions：搜索对话会话（标题关键词过滤），替代 session list
+- search_configs：搜索系统配置（名称/值关键词过滤），替代 config get_all
+- search_skills：搜索技能（名称/描述/状态过滤），替代 skill_manager list
+- search_documents：搜索知识库文档（文件名关键词过滤），替代 rag list_documents
+- search_mcp_tools：搜索外部 MCP 工具（名称/描述/服务器过滤），替代 mcp_client list_tools
+说明：所有 search_* 工具均支持 keyword（关键词）、limit（每页数量，默认10）、offset（分页偏移，默认0）参数，一次只返回摘要信息。需要完整详情时再使用对应的 list/get 工具。
 
 【网络工具】
 - web_search：网络搜索（参数：query, num_results可选）
@@ -237,6 +415,44 @@ def get_tool_use_section(variant=None, context: Optional[Dict] = None) -> str:
   • research - 搜索/分析/总结信息（8轮上限）
   • review - 审查代码质量/安全性（5轮上限）
 
+【开发工具 macdev（机器驱动开发库）】
+- macdev：运行 macdev 机器驱动开发库命令（取代 plan_cli），参数：subcommand + args + project可选
+  参数：
+  • subcommand - 顶层命令（必填）：audit / plan / patch / log / requirement / dev / project / doc
+  • args - 该命令的参数串（空格分隔，多行内容用 \n 转义）
+  • project - 产物目录名（可选）：产物收敛到 <name>-project/（audit/log/requirement/dev 支持）
+  子命令速览：
+  • audit --task task.json --root . [--project <name>]：静态接口审计（亲属追逐依赖链 + 8维分析 + 4维扫描）
+  • plan create --title ... / task add / step add / verify / ledger / export / review / tdd check / openspec：开发流程机器化，变更自动刷新双轨产物
+  • patch gen / apply / verify / plugins：自演化修复闭环
+  • log add --project <name> --category pitfalls --title ... / list / query / export：经验沉淀（随项目/随包双轨）
+  • requirement add / list / update / delete / export / align --root . / scan：需求 CRUD + 规范接口对齐
+  • dev map --target <目录> / audit --target <目录>：学习/模仿目标项目（目录编排 + 架构了解）
+  • project init --name <name> [--git] / list / root：产物目录约定 <name>-project/
+  • doc：自举生成使用/开发文档
+  用法示例：
+  - macdev(subcommand="plan", args="create --title \"接入新端点\"")
+  - macdev(subcommand="audit", args="--task task.json --root .", project="TS2")
+  - macdev(subcommand="log", args="add --category pitfalls --title 数据库列序问题")
+  - macdev(subcommand="dev", args="map --target ../some-project", project="learn-x")
+
+【开发工具 工作流（Workflow 引擎）】
+- workflow：声明式多步骤编排，执行路径写死在定义里（非 LLM 逐步决策），带状态机/检查点/暂停恢复/持久化
+  参数：
+  • action - 操作类型（必填）：define / start / status / pause / resume / cancel / list / logs / step_results
+  • workflow_id - 工作流 ID（define/start 需要）
+  • instance_id - 实例 ID（status/pause/resume/cancel/logs/step_results 需要）
+  • definition - 工作流定义对象（define 需要：steps + entry_step）
+  • input_data - 启动输入数据（start 可选）
+  说明：
+  • action=list 查看已注册定义（内置 23 个预定义工作流）
+  • 与 sub_agent 的区别：子Agent 是单任务自主执行；工作流是多步骤确定性编排，可暂停/恢复/续跑
+  • AGENT 步骤会复用主 Agent 的 LLM 与工具；TOOL 步骤直接执行指定工具
+  用法示例：
+  - workflow(action="list")
+  - workflow(action="start", workflow_id="research_v1")
+  - workflow(action="status", instance_id="<inst_id>")
+
 工具调用规则：
 - 每个工具使用后，等待结果再继续
 - 并行工具调用可以同时发出
@@ -267,7 +483,9 @@ def get_rules_section(variant=None, context: Optional[Dict] = None) -> str:
 - 不要编造工具名
 - 工具不能直接读取资源、笔记或书签内容，应使用对应工具
 - 对高风险操作（写入笔记、修改书签、删除文件）需要用户批准
-- 优先使用最合适的工具完成任务，减少不必要的追问"""
+- 优先使用最合适的工具完成任务，减少不必要的追问
+- 优先使用 search_* 工具（如 search_files、search_skills）而非全量 list 操作，以节省上下文空间；需要完整详情时再使用对应的 list/get 工具
+- 开发类任务默认使用 macdev 追踪开发日志与动态：经验教训用 `macdev log add --project <名称> --category <pitfalls|lessons|patterns|decisions> --title ...` 沉淀，计划与进度用 `macdev plan` 维护（create/task add/step add/verify），让开发过程可追溯"""
 
     template = variant.componentOverrides.get(
         "RULES", {}
@@ -290,6 +508,7 @@ def get_capabilities_section(variant=None, context: Optional[Dict] = None) -> st
 - 分析科研论文
 - 执行代码、搜索文件、进行数学计算
 - 网络搜索获取最新信息
+- 搜索文件、技能、配置、文档和外部 MCP 工具（支持关键词过滤和分页）
 
 你不能：
 - 直接操作数据库文件（需通过工具）
@@ -326,7 +545,15 @@ def get_editing_files_section(variant=None, context: Optional[Dict] = None) -> s
 
 def get_system_info_section(variant=None, context: Optional[Dict] = None) -> str:
     """系统信息 — 参考 Cline 的 system_info component"""
+    from datetime import datetime
+
     ctx = context or {}
+    # 注入 CURRENT_DATE 到 context
+    if "CURRENT_DATE" not in ctx:
+        ctx = dict(ctx)
+        today = datetime.now()
+        ctx["CURRENT_DATE"] = today.strftime("%Y-%m-%d, %A")
+
     default_template = f"""SYSTEM INFORMATION
 
 操作系统: {platform.system()} {platform.release()}
@@ -415,6 +642,52 @@ def get_act_vs_plan_section(variant=None, context: Optional[Dict] = None) -> str
 在开始复杂任务前，先规划步骤。"""
 
 
+def get_context_sources_section(variant=None, context: Optional[Dict] = None) -> str:
+    """上下文来源 — 参考 Cline 的 .clinerules 三层上下文注入
+
+    从 ContextProvider 收集 Rules/Files/Others 三层上下文，
+    组装为结构化的系统提示段落。
+    """
+    from .context_provider import ContextProvider
+
+    ctx = context or {}
+    workspace_root = ctx.get("workspace_root", ctx.get("cwd", ""))
+
+    provider = ContextProvider(workspace_root=workspace_root)
+
+    # 收集静态上下文（Rules + Files）
+    bundle = provider.collect(context=ctx)
+
+    # 排除动态层（Others 由 chat 流程中动态注入）
+    static_sections = [s for s in bundle.sections if s.layer != "others"]
+
+    if not static_sections:
+        return ""
+
+    # 按层分组输出
+    layer_labels = {"rules": "规则与约束", "files": "项目上下文"}
+    layer_order = ["rules", "files"]
+    parts = []
+
+    for layer in layer_order:
+        layer_sections = [s for s in static_sections if s.layer == layer]
+        if not layer_sections:
+            continue
+
+        # 按优先级排序
+        layer_sections.sort(key=lambda s: -s.priority)
+
+        parts.append(f"{'=' * 40}")
+        parts.append(f"  {layer_labels.get(layer, layer)}")
+        parts.append(f"{'=' * 40}")
+
+        for section in layer_sections:
+            parts.append(f"\n## {section.label}")
+            parts.append(section.content)
+
+    return "\n".join(parts)
+
+
 # 注册所有组件
 for _comp_id, _comp_name, _comp_fn, _comp_order in [
     ("AGENT_ROLE", "Agent 角色", get_agent_role, 1),
@@ -426,9 +699,54 @@ for _comp_id, _comp_name, _comp_fn, _comp_order in [
     ("CAPABILITIES", "能力描述", get_capabilities_section, 7),
     ("FEEDBACK", "反馈", get_feedback_section, 8),
     ("RULES", "规则", get_rules_section, 9),
-    ("SYSTEM_INFO", "系统信息", get_system_info_section, 10),
-    ("OBJECTIVE", "目标", get_objective_section, 11),
-    ("USER_INSTRUCTIONS", "用户指令", get_user_instructions_section, 12),
-    ("SKILLS", "技能", get_skills_section, 13),
+    ("CONTEXT_SOURCES", "上下文来源", get_context_sources_section, 10),
+    ("SYSTEM_INFO", "系统信息", get_system_info_section, 11),
+    ("OBJECTIVE", "目标", get_objective_section, 12),
+    ("USER_INSTRUCTIONS", "用户指令", get_user_instructions_section, 13),
+    ("SKILLS", "技能", get_skills_section, 14),
 ]:
     register_component(_comp_id, _comp_name, _comp_fn, _comp_order)
+
+
+def apply_config_components(variant, components_cfg: Dict[str, Dict]) -> None:
+    """把 config 中的提示词组件配置合并到 variant（内置覆盖 + 自定义注册）
+
+    components_cfg: {component_id: {name?, template?, enabled?, order?}}
+    - 内置组件（registry 已注册）→ 合并 template/enabled 到 variant.componentOverrides
+    - 自定义组件（手写编排提示词）→ 注册通用生成器 + 追加到 componentOrder
+
+    幂等：重复调用仅覆盖同名组件 / 不重复 append 顺序。
+    """
+    if not components_cfg or variant is None:
+        return
+    registry = get_component_registry()
+    known = set(registry.all_ids)
+    for cid, cfg in components_cfg.items():
+        if not isinstance(cfg, dict):
+            continue
+        enabled = bool(cfg.get("enabled", True))
+        template = str(cfg.get("template", "") or "")
+        if cid in known:
+            # 内置组件：模板覆盖 / 启停
+            override = {"enabled": enabled}
+            if template:
+                override["template"] = template
+            variant.componentOverrides[cid] = override
+        else:
+            # 自定义编排组件：注册通用生成器
+            name = str(cfg.get("name", cid))
+            order = int(cfg.get("order", 100))
+
+            def _custom_gen(variant=None, context=None, _t=template):
+                if not _t:
+                    return ""
+                return TemplateEngine().resolve(_t, context or {})
+
+            registry.register(PromptComponent(
+                id=cid, name=name, generator=_custom_gen, order=order))
+            variant.componentOverrides[cid] = {"enabled": enabled}
+            if cid not in variant.componentOrder:
+                variant.componentOrder.append(cid)
+            # baseTemplate 同步追加占位符，确保自定义编排段落被输出
+            if variant.baseTemplate:
+                variant.baseTemplate += f"\n\n====\n\n{{{{{cid}}}}}"

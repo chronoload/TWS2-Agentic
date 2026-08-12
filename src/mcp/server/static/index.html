@@ -22,7 +22,7 @@
   var link = document.createElement('link');
   link.id = 'vditorContentTheme';
   link.rel = 'stylesheet';
-  link.href = savedTheme === 'light'
+  link.href = (savedTheme === 'light' || savedTheme === 'chuizi' || savedTheme === 'savor')
     ? '/static/vditor/css/content-theme/light.css'
     : '/static/vditor/css/content-theme/dark.css';
   document.head.appendChild(link);
@@ -37,7 +37,8 @@
 <script src="/static/vditor/js/katex/katex.min.js"></script>
 <script src="/static/vditor/js/katex/mhchem.min.js"></script>
 <script src="/static/vditor/js/katex/auto-render.min.js" defer></script>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=tc14">
+<link rel="preload" href="/static/theme/Cliff%20Dark/cliff_bg.jpg" as="image">
 </head>
 <body>
 
@@ -118,6 +119,11 @@
         <span class="nav-icon">🤖</span>
         <span>Agent</span>
       </div>
+      <div class="nav-tab" data-tab="hub">
+        <span class="nav-icon">📡</span>
+        <span>数据枢纽</span>
+        <span class="hub-badge" id="hubNavBadge" style="display:none"></span>
+      </div>
       <div class="nav-tab" data-tab="stats">
         <span class="nav-icon">📊</span>
         <span>统计</span>
@@ -141,6 +147,25 @@
     <div class="nav-panel active" id="panel-files">
       <div class="sidebar-search">
         <input type="text" id="searchInput" placeholder="搜索文件..." autocomplete="off">
+      </div>
+      <div class="search-toolbar" id="searchToolbar">
+        <select id="searchSortBy" title="排序方式" class="st-select">
+          <option value="name">名称</option>
+          <option value="mtime">修改日期</option>
+          <option value="type">类型</option>
+          <option value="size">大小</option>
+        </select>
+        <button id="searchOrderBtn" class="st-btn" title="切换升/降序">↑</button>
+        <select id="searchTypeFilter" title="类型筛选" class="st-select">
+          <option value="">全部</option>
+          <option value="dir">📁 文件夹</option>
+          <option value="file">📄 文件</option>
+          <option value=".md">md</option>
+          <option value=".py">py</option>
+          <option value=".json">json</option>
+          <option value=".csv">csv</option>
+          <option value=".png">png</option>
+        </select>
       </div>
       <div class="file-breadcrumb" id="fileBreadcrumb" style="display:none">
         <span class="file-breadcrumb-path" id="fileBreadcrumbPath"></span>
@@ -237,6 +262,25 @@
                 <button class="src-action-btn" id="srcUploadBtn" title="上传到当前目录">📤 上传</button>
                 <button class="src-action-btn" id="srcClusterImportBtn" title="从其他实例导入">🔗 导入</button>
               </div>
+              <div class="search-toolbar" id="srcSearchToolbar">
+                <select id="srcSortBy" title="排序方式" class="st-select">
+                  <option value="name">名称</option>
+                  <option value="mtime">修改日期</option>
+                  <option value="type">类型</option>
+                  <option value="size">大小</option>
+                </select>
+                <button id="srcOrderBtn" class="st-btn" title="切换升/降序">↑</button>
+                <select id="srcTypeFilter" title="类型筛选" class="st-select">
+                  <option value="">全部</option>
+                  <option value="dir">📁 文件夹</option>
+                  <option value="file">📄 文件</option>
+                  <option value=".py">py</option>
+                  <option value=".js">js</option>
+                  <option value=".ts">ts</option>
+                  <option value=".json">json</option>
+                  <option value=".md">md</option>
+                </select>
+              </div>
               <div class="src-breadcrumb" id="srcBreadcrumb">
                 <button class="src-up-btn" id="srcUpBtn" style="display:none" title="上级目录">..</button>
                 <span class="src-path" id="srcPath">/</span>
@@ -263,6 +307,9 @@
         </div>
         <div class="course-search-wrap">
           <input type="text" id="courseSearchInput" placeholder="搜索课程..." oninput="onCourseSearch(this.value)">
+          <select id="courseDomainFilter" onchange="onCourseDomainFilter(this.value)" class="course-domain-filter">
+            <option value="">All</option>
+          </select>
         </div>
         <div id="coursesList">
           <div class="empty-state"><span class="empty-icon">📚</span><span>加载中...</span></div>
@@ -311,14 +358,119 @@
     <!-- Agent Panel -->
     <div class="nav-panel" id="panel-agent">
       <div class="agent-panel" id="agentPanel">
+        <!-- 对话流导航侧边栏 -->
+        <div class="agent-flow-nav collapsed" id="agentFlowNav">
+          <div class="agent-flow-nav-header">
+            <span class="agent-flow-nav-title">📑 对话流</span>
+            <div class="agent-flow-nav-actions">
+              <button class="agent-flow-nav-btn" onclick="toggleFlowNav()" title="收起侧边栏">✕</button>
+            </div>
+          </div>
+          <div class="agent-flow-nav-list" id="agentFlowNavList">
+            <div class="agent-flow-nav-empty">暂无对话</div>
+          </div>
+          <div class="agent-flow-nav-footer">
+            <button class="agent-flow-nav-btn" onclick="flowNavPrev()" title="上一块" id="flowNavPrevBtn">⬆</button>
+            <button class="agent-flow-nav-btn" onclick="flowNavNext()" title="下一块" id="flowNavNextBtn">⬇</button>
+          </div>
+        </div>
+        <div class="agent-flow-nav-mask" id="agentFlowNavMask" onclick="toggleFlowNav()"></div>
+        <!-- 对话流浮动小点列：无需展开侧边栏即可快速跳转 -->
+        <div class="agent-flow-dots" id="agentFlowDots"></div>
+        <!-- 迷你条摘要浮层（fixed 全局，避免被滚动容器裁剪） -->
+        <div class="flow-dot-tip-global" id="flowDotTipGlobal"></div>
+        <!-- 会话管理侧边栏 -->
+        <div class="agent-conv-sidebar collapsed" id="agentConvSidebar">
+          <div class="agent-conv-header">
+            <span class="agent-conv-title">💬 会话管理</span>
+            <div class="agent-conv-actions">
+              <button class="agent-conv-btn" onclick="refreshConvSidebar()" title="刷新">🔄</button>
+              <button class="agent-conv-btn" onclick="toggleConvSidebar()" title="关闭">✕</button>
+            </div>
+          </div>
+          <div class="agent-conv-filters">
+            <button class="conv-filter active" data-filter="all" onclick="filterConvSessions('all')">全部</button>
+            <button class="conv-filter" data-filter="active" onclick="filterConvSessions('active')">活跃</button>
+            <button class="conv-filter" data-filter="streaming" onclick="filterConvSessions('streaming')">流式中</button>
+          </div>
+          <div class="agent-conv-list" id="agentConvList">
+            <div class="agent-conv-loading">加载中...</div>
+          </div>
+          <div class="agent-conv-footer">
+            <span id="convCount" class="conv-count">0 个会话</span>
+            <span id="convActiveCount" class="conv-active-count"></span>
+            <button class="conv-migrate-btn" onclick="migrateCheckpointSessions()" title="迁移旧会话">📦</button>
+          </div>
+        </div>
+        <div class="agent-conv-mask" id="agentConvMask" onclick="toggleConvSidebar()"></div>
+        <!-- Agent 实例状态侧边栏 -->
+        <div class="agent-status-sidebar collapsed" id="agentStatusSidebar">
+          <div class="agent-status-header">
+            <span class="agent-status-title">📊 Agent 实例状态</span>
+            <div class="agent-status-actions">
+              <button class="agent-status-btn" onclick="refreshAgentStatus()" title="刷新">🔄</button>
+              <button class="agent-status-btn" onclick="toggleAgentStatusPanel()" title="关闭">✕</button>
+            </div>
+          </div>
+          <div class="agent-status-summary" id="agentStatusSummary">
+            <div class="summary-item">
+              <span class="summary-value" id="summaryTotal">0</span>
+              <span class="summary-label">总实例</span>
+            </div>
+            <div class="summary-item active">
+              <span class="summary-value" id="summaryActive">0</span>
+              <span class="summary-label">活跃中</span>
+            </div>
+            <div class="summary-item idle">
+              <span class="summary-value" id="summaryIdle">0</span>
+              <span class="summary-label">空闲</span>
+            </div>
+          </div>
+          <div class="agent-status-list" id="agentStatusList">
+            <div class="agent-status-loading">加载中...</div>
+          </div>
+        </div>
+        <div class="agent-status-mask" id="agentStatusMask" onclick="toggleAgentStatusPanel()"></div>
+        <!-- 主聊天区域 -->
+        <div class="agent-chat-main" id="agentChatMain">
         <div class="agent-messages" id="agentMessages"></div>
         <div class="agent-typing" id="agentTyping">正在输入...</div>
         <div class="agent-session-bar" id="agentSessionBar">
+          <button class="agent-session-btn" onclick="toggleFlowNav()" title="对话流导航">📑</button>
+          <button class="agent-session-btn" onclick="toggleConvSidebar()" title="会话管理">💬</button>
+          <button class="agent-session-btn" onclick="toggleAgentStatusPanel()" title="Agent 实例状态面板">📊</button>
           <button class="agent-session-btn" onclick="showAgentCheckpoints()" title="检查点 — 每轮对话自动保存，可回退对话或文件">🔖</button>
-          <button class="agent-session-btn" onclick="showAgentSessions()" title="会话列表">📋</button>
           <button class="agent-session-btn" onclick="createNewSession()" title="新建会话">➕</button>
+          <!-- Agent 实例状态指示器 -->
+          <div class="agent-pool-indicator" id="agentPoolIndicator" onclick="toggleAgentStatusPanel()" title="Agent 实例状态">
+            <span class="pool-dot" id="poolDot"></span>
+            <span class="pool-count" id="poolCount">0</span>
+          </div>
           <span class="agent-session-info" id="agentSessionInfo">新对话</span>
-          <span id="modelCapabilityBadge" style="display:none;font-size:9px;padding:1px 5px;border-radius:4px;background:var(--bg-tertiary);color:var(--fg-muted);margin-left:auto;white-space:nowrap" title="模型能力"></span>
+          <button class="agent-session-btn" id="harnessToggleBtn" onclick="toggleHarnessPanel(event)" title="门控：Agent 模式 / 审批 / 工具组" style="font-size:13px;padding:2px 7px">🎛</button>
+          <select id="agentModelSelector" title="切换 Agent 模型" onchange="selectGlobalModel(this.value)" style="font-size:9px;padding:1px 5px;border-radius:4px;background:var(--bg-tertiary);color:var(--fg-muted);border:1px solid var(--border);max-width:240px"></select>
+          <!-- 门控控制面板（点 🎛 展开） -->
+          <div class="harness-panel" id="harnessPanel" style="display:none">
+            <div class="harness-row">
+              <label title="Agent 执行模式">模式</label>
+              <select id="agentModeSelector" onchange="setAgentMode(this.value)">
+                <option value="act">⚡ Act 直接执行</option>
+                <option value="plan">📋 Plan 先规划</option>
+              </select>
+            </div>
+            <div class="harness-row">
+              <label title="工具权限审批粒度">审批</label>
+              <select id="agentApprovalModeSelector" onchange="setAgentApprovalMode(this.value)">
+                <option value="suggest">💡 建议</option>
+                <option value="auto_edit">🖊 自动编辑</option>
+                <option value="full_auto">🤖 全自动</option>
+              </select>
+            </div>
+            <div class="harness-row">
+              <label title="激活专业工具组（单实例）">工具组</label>
+              <select id="agentToolGroupSelector" onchange="activateAgentToolGroup(this.value)"></select>
+            </div>
+          </div>
         </div>
         <!-- 嵌入式 Swarm 子面板 -->
         <div id="swarmEmbeddedPanel" style="display:none;border-top:1px solid var(--border);max-height:50%;overflow-y:auto;flex-shrink:0">
@@ -358,11 +510,82 @@
             </div>
           </div>
         </div>
-        <div class="agent-input-area">
-          <div id="mediaPreviewBar" style="display:none;flex-wrap:wrap;gap:4px;padding:2px 4px;border-bottom:1px solid var(--border);max-height:80px;overflow-y:auto"></div>
-          <input type="text" id="agentInput" placeholder="输入消息... (可粘贴/拖拽图片或视频)" autocomplete="off">
+        <!-- 嵌入式 Workflow 面板 -->
+        <div id="workflowEmbeddedPanel" style="display:none;border-top:1px solid var(--border);max-height:50%;overflow-y:auto;flex-shrink:0">
+          <div onclick="toggleWorkflowEmbedded()" style="display:flex;align-items:center;justify-content:space-between;padding:4px 10px;background:var(--bg-secondary);cursor:pointer;user-select:none">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px">⚙️</span>
+              <span style="font-size:11px;font-weight:600;color:var(--fg)">工作流</span>
+              <span id="workflowModeBadge" style="font-size:9px;padding:1px 6px;border-radius:4px;background:var(--bg-tertiary);color:var(--fg-muted)">引擎</span>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center">
+              <button onclick="event.stopPropagation();workflowRefreshAll()" style="background:var(--bg-tertiary);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:1px 8px;font-size:10px;cursor:pointer">刷新</button>
+              <span id="workflowEmbeddedToggle" style="font-size:10px;color:var(--fg-muted)">▶</span>
+            </div>
+          </div>
+          <div id="workflowEmbeddedBody" style="padding:6px 8px;display:none;flex-direction:column;gap:6px">
+            <!-- 工作流定义 -->
+            <div style="border-bottom:1px solid var(--border);padding-bottom:6px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:10px;font-weight:600;color:var(--fg-muted)">工作流定义 <span id="workflowDefCount" style="color:var(--fg-muted)"></span></span>
+                <button onclick="workflowRefreshDefs()" style="background:transparent;color:var(--fg-muted);border:none;font-size:9px;cursor:pointer;padding:1px 4px">刷新</button>
+              </div>
+              <div id="workflowDefList" style="display:flex;flex-direction:column;gap:3px">
+                <div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:6px">加载中...</div>
+              </div>
+            </div>
+            <!-- 运行实例 -->
+            <div style="border-bottom:1px solid var(--border);padding-bottom:6px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:10px;font-weight:600;color:var(--fg-muted)">运行实例</span>
+                <button onclick="workflowRefreshInstances()" style="background:transparent;color:var(--fg-muted);border:none;font-size:9px;cursor:pointer;padding:1px 4px">刷新</button>
+              </div>
+              <div id="workflowInstList" style="display:flex;flex-direction:column;gap:3px">
+                <div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:6px">暂无实例</div>
+              </div>
+            </div>
+            <!-- 步骤详情 -->
+            <div>
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:10px;font-weight:600;color:var(--fg-muted)">步骤详情</span>
+                <button onclick="workflowClearDetail()" style="background:transparent;color:var(--fg-muted);border:none;font-size:9px;cursor:pointer;padding:1px 4px">清空</button>
+              </div>
+              <div id="workflowDetailArea" style="display:flex;flex-direction:column;gap:3px">
+                <div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:6px">选择实例查看步骤结果</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="agent-input-area" style="position:relative">
+          <div id="agentRestoringTip" style="display:none;text-align:center;padding:6px 12px;color:var(--fg-muted);font-size:12px;background:var(--bg-secondary);border-bottom:1px solid var(--border)">
+            <span class="loading-spinner"></span> 正在加载上次会话...
+          </div>
+          <!-- 悬浮预览条：绝对定位在输入区上方，不挤占布局 -->
+          <div id="mediaPreviewBar" style="display:none;position:absolute;bottom:calc(100% + 4px);left:8px;right:8px;z-index:9999;flex-wrap:wrap;gap:4px;padding:4px 6px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;box-shadow:0 -4px 16px rgba(0,0,0,.25);max-height:120px;overflow-y:auto"></div>
+          <input type="text" id="agentInput" placeholder="输入消息... (可粘贴/拖拽图片或视频，右键呼出方法菜单，输入 / 唤醒技能发现)" autocomplete="off">
           <button id="agentSend">发送</button>
         </div>
+        <!-- Agent 发现面板（Skill/Tool/MCP/Workflow） -->
+        <div id="agentDiscoverPanel" style="display:none;position:fixed;z-index:10000;background:var(--bg);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.4);width:460px;max-height:70vh;overflow:hidden;font-size:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg-secondary)">
+            <span class="overlay-drag-handle" data-drag-target="agentDiscoverPanel" style="font-weight:600;color:var(--fg);cursor:move;user-select:none">🔎 发现</span>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input id="discoverSearch" type="text" placeholder="过滤..." style="width:120px;padding:3px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:11px;outline:none">
+              <span id="discoverClose" style="cursor:pointer;color:var(--fg-muted);font-size:14px;padding:0 4px">✕</span>
+            </div>
+          </div>
+          <div id="discoverTabs" style="display:flex;border-bottom:1px solid var(--border);background:var(--bg-tertiary)">
+            <div class="discover-tab" data-tab="skill" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">Skill</div>
+            <div class="discover-tab" data-tab="tool" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">Tool</div>
+            <div class="discover-tab" data-tab="mcp" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">MCP</div>
+            <div class="discover-tab" data-tab="workflow" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">Workflow</div>
+            <div class="discover-tab" data-tab="plugin" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">Plugin</div>
+          </div>
+          <div id="discoverList" style="overflow-y:auto;max-height:calc(70vh - 80px);padding:6px 0"></div>
+        </div>
+        <!-- Agent 输入框右键方法菜单 -->
+        <div id="agentCtxMenu" style="display:none;position:fixed;z-index:10000;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.35);min-width:170px;padding:4px 0;font-size:12px"></div>
+        </div><!-- /agent-chat-main -->
       </div>
     </div>
 
@@ -537,6 +760,43 @@
       </div>
     </div>
 
+    <!-- DataHub Panel -->
+    <div class="nav-panel" id="panel-hub">
+      <div class="hub-panel">
+        <div class="hub-stats-bar" id="hubStatsBar">
+          <div class="hub-stat"><span class="hub-stat-value" id="hubStatTotal">0</span><span class="hub-stat-label">总条目</span></div>
+          <div class="hub-stat"><span class="hub-stat-value" id="hubStatUnread">0</span><span class="hub-stat-label">未读</span></div>
+          <div class="hub-stat"><span class="hub-stat-value" id="hubStatStarred">0</span><span class="hub-stat-label">星标</span></div>
+          <div class="hub-stat"><span class="hub-stat-value" id="hubStatRss">0</span><span class="hub-stat-label">RSS源</span></div>
+        </div>
+        <div class="hub-toolbar">
+          <button class="hub-btn" onclick="hubPollAll()" title="立即轮询全部订阅">🔄 轮询全部</button>
+          <button class="hub-btn" onclick="hubDiscoverOpen()" title="探测 URL 发现订阅源">🔍 发现</button>
+          <button class="hub-btn" onclick="hubAddSubscription()" title="添加 RSS 订阅">➕ 添加</button>
+          <span class="hub-status" id="hubStatus"></span>
+        </div>
+        <div class="hub-main">
+          <div class="hub-rail" id="hubRail">
+            <div class="hub-rail-collapse" id="hubRailCollapseBtn" onclick="hubToggleRail()" title="折叠频道栏">◀</div>
+            <div class="hub-view-item hub-view-active" data-view="all" onclick="hubSetView('all')"><span>🗂️</span><span class="hub-view-label">全部条目</span></div>
+            <div class="hub-view-item" data-view="unread" onclick="hubSetView('unread')"><span>🟢</span><span class="hub-view-label">未读</span><span class="hub-view-count" id="hubViewUnreadCount"></span></div>
+            <div class="hub-view-item" data-view="starred" onclick="hubSetView('starred')"><span>⭐</span><span class="hub-view-label">星标</span></div>
+            <div class="hub-rail-sep"></div>
+            <div class="hub-rail-title">订阅源</div>
+            <div class="hub-sub-list" id="hubSubList">
+              <div class="hub-sub-loading">加载中...</div>
+            </div>
+          </div>
+          <div class="hub-feed" id="hubFeed">
+            <div class="hub-feed-header" id="hubFeedHeader">全部条目</div>
+            <div class="hub-feed-list" id="hubFeedList">
+              <div class="hub-feed-empty">加载中...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Stats Panel -->
     <div class="nav-panel" id="panel-stats">
       <div style="padding:8px;overflow-y:auto;flex:1">
@@ -574,6 +834,18 @@
               <input type="checkbox" id="themeToggleInput" onchange="toggleTheme()">
               <span class="theme-toggle-slider"></span>
             </label>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:var(--fg)">自定义主题</div>
+              <div style="font-size:10px;color:var(--fg-muted);margin-top:2px">注:直接叠加自定义样式</div>
+            </div>
+            <select id="customThemeSelect" onchange="selectCustomTheme(this.value)" style="width:150px;padding:6px 8px;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px">
+              <option value="">默认（不注入）</option>
+              <option value="chuizi">😴 锤子</option>
+              <option value="savor">✨ Savor</option>
+              <option value="cliffdark">⛰️ Cliff Dark</option>
+            </select>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center">
             <div>
@@ -617,6 +889,42 @@
                 <option value="20" selected>20 秒</option>
                 <option value="30">30 秒</option>
                 <option value="60">60 秒</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Agent 显示模式 -->
+        <div style="margin-bottom:20px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px">
+          <div style="font-size:12px;font-weight:700;color:var(--fg);margin-bottom:10px">🤖 Agent 显示模式</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+              <input type="radio" name="agentDisplayMode" value="single" checked onchange="setAgentDisplayMode('single')" style="margin-top:3px">
+              <div>
+                <div style="font-size:11px;font-weight:600;color:var(--fg)">单实例跳跃模式</div>
+                <div style="font-size:10px;color:var(--fg-muted);margin-top:2px">单视图显示，通过状态面板切换会话。适合专注单任务，资源占用低</div>
+              </div>
+            </label>
+            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+              <input type="radio" name="agentDisplayMode" value="split" onchange="setAgentDisplayMode('split')" style="margin-top:3px">
+              <div>
+                <div style="font-size:11px;font-weight:600;color:var(--fg)">真分屏模式</div>
+                <div style="font-size:10px;color:var(--fg-muted);margin-top:2px">分屏显示多个会话，同时查看多个 Agent 实例。适合多任务并行</div>
+              </div>
+            </label>
+          </div>
+          <div id="agentSplitConfig" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;color:var(--fg-muted);margin-bottom:6px">分屏布局</div>
+            <div style="display:flex;gap:6px">
+              <select id="agentSplitLayout" onchange="setAgentSplitLayout(this.value)" style="flex:1;padding:4px 6px;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px">
+                <option value="horizontal">水平分屏（左右）</option>
+                <option value="vertical">垂直分屏（上下）</option>
+                <option value="grid">网格分屏（2x2）</option>
+              </select>
+              <select id="agentSplitCount" onchange="setAgentSplitCount(this.value)" style="flex:1;padding:4px 6px;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px">
+                <option value="2" selected>2 个会话</option>
+                <option value="3">3 个会话</option>
+                <option value="4">4 个会话</option>
               </select>
             </div>
           </div>
@@ -812,6 +1120,15 @@
           </label>
         </div>
 
+        <!-- 实时协同编辑开关（默认关闭，功能尚不成熟） -->
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0">
+          <span style="font-size:11px;color:var(--fg-muted)">实时协同编辑 <span style="opacity:.5">(实验性)</span></span>
+          <label class="sync-toggle">
+            <input type="checkbox" id="collabToggle" onchange="toggleCollab(this.checked)">
+            <span class="sync-toggle-slider"></span>
+          </label>
+        </div>
+
         <!-- 关键路径检测 -->
         <div style="font-size:12px;font-weight:700;color:var(--fg);margin:16px 0 12px">📊 关键路径检测</div>
         <div style="font-size:11px;color:var(--fg-muted);margin-bottom:8px">基于任务依赖关系和持续时间，计算项目关键路径（CPM）</div>
@@ -902,6 +1219,8 @@
           <div style="position:relative;display:flex;align-items:center;padding:0 4px">
             <button onclick="promptSaveTaskSession()" title="保存当前标签页状态为任务" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">📋</button>
             <button onclick="openBrowser()" title="打开浏览器" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">🌐</button>
+            <button id="btnOutline" onclick="toggleEditorOutline()" title="大纲导航（可展开/收起）" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">📑</button>
+            <button id="btnInjectAgent" onclick="injectToAgent()" oncontextmenu="event.preventDefault(); injectAllTabsToAgent()" title="左键:注入当前文件地址;右键:注入所有标签地址" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">📡</button>
             <button id="recentFilesBtn" title="最近打开的文件" style="background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:3px">🕐</button>
             <div id="recentFilesDropdown" style="display:none;position:absolute;right:0;top:100%;width:260px;max-height:300px;overflow-y:auto;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:50;padding:4px"></div>
           </div>
@@ -973,9 +1292,29 @@
                 </div>
               </div>
             </div>
+            <!-- 协同副本列表：点击直接以协同模式打开 -->
+            <div id="welcomeCollabSection" style="margin-top:16px;width:100%;max-width:860px;flex-shrink:0">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <div style="font-size:13px;font-weight:700;color:var(--fg)">👥 协同副本</div>
+                <button onclick="refreshWelcomeCollabList({force:true})" style="font-size:11px;color:var(--accent);background:none;border:none;cursor:pointer;padding:2px 6px">刷新</button>
+              </div>
+              <div id="welcomeCollabList" style="display:flex;flex-direction:column;gap:2px;max-height:240px;overflow-y:auto;padding:2px 0">
+                <div style="color:var(--fg-dim);font-size:12px;padding:8px 4px">加载中...</div>
+              </div>
+            </div>
           </div>
           <div id="vditor" style="display:none"></div>
           <textarea id="plainEditor" style="display:none"></textarea>
+          <!-- 独立协同编辑器容器（右键"协同打开副本"时显示，挂载到虚拟标签页） -->
+          <div id="collabEditorView" style="display:none;flex-direction:column;min-height:0;background:var(--bg)">
+            <div id="collabEditorBar" style="display:flex;align-items:center;gap:8px;padding:4px 12px;border-bottom:1px solid var(--border);background:var(--bg-secondary);font-size:12px;flex-shrink:0;min-height:28px">
+              <span style="font-size:12px;font-weight:700;color:var(--fg)">👥 协同编辑</span>
+              <span id="collabPeerHint" style="color:var(--fg-muted);opacity:.6"></span>
+              <button class="btn-action" onclick="saveCollabCopyBack()" style="font-size:11px;padding:3px 10px">💾 保存到源文件</button>
+              <span style="margin-left:auto;opacity:.5;font-size:11px">编辑保存写入副本文件，独立于源文件</span>
+            </div>
+            <div id="collabEditorArea" style="flex:1;min-height:0;overflow:auto"></div>
+          </div>
           <div id="pdfViewer" class="pdf-viewer" style="display:none">
             <div class="pdf-toolbar">
               <button class="pdf-nav-btn pdf-back-btn" id="pdfCloseBtn" title="关闭 PDF">← 返回</button>
@@ -1093,6 +1432,23 @@
             </div>
             <iframe id="browserFrame" style="flex:1;border:none;background:#fff"></iframe>
           </div>
+          <!-- 图片浏览器（多格式、多实例标签页） -->
+          <div id="imageViewer" style="display:none;flex-direction:column;background:var(--bg);overflow:hidden">
+            <div style="display:flex;align-items:center;gap:4px;padding:4px 8px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0">
+              <span id="imageViewerName" style="font-size:11px;font-weight:600;color:var(--fg);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+              <span style="flex:1"></span>
+              <button class="pdf-nav-btn" onclick="imgZoom(-0.2)" title="缩小" style="font-size:11px">🔍-</button>
+              <span id="imgZoomLevel" style="font-size:11px;color:var(--fg-muted);min-width:42px;text-align:center">100%</span>
+              <button class="pdf-nav-btn" onclick="imgZoom(0.2)" title="放大" style="font-size:11px">🔍+</button>
+              <button class="pdf-nav-btn" onclick="imgFit()" title="适应窗口" style="font-size:11px">⤢</button>
+              <button class="pdf-nav-btn" onclick="imgOriginal()" title="原始大小" style="font-size:11px">1:1</button>
+              <button class="pdf-nav-btn" onclick="imgRotate()" title="旋转" style="font-size:11px">↻</button>
+              <button class="pdf-nav-btn" onclick="imgZoomReset()" title="重置" style="font-size:11px">🔄</button>
+            </div>
+            <div id="imageViewerScroll" style="flex:1;overflow:auto;display:flex;align-items:center;justify-content:center;background:var(--bg)">
+              <img id="imageViewerImg" style="max-width:none;user-select:none" draggable="false">
+            </div>
+          </div>
           <!-- Office 文档编辑器 -->
           <div id="officeEditorView" style="display:none;flex-direction:column;background:var(--bg);min-height:0">
             <div style="display:flex;align-items:center;gap:8px;padding:2px 10px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0;min-height:32px">
@@ -1105,17 +1461,34 @@
           </div>
         </div>
       </div>
+
+    <!-- 大纲面板（Vditor 展开/收起 TOC 目录 + 分块导航） -->
+    <div id="editorOutlinePanel" class="editor-outline-panel" style="display:none">
+      <div class="editor-outline-header">
+        <span>📑 大纲</span>
+        <div style="display:flex;align-items:center;gap:2px;margin-left:auto">
+          <button id="chunkPrevBtn" onclick="chunkPrev()" title="上一分段" style="background:transparent;border:none;color:var(--fg-muted);font-size:12px;cursor:pointer;padding:2px 5px;border-radius:3px;line-height:1;display:none">◀</button>
+          <span id="chunkNavCounter" style="font-size:11px;color:var(--fg-muted);display:none;min-width:34px;text-align:center"></span>
+          <button id="chunkNextBtn" onclick="chunkNext()" title="下一分段" style="background:transparent;border:none;color:var(--fg-muted);font-size:12px;cursor:pointer;padding:2px 5px;border-radius:3px;line-height:1;display:none">▶</button>
+          <button id="chunkAddBtn" onclick="addChunkSection()" title="添加新的分段标题" style="background:transparent;border:none;color:var(--fg-muted);font-size:13px;cursor:pointer;padding:2px 5px;border-radius:3px;line-height:1;display:none">✚</button>
+          <button id="chunkToggleBtn" onclick="toggleChunkMode()" title="分段编辑开关（大文本自动分块）" style="background:transparent;border:none;color:var(--fg-muted);font-size:13px;cursor:pointer;padding:2px 5px;border-radius:3px;line-height:1">⛓</button>
+          <button id="editorOutlineCloseBtn" onclick="toggleEditorOutline()" title="关闭面板" style="background:transparent;border:none;color:var(--fg-muted);font-size:14px;cursor:pointer;padding:2px 6px;border-radius:4px;line-height:1">✕</button>
+        </div>
+      </div>
+      <div id="editorOutlineContent" class="vditor-outline__content"></div>
     </div>
+  </div>
 
     <!-- ─── Terminal Panel ─── -->
     <div class="terminal-panel" id="terminalPanel">
       <div class="terminal-resize-handle" id="terminalResizeHandle"></div>
+      <div class="terminal-tabbar" id="terminalTabBar"></div>
       <div class="terminal-header">
-        <span>终端</span>
+        <span id="terminalTitle">终端</span>
         <div>
-          <button id="btnTerminalNew" title="新建终端" onclick="initTerminal()">+</button>
-          <button id="btnTerminalKill" title="杀掉会话" onclick="killTerminal()">✕</button>
-          <button id="btnTerminalReconnect" title="重新连接" onclick="initTerminal()">↻</button>
+          <button id="btnTerminalNew" title="新建终端" onclick="addTerminal()">+</button>
+          <button id="btnTerminalKill" title="关闭当前终端" onclick="closeTerminal()">✕</button>
+          <button id="btnTerminalReconnect" title="重建当前终端" onclick="reconnectTerminal()">↻</button>
           <button title="隐藏( Ctrl+` )" onclick="toggleTerminal()">_</button>
         </div>
       </div>
@@ -1128,6 +1501,14 @@
         <span id="statusInfo"></span>
       </div>
       <div class="right">
+        <select id="modelSelector" title="切换全局模型" onchange="selectGlobalModel(this.value)" style="max-width:260px;padding:1px 5px;font-size:11px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:3px">
+          <option value="route">模型: 路由</option>
+        </select>
+        <select id="sessionModelSelector" title="切换当前 Agent 会话模型" onchange="selectSessionModel(this.value)" style="max-width:220px;padding:1px 5px;font-size:11px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:3px">
+          <option value="">会话: 跟随全局</option>
+        </select>
+        <button title="刷新模型目录" onclick="refreshModelCatalog()" style="cursor:pointer;padding:1px 6px;font-size:11px;background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:3px">刷新目录</button>
+        <button title="导入 opencode 配置" onclick="importOpencode()" style="cursor:pointer;padding:1px 6px;font-size:11px;background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:3px">导入opencode</button>
         <span id="statusSync">空闲</span>
         <span id="statusWs">
           <span class="indicator disconnected" id="wsIndicator"></span>
@@ -1149,6 +1530,11 @@
   <div class="context-menu-sep" id="ctxAddResourceSep" style="display:none"></div>
   <div class="context-menu-item" data-action="openWith" id="ctxOpenWith" style="display:none">📂 用...打开</div>
   <div class="context-menu-item" data-action="externalEdit" id="ctxExternalEdit" style="display:none">💻 外部编辑器打开</div>
+  <div class="context-menu-item" data-action="collabOpen" id="ctxCollabOpen" style="display:none">👥 协同打开副本</div>
+  <div class="context-menu-sep"></div>
+  <div class="context-menu-item" data-action="copyPath" id="ctxCopyPath">📋 复制路径</div>
+  <div class="context-menu-item" data-action="fillAgent" id="ctxFillAgent">🤖 填入Agent对话框</div>
+  <div class="context-menu-sep"></div>
   <div class="context-menu-item" data-action="delete" style="color:var(--red)">🗑️ 删除</div>
 </div>
 
@@ -1388,8 +1774,11 @@
 <script id="vditorScriptTag" src="/static/vditor/index.min.js" defer></script>
 <script src="/static/cytoscape.min.js"></script>
 <script src="/static/autosave-scheduler.js"></script>
-<script src="/static/rmd-chunk.js"></script>
-<script src="/static/app.js"></script>
+ <script src="/static/rmd-chunk.js"></script>
+<script src="/static/editor-chunks.js"></script>
+<script src="/static/app.js?v=tc19"></script>
 <script src="/static/office.js"></script>
+<script type="module" src="/static/collab-client.js"></script>
+<script type="module" src="/static/collab-editor.js"></script>
 </body>
 </html>

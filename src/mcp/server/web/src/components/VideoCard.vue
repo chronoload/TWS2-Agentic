@@ -34,7 +34,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { StreamInfoItem } from '../plugins/bridge'
+import type { StreamInfoItem } from '../types/extraction'
 import { proxyImageUrl } from '../extractor/BilibiliImageProxy'
 
 const props = defineProps<{ item: StreamInfoItem }>()

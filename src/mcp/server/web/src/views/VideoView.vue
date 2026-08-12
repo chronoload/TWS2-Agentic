@@ -175,8 +175,8 @@ import { useSearchHistoryStore } from '../stores/searchHistory'
 import VideoCard from '../components/VideoCard.vue'
 import SubscriptionList from '../components/SubscriptionList.vue'
 import FeedView from '../components/FeedView.vue'
-import PipePipe, { api, extractNextPage } from '../plugins/bridge'
-import type { StreamInfoItem, PlaylistInfoResult, SearchResult, Page } from '../plugins/bridge'
+import { api, extractNextPage } from '../plugins/bridge'
+import type { StreamInfoItem, PlaylistInfoResult, SearchResult, Page } from '../types/extraction'
 import { useFeedStore } from '../stores/feed'
 import { proxyImageUrl } from '../extractor/BilibiliImageProxy'
 
@@ -204,7 +204,7 @@ async function resolveServiceId(url: string) {
 
 onMounted(async () => {
   try {
-    await PipePipe.echo()
+    await api.echo()
     pluginStatus.value = '✓'
   } catch (e: any) {
     pluginStatus.value = '✗'

@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from .llm import LLM, LLMResponse, ToolCall, SimulatorLLM, MultiProviderManager, ProviderConfig
 from .tools import Tool, get_tools
 from .ws2_tools import get_ws2_tools
-from .ws2_hub_tools import get_hub_tools
 from .config import get_config_manager
 
 try:
@@ -49,14 +48,6 @@ try:
 except ImportError:
     HAS_MCP_CLIENT = False
 
-# 尝试导入 Wolfram 工具
-try:
-    from .wolfram_tools import register_wolfram_tools
-    HAS_WOLFRAM = True
-except ImportError:
-    HAS_WOLFRAM = False
-    register_wolfram_tools = None
-
 logger = logging.getLogger(__name__)
 
 # 尝试导入事件日志系统
@@ -74,7 +65,6 @@ try:
         estimate_messages_tokens,
         should_compact,
         auto_compact,
-        resolve_workspace_injection,
         get_variant_registry,
     )
     HAS_MODERN_PROMPT = True
@@ -232,24 +222,26 @@ SYSTEM_PROMPT = """你是 WS2 Agent，一个强大的 AI 学习助手，负责�
 def sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """验证并修复消息列表，确保 tool_calls/tool 消息配对正确。
 
-    OpenAI API 要求：assistant 消息带 tool_calls 时，必须紧跟对应的 tool 响应消息。
+    OpenAI API 要求：assistant 消息带 tool_calls 时，必须紧跟对应的 tool 响应消息
+    （一个 assistant 可带多个 tool_calls，其后跟多条 tool 响应；中间不得插入
+    user/system/其他 assistant 消息，也不允许 tool 出现在其 assistant 之前）。
+
     此函数处理以下情况：
-    1. assistant 有 tool_calls 但缺少对应的 tool 响应 → 补充占位 tool 响应
-    2. 孤立的 tool 消息（无对应 tool_call）→ 移除
+    1. assistant 有 tool_calls 但缺少对应的 tool 响应 → 剔除该 tool_call（保留 content）
+    2. 孤立的 tool 消息（无对应 assistant tool_call）→ 移除
     3. assistant 消息中 tool_call.id 为空 → 移除该无效 tool_call
     4. assistant 消息 content 为空且无有效 tool_calls → 移除（中途打断残留）
-    5. 消息角色顺序异常 → 修复
+    5. 消息角色顺序异常（tool 出现在 assistant 之前 / 被其他消息隔开）→
+       按【全局 id 配对】重建顺序：assistant(tool_calls) 后紧跟其所有 tool 响应
     """
     if not messages:
         return messages
 
-    # 预处理：清理无效的 tool_calls 条目
+    # 预处理：清理无效的 tool_calls 条目（id 为空/None）
     cleaned = []
     for msg in messages:
         role = msg.get("role", "")
-
         if role == "assistant" and msg.get("tool_calls"):
-            # 过滤掉 id 为空/None 的 tool_call 条目
             valid_tcs = []
             for tc in msg["tool_calls"]:
                 tc_dict = tc if isinstance(tc, dict) else {}
@@ -258,9 +250,7 @@ def sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     valid_tcs.append(tc)
                 else:
                     logger.debug(f"sanitize: 移除无效 tool_call (id 为空, name={tc_dict.get('function', {}).get('name', '?')})")
-
             if valid_tcs:
-                # 保留 assistant 消息，但用清理后的 tool_calls
                 cleaned_msg = dict(msg)
                 cleaned_msg["tool_calls"] = valid_tcs
                 cleaned.append(cleaned_msg)
@@ -268,13 +258,11 @@ def sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 # 所有 tool_calls 都无效，检查 content 是否有意义
                 content = msg.get("content", "")
                 if content and content.strip():
-                    # 有内容，保留为普通 assistant 消息（去掉空的 tool_calls）
                     cleaned_msg = dict(msg)
                     cleaned_msg.pop("tool_calls", None)
                     cleaned.append(cleaned_msg)
                     logger.debug("sanitize: assistant 消息的 tool_calls 全部无效，降级为普通消息")
                 else:
-                    # content 为空且无有效 tool_calls，跳过（中途打断残留）
                     logger.debug("sanitize: 移除空 assistant 消息（content 为空且无有效 tool_calls）")
                     continue
         else:
@@ -286,100 +274,76 @@ def sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     continue
             cleaned.append(msg)
 
-    # 收集所有 assistant 消息中的 tool_call_id
-    assistant_tool_call_ids = set()
-    for msg in cleaned:
+    # ── 全局 id 配对表 ──
+    # assistant 的 tool_calls：id -> 消息索引（同一 assistant 可多 id）
+    assistant_tc_ids: Dict[str, int] = {}
+    for i, msg in enumerate(cleaned):
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 tc_dict = tc if isinstance(tc, dict) else {}
                 tc_id = tc_dict.get("id")
-                if tc_id:
-                    assistant_tool_call_ids.add(tc_id)
+                if tc_id and tc_id not in assistant_tc_ids:
+                    assistant_tc_ids[tc_id] = i
 
-    # 收集所有 tool 消息中的 tool_call_id
-    tool_msg_ids = set()
-    for msg in cleaned:
+    # tool 响应：id -> 有序索引列表（保留原有相对顺序）
+    tool_msg_indices: Dict[str, List[int]] = {}
+    for i, msg in enumerate(cleaned):
         if msg.get("role") == "tool" and msg.get("tool_call_id"):
-            tool_msg_ids.add(msg["tool_call_id"])
+            tool_msg_indices.setdefault(msg["tool_call_id"], []).append(i)
 
-    # 需要补充的 tool 响应（assistant 有 tool_calls 但没有对应 tool 消息）
-    missing_tool_ids = assistant_tool_call_ids - tool_msg_ids
+    consumed_tool_idx: set = set()
 
-    # 需要移除的孤立 tool 消息（有 tool 消息但没有对应 tool_call）
-    orphan_tool_ids = tool_msg_ids - assistant_tool_call_ids
-
-    result = []
-    for msg in cleaned:
+    # ── 按顺序重建：assistant(tool_calls) 后紧跟其 tool 响应 ──
+    result: List[Dict[str, Any]] = []
+    for i, msg in enumerate(cleaned):
         role = msg.get("role", "")
 
-        # 移除孤立的 tool 消息
-        if role == "tool" and msg.get("tool_call_id") in orphan_tool_ids:
-            logger.debug(f"santrize: 移除孤立 tool 消息 (tool_call_id={msg['tool_call_id']})")
+        # tool 消息：已被对应 assistant 消费则跳过；孤立（无对应 assistant）则移除
+        if role == "tool":
+            if i in consumed_tool_idx:
+                continue
+            tid = msg.get("tool_call_id", "")
+            if tid not in assistant_tc_ids:
+                logger.debug(f"santrize: 移除孤立 tool 消息 (tool_call_id={tid})")
+                continue
+            # 有 assistant 配对但顺序异常（assistant 尚未输出）——由 assistant 分支统一输出；
+            # 此处直接跳过，避免 tool 出现在 assistant 之前。
             continue
 
-        # 如果 assistant 消息有 tool_calls，剔除丢失响应的 tool_call
+        # assistant 带 tool_calls：保留【有 tool 响应】的 tool_call，并把响应紧跟其后
         if role == "assistant" and msg.get("tool_calls"):
             valid_tcs = []
+            attached_tool_msgs: List[Dict[str, Any]] = []
             for tc in msg["tool_calls"]:
                 tc_dict = tc if isinstance(tc, dict) else {}
                 tc_id = tc_dict.get("id")
-                if tc_id and tc_id in missing_tool_ids:
+                if tc_id and tc_id in tool_msg_indices:
+                    valid_tcs.append(tc)
+                    # 依次取出该 tool_call 的所有 tool 响应（并行调用可多条）
+                    for tidx in tool_msg_indices[tc_id]:
+                        if tidx not in consumed_tool_idx:
+                            attached_tool_msgs.append(cleaned[tidx])
+                            consumed_tool_idx.add(tidx)
+                else:
                     tool_name = tc_dict.get("function", {}).get("name", "unknown")
                     logger.debug(f"santrize: 剔除丢失响应的 tool_call (id={tc_id}, tool={tool_name})")
-                else:
-                    valid_tcs.append(tc)
+
             if valid_tcs:
-                msg = dict(msg)
-                msg["tool_calls"] = valid_tcs
-                result.append(msg)
+                out_msg = dict(msg)
+                out_msg["tool_calls"] = valid_tcs
+                result.append(out_msg)
+                result.extend(attached_tool_msgs)
             else:
+                # 全部 tool_call 丢失响应：降级为普通消息（保留 content）
                 m = dict(msg)
                 m.pop("tool_calls", None)
                 result.append(m)
-                logger.debug("santrize: 所有 tool_call 丢失，降级为普通消息")
-        else:
-            result.append(msg)
+                logger.debug("santrize: 所有 tool_call 丢失响应，降级为普通消息")
+            continue
 
-    # 二次验证：移除残留在 assistant tool_calls 中无对应 tool 响应的 id
-    final = []
-    i = 0
-    while i < len(result):
-        msg = result[i]
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            collected_ids = set()
-            j = i + 1
-            while j < len(result) and result[j].get("role") == "tool":
-                collected_ids.add(result[j].get("tool_call_id", ""))
-                j += 1
+        result.append(msg)
 
-            valid_tcs = []
-            for tc in msg["tool_calls"]:
-                tc_dict = tc if isinstance(tc, dict) else {}
-                tc_id = tc_dict.get("id")
-                if tc_id and tc_id not in collected_ids:
-                    logger.debug(f"santrize: 二次验证剔除丢失响应的 tool_call (id={tc_id})")
-                else:
-                    valid_tcs.append(tc)
-
-            if valid_tcs:
-                msg = dict(msg)
-                msg["tool_calls"] = valid_tcs
-                final.append(msg)
-            else:
-                m = dict(msg)
-                m.pop("tool_calls", None)
-                final.append(m)
-                logger.debug("santrize: 二次验证全部 tool_call 丢失，降级为普通消息")
-
-            # 添加紧跟的 tool 消息
-            for k in range(i + 1, j):
-                final.append(result[k])
-            i = j
-        else:
-            final.append(msg)
-            i += 1
-
-    return final
+    return result
 
 
 @dataclass
@@ -406,10 +370,17 @@ class Agent:
         tools: Optional[List[Tool]] = None,
         config: Optional[AgentConfig] = None,
         event_logger: Optional[Any] = None,
+        model_selector=None,
     ):
         self.config = config or AgentConfig()
+        # 模式为单实例内存态：由调用方（server 端）按会话设置/恢复，不再从全局 config 加载
         self.llm = llm or SimulatorLLM()
+        self._model_selector = model_selector
         self._event_logger = event_logger
+        # ask 挂起：存当前未决的 ask 请求 id，用于 answer API 唤醒
+        self._pending_ask = None
+        # 当前已加载的工具组管理（用于状态查询）
+        self._tool_group_mgr = None
         
         # 收集所有工具
         self.tools = []
@@ -428,98 +399,10 @@ class Agent:
             self.config.base_dir
         )
         self.tools.extend(ws2_tools)
-        
-        # 添加 DataHub 工具
-        hub_tools = get_hub_tools(base_dir=self.config.base_dir)
-        self.tools.extend(hub_tools)
-        
-        # 添加 Wolfram 数学工具
-        if HAS_WOLFRAM and register_wolfram_tools:
-            try:
-                wolfram_tools = register_wolfram_tools()
-                self.tools.extend(wolfram_tools)
-                logger.info(f"已加载 {len(wolfram_tools)} 个 Wolfram 工具")
-            except Exception as e:
-                logger.exception(f"加载 Wolfram 工具失败: {e}")
-        
-        # 加载 GT Agent 工具
-        try:
-            from .gt.gt_tools import get_gt_tools
-            gt_tools = get_gt_tools()
-            self.tools.extend(gt_tools)
-            logger.info(f"已加载 {len(gt_tools)} 个 GT Agent 工具")
-        except Exception as e:
-            logger.warning(f"加载 GT Agent 工具失败: {e}")
 
-        try:
-            from .feishu.feishu_tools import get_feishu_tools
-            feishu_tools = get_feishu_tools()
-            self.tools.extend(feishu_tools)
-            logger.info(f"已加载 {len(feishu_tools)} 个飞书工具")
-        except Exception as e:
-            logger.warning(f"加载飞书工具失败: {e}")
-
-        try:
-            from .research.lean4.lean4_tools import get_lean4_tools
-            lean4_tools = get_lean4_tools()
-            self.tools.extend(lean4_tools)
-            logger.info(f"已加载 {len(lean4_tools)} 个 Lean4 工具")
-        except Exception as e:
-            logger.warning(f"加载 Lean4 工具失败: {e}")
-
-        try:
-            from .research.manim.manim_tools import get_manim_tools
-            manim_tools = get_manim_tools()
-            self.tools.extend(manim_tools)
-            logger.info(f"已加载 {len(manim_tools)} 个 Manim 工具")
-        except Exception as e:
-            logger.warning(f"加载 Manim 工具失败: {e}")
-
-        try:
-            from .research.mathlens.mathlens_tools import get_mathlens_tools
-            mathlens_tools = get_mathlens_tools()
-            self.tools.extend(mathlens_tools)
-            logger.info(f"已加载 {len(mathlens_tools)} 个 MathLens 工具")
-        except Exception as e:
-            logger.warning(f"加载 MathLens 工具失败: {e}")
-        
-        try:
-            from .research.autoresearch.autoresearch_tools import get_autoresearch_tools
-            autoresearch_tools = get_autoresearch_tools()
-            self.tools.extend(autoresearch_tools)
-            logger.info(f"已加载 {len(autoresearch_tools)} 个 AutoResearch 工具")
-        except Exception as e:
-            logger.warning(f"加载 AutoResearch 工具失败: {e}")
-
-        # 加载服务端工具（操作 Web 前端，动态发现 ws_manager）
-        try:
-            from .server.server_tools import get_server_tools
-            server_tools = get_server_tools(workspace_dir=str(self.config.base_dir) if self.config.base_dir else "")
-            self.tools.extend(server_tools)
-            logger.info(f"已加载 {len(server_tools)} 个服务端工具")
-        except Exception as e:
-            logger.debug(f"加载服务端工具失败: {e}")
-
-        # 加载多媒体工具（图片/视频读取）
-        try:
-            from .media_tools import get_media_tools
-            media_tools = get_media_tools(base_dir=self.config.base_dir)
-            self.tools.extend(media_tools)
-            logger.info(f"已加载 {len(media_tools)} 个多媒体工具")
-        except Exception as e:
-            logger.debug(f"加载多媒体工具失败: {e}")
-
-        # save_skill 工具已移除（技能自动保存，无需 LLM 审核）
-
-        # 加载远程 MCP 服务工具（如百度搜索等）
-        try:
-            from .tools import load_mcp_service_tools
-            mcp_service_tools = load_mcp_service_tools()
-            if mcp_service_tools:
-                self.tools.extend(mcp_service_tools)
-                logger.info(f"已加载 {len(mcp_service_tools)} 个远程 MCP 服务工具")
-        except Exception as e:
-            logger.debug(f"加载远程 MCP 服务工具失败: {e}")
+        # 其余工具组（DataHub/GT/飞书/Lean4/Manim/MathLens/AutoResearch/Wolfram/
+        # 服务端/多媒体/MCP远程服务）已统一在 get_tools() 中注册，
+        # 见 tools.py:get_tools() 的 _record_tool_group 调用链
 
         # 确保 DataHub 全局实例已初始化
         try:
@@ -535,6 +418,14 @@ class Agent:
         self._chat_active = threading.Event()  # 标记 chat 是否在进行中
         self._chat_active.set()  # 初始状态：无 chat 运行
         self._cancelled = False  # 标记对话是否被取消
+        self._awaiting_approval = False  # 待审批状态（审批机制置位 → 状态机 awaiting_approval）
+        self._is_streaming = False  # 真实流式/运行状态：chat 开始置 True，结束置 False（app.py 6 处 getattr 依赖此字段）
+        self._chat_epoch = 0  # chat 代际计数：cancel/reset 递增使旧线程 finally 不再复位状态机（防误清新 chat）
+        self._active_session_id = ""  # 当前活跃会话 ID
+        self._last_active_time = time_module.time()  # 最后活跃时间
+        
+        # 状态变更回调列表
+        self._status_callbacks: List[Callable] = []
 
         # 上下文注入器列表（如学习状态等外部回调）
         # 每个注入器是 Callable[[Agent, str], str]，返回要注入的上下文文本
@@ -764,6 +655,23 @@ class Agent:
         """
         self._context_injectors.append(injector)
 
+    def register_status_callback(self, callback: Callable):
+        """注册状态变更回调，在 Agent 状态变化时调用
+
+        Args:
+            callback: callable(agent, event_type, **kwargs)
+                event_type: 'chat_start', 'chat_end', 'tool_call', 'message_added'
+        """
+        self._status_callbacks.append(callback)
+
+    def _notify_status(self, event_type: str, **kwargs):
+        """通知状态变更"""
+        for cb in self._status_callbacks:
+            try:
+                cb(self, event_type, **kwargs)
+            except Exception as e:
+                logger.debug(f"Status callback error: {e}")
+
     def _init_messages(self):
         with self._messages_lock:
             if self.config.use_modern_prompt and HAS_MODERN_PROMPT:
@@ -821,13 +729,6 @@ class Agent:
                 # 注入上下文来源（Rules + Files 层）
                 if context_sources_content:
                     system_prompt += f"\n\n{context_sources_content}"
-                # 保留旧的工作区注入兼容（仅当 context_provider 未覆盖时）
-                if self.config.workspace_root and not context_sources_content:
-                    ws_injection = resolve_workspace_injection(
-                        self.config.workspace_root
-                    )
-                    if ws_injection:
-                        system_prompt += f"\n\n{ws_injection}"
                 self.messages = [
                     {"role": "system", "content": system_prompt}
                 ]
@@ -1117,8 +1018,29 @@ class Agent:
             # 步骤 3: 执行 auto_compact
             if HAS_MODERN_PROMPT:
                 from .prompt.context_window import auto_compact
+                # 日志式归档：压缩前保存完整原始消息（供检查点回退时展开找回历史，多次压缩可还原）
+                try:
+                    if HAS_CACHE:
+                        from .cache.context_reloader import get_context_reloader
+                        _rel = get_context_reloader()
+                        _arch = _rel.create_checkpoint(
+                            messages=self.messages,
+                            message_index=len(self.messages),
+                            total_tokens=0,
+                            summary=f"[pre-compact-archive] {reason or 'auto'}",
+                            workspace_root="",
+                            snapshot_files=False,
+                        )
+                        if _arch is not None:
+                            _rel.save_checkpoint(_arch)
+                            logger.info(
+                                f"压缩前完整历史已归档: {_arch.checkpoint_id} "
+                                f"({len(self.messages)} 条消息, {reason or 'auto'})"
+                            )
+                except Exception as e:
+                    logger.debug(f"压缩前归档失败: {e}")
                 original_count = len(self.messages)
-                compacted, did_compact = auto_compact(self.messages, self.config.model_id or "gpt-4o", context_window_override=self.model_context_window)
+                compacted, did_compact = auto_compact(self.messages, self.config.model_id or "gpt-4o", context_window_override=self.model_context_window, force=True)
                 if did_compact:
                     self.messages = compacted
                 compacted_count = len(self.messages)
@@ -1139,16 +1061,51 @@ class Agent:
         on_tool_result: Optional[Callable[[str, str], None]] = None,
         max_tool_tokens: int = 2000,
         session_id: str = "",
+        on_sub_agent_event: Optional[Callable[[dict], None]] = None,
     ) -> str:
         self._cancelled = False  # 新对话，清除取消标志
+        self._chat_epoch += 1  # 新代际：旧线程（若有）finally 不再复位本代状态机
+        my_epoch = self._chat_epoch
         self._chat_active.clear()  # 标记 chat 正在进行
+        self._is_streaming = True  # 标记运行中（前端流式状态依据）
+        self._last_active_time = time_module.time()  # 更新最后活跃时间
+        if session_id:
+            self._active_session_id = session_id
+        
+        # 通知状态变更：chat_start
+        self._notify_status('chat_start', session_id=self._active_session_id)
+        
+        # 子代理执行进度回调（本次对话期间有效，供 _execute_tool 转发到流式通道）
+        self._current_sub_agent_cb = on_sub_agent_event
         try:
-            return self._chat_impl(
+            result = self._chat_impl(
                 user_input, on_token, on_tool, on_tool_result,
                 max_tool_tokens, session_id,
             )
+            return result
         finally:
-            self._chat_active.set()  # 标记 chat 已结束
+            self._current_sub_agent_cb = None
+            if self._chat_epoch == my_epoch:
+                # 本代未被 cancel/reset 换代：正常复位状态机
+                self._chat_active.set()  # 标记 chat 已结束
+                self._is_streaming = False  # 标记运行结束
+                self._last_active_time = time_module.time()  # 更新结束时间
+                # 通知状态变更：chat_end
+                self._notify_status('chat_end', session_id=self._active_session_id)
+            else:
+                # 已被 cancel/reset 换代：状态机已复位，不重复通知（防覆盖新 chat 状态）
+                self._last_active_time = time_module.time()
+
+    def _call_llm(self, messages, tools=None, on_token=None, session_id=""):
+        """调用当前模型选择器，并把真实 Agent 会话 ID 传入。"""
+        if self._model_selector is not None:
+            return self._model_selector.chat(
+                messages,
+                tools=tools,
+                on_token=on_token,
+                session_id=session_id or None,
+            )
+        return self.llm.chat(messages, tools=tools, on_token=on_token)
 
     def _chat_impl(
         self,
@@ -1295,15 +1252,21 @@ class Agent:
 
             if HAS_MIDDLEWARE and self._middleware_chain and mw_ctx:
                 def _llm_handler(msgs):
-                    return self.llm.chat(msgs, tools=tool_schemas, on_token=on_token)
+                    return self._call_llm(
+                        msgs,
+                        tools=tool_schemas,
+                        on_token=on_token,
+                        session_id=session_id,
+                    )
                 response = self._middleware_chain.run_wrap_model_call(
                     safe_messages, _llm_handler, mw_ctx
                 )
             else:
-                response = self.llm.chat(
+                response = self._call_llm(
                     safe_messages,
                     tools=tool_schemas,
                     on_token=on_token,
+                    session_id=session_id,
                 )
 
             total_prompt_tokens += response.prompt_tokens
@@ -1367,30 +1330,56 @@ class Agent:
                 if on_tool:
                     on_tool(tc.name, tc.arguments)
                 result = self._execute_tool(tc, max_tool_tokens=max_tool_tokens, mw_ctx=mw_ctx)
+                # ask 挂起：若工具触发了 ask，将 result 替换为用户答案注入对话
+                if tc.name == "ask_followup_question":
+                    ans = self.get_last_ask_answer()
+                    if ans is not None:
+                        result = f"用户答复: {ans}"
+                # 获取 checkpoint_hash (由 after_tool 中间件写入)
+                cp_hash = self._get_last_checkpoint_hash()
                 if on_tool_result:
                     on_tool_result(tc.name, result)
-                # 中间件强制停止时立即终止
-                if self._cancelled:
-                    return "(连续工具错误，已强制停止)"
+                # 先注入结果到对话循环（包括超时/中间件停止等情况）
                 with self._messages_lock:
                     self.messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": result,
+                        "checkpoint_hash": cp_hash,
                     })
+                # 自动创建对话快照并关联 SQLite 检查点（迁移自 agent_assistant 每轮自动保存）
+                self._auto_conversation_checkpoint(tc.name, cp_hash)
+                # 同时将 checkpoint_hash 关联到 assistant 的 tool_call
+                if cp_hash:
+                    for msg in reversed(self.messages):
+                        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                            for t in msg["tool_calls"]:
+                                if isinstance(t, dict) and t.get("id") == tc.id:
+                                    t["checkpoint_hash"] = cp_hash
+                                    break
+                            break
+                        elif msg.get("tool_calls"):
+                            for t in msg["tool_calls"]:
+                                if hasattr(t, 'id') and t.id == tc.id:
+                                    if hasattr(t, 'checkpoint_hash'):
+                                        t.checkpoint_hash = cp_hash
+                                    break
+                            break
                 # 标记工具已使用，确保后续轮次保留
                 self._mark_tool_used(tc.name)
                 # 如果激活了工具组，立即更新 prompt 和 schemas
                 if tc.name == "activate_tool_group":
                     self._update_tool_use_in_prompt()
+                # 结果注入后再检查是否取消（用户主动取消 / 中间件强制停止）
+                if self._cancelled:
+                    return "(已取消)"
             else:
                 results = self._execute_tools_parallel(
                     response.tool_calls, on_tool, max_tool_tokens=max_tool_tokens, mw_ctx=mw_ctx
                 )
-                # 中间件强制停止时立即终止
-                if self._cancelled:
-                    return "(连续工具错误，已强制停止)"
+                # 先注入所有结果到对话循环
                 for tc, result in zip(response.tool_calls, results):
+                    cp_hash = self._get_last_checkpoint_hash()
                     if on_tool_result:
                         on_tool_result(tc.name, result)
                     with self._messages_lock:
@@ -1398,10 +1387,29 @@ class Agent:
                             "role": "tool",
                             "tool_call_id": tc.id,
                             "content": result,
+                            "checkpoint_hash": cp_hash,
                         })
+                    # 自动创建对话快照并关联 SQLite 检查点
+                    self._auto_conversation_checkpoint(tc.name, cp_hash)
+                    # 将 checkpoint_hash 关联到 assistant 的 tool_call
+                    if cp_hash:
+                        for msg in reversed(self.messages):
+                            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                                for t in msg["tool_calls"]:
+                                    if isinstance(t, dict) and t.get("id") == tc.id:
+                                        t["checkpoint_hash"] = cp_hash
+                                        break
+                                    elif hasattr(t, 'id') and t.id == tc.id:
+                                        if hasattr(t, 'checkpoint_hash'):
+                                            t.checkpoint_hash = cp_hash
+                                        break
+                                break
                     self._mark_tool_used(tc.name)
                     if tc.name == "activate_tool_group":
                         self._update_tool_use_in_prompt()
+                # 结果注入后再检查是否取消
+                if self._cancelled:
+                    return "(已取消)"
 
             # 每轮工具执行后检查上下文窗口（安全网，主防线在 llm.chat 前）
             if HAS_MODERN_PROMPT:
@@ -1437,10 +1445,13 @@ class Agent:
         if tool_call.name == "sub_agent" and self._agent_tool is not None:
             try:
                 args = tool_call.arguments or {}
+                # 转发子代理执行进度到主流式通道（前端实时显示工具请求/进程）
+                _sub_event_cb = getattr(self, '_current_sub_agent_cb', None)
                 result = self._agent_tool(
                     agent=args.get("agent", ""),
                     prompt=args.get("prompt", ""),
                     context=args.get("context"),
+                    on_event=_sub_event_cb,
                 )
                 logger.info(f"子Agent执行完成 ({len(str(result))} 字符)")
                 _result = str(result)
@@ -1496,6 +1507,11 @@ class Agent:
             args = tool_call.arguments or {}
             result = tool.execute(**args)
             logger.info(f"工具 {tool_call.name} 执行完成 ({len(result)} 字符)")
+
+            # ask_followup_question 挂起式：检查 _suspend_ask 标志，触发后挂起 turn
+            if tool_call.name == "ask_followup_question" and self._maybe_suspend_for_ask(result):
+                return f'{{"success":true,"suspended":"ask","timeout":true}}'
+
             if HAS_MIDDLEWARE and self._middleware_chain and mw_ctx:
                 mw_after = self._middleware_chain.run_after_tool(tool_call.name, tool_call.arguments or {}, result, mw_ctx)
                 if mw_after and mw_after.action == MiddlewareAction.STOP and mw_after.force_stop:
@@ -1549,11 +1565,12 @@ class Agent:
                     try:
                         result_map[id(tc)] = f.result(timeout=timeout_per_tool)
                     except concurrent.futures.TimeoutError:
-                        result_map[id(tc)] = f'{{"success":false,"error":"工具 {tc.name} 执行超时"}}'
+                        # 超时：保留 JSON 格式，但不设置 _cancelled，让结果注入循环
+                        result_map[id(tc)] = f'{{"success":false,"error":"工具 {tc.name} 执行超时({timeout_per_tool}秒)"}}'
                     except Exception as e:
                         result_map[id(tc)] = f'{{"success":false,"error":"工具 {tc.name} 执行异常: {e}"}}'
             except concurrent.futures.TimeoutError:
-                logger.error(f"工具并行执行整体超时 ({timeout_per_tool * len(tool_calls)}s)，为剩余工具填充超时结果")
+                logger.warning(f"工具并行执行整体超时，为剩余工具填充超时结果")
                 for tc in tool_calls:
                     if id(tc) not in result_map:
                         result_map[id(tc)] = f'{{"success":false,"error":"工具 {tc.name} 批处理超时"}}'
@@ -1571,6 +1588,75 @@ class Agent:
         with self._messages_lock:
             self.messages = list(messages)
 
+    # ─── 模式 setter（单实例内存态，持久化由 server 端按会话负责）───
+    def set_mode(self, mode: str) -> str:
+        """设置本实例运行模式（act|plan）。返回归一化后的模式。"""
+        mode = (mode or "act").strip().lower()
+        if mode not in ("act", "plan"):
+            mode = "act"
+        self.config.mode = mode
+        logger.info(f"Agent 模式已切换为 {mode}")
+        return mode
+
+    def get_mode(self) -> str:
+        return getattr(self.config, "mode", "act") or "act"
+
+    # ─── ask/answer 追问接口（供 server 端点调用）───
+    def set_pending_ask(self, request_id: str) -> None:
+        """标记当前 turn 挂起在 ask 问题上"""
+        self._pending_ask = request_id
+        self._awaiting_approval = True
+
+    def clear_pending_ask(self) -> None:
+        self._pending_ask = None
+        self._awaiting_approval = False
+
+    def get_pending_ask(self) -> Optional[str]:
+        return getattr(self, "_pending_ask", None)
+
+    def _maybe_suspend_for_ask(self, tool_result: str) -> bool:
+        """ask_followup_question 调用后:若注册了 ask 通道 + 用户存在,挂起并等答案。
+        挂起期间主线程通过 _consume_ask_answer 唤醒（由 ask/answer API 触发）。
+        """
+        import json as _json
+        import time as _t
+        try:
+            payload = _json.loads(tool_result)
+        except Exception:
+            return False
+        if not isinstance(payload, dict) or not payload.get("_suspend_ask"):
+            return False
+        # 取挂起通道：sse 推送 + 阻塞等答案
+        sender = getattr(self, "_current_ask_sender", None)
+        if sender is None:
+            return False
+        import uuid as _u
+        rid = _u.uuid4().hex[:8]
+        question = payload.get("question", "")
+        options = payload.get("options", []) or []
+        self.set_pending_ask(rid)
+        try:
+            sender({"type": "ask", "request_id": rid, "question": question, "options": options})
+        except Exception:
+            pass
+        # 阻塞主线程（最长 300s），由 answer API 唤醒
+        deadline = _t.time() + 300
+        while _t.time() < deadline:
+            if self._pending_ask is None:
+                break
+            _t.sleep(0.1)
+        answer = getattr(self, "_last_ask_answer", None)
+        self._last_ask_answer = None
+        self.clear_pending_ask()
+        if answer is None:
+            answer = "（用户未作答）"
+        # 把答案作为后续 tool_result 注入：调用方（_chat_impl）将本工具结果替换成答案
+        self._last_ask_answer = answer
+        return True
+
+    def get_last_ask_answer(self) -> Optional[str]:
+        return getattr(self, "_last_ask_answer", None)
+
     def reset(self):
         """重置对话，等待当前 chat 完成后再清空"""
         # 设置取消标志，让正在运行的 chat 立即停止追加消息
@@ -1580,6 +1666,12 @@ class Agent:
             self.llm.cancel()
         # 等待当前 chat 完成（最多等 5 秒）
         self._chat_active.wait(timeout=5.0)
+        # 换代 + 强制复位：chat 可能 wait 超时仍在运行，
+        # 递增 _chat_epoch 使该线程 finally 不再复位状态机，
+        # 并手动 set/False 确保本 reset 后处于空闲态。
+        self._chat_epoch += 1
+        self._chat_active.set()
+        self._is_streaming = False
         self._init_messages()
         # 重置工具组状态，避免跨对话残留
         mgr = getattr(self, '_tool_group_mgr', None)
@@ -1591,11 +1683,41 @@ class Agent:
         self._cancelled = False
 
     def cancel(self):
-        """取消当前对话请求"""
+        """取消当前对话请求
+
+        立即复位状态机（_chat_active.set / _is_streaming=False），
+        并递增 _chat_epoch 使旧 chat 线程的 finally 不再复位状态机，
+        避免「前端已复位、后端仍卡 running」以及「旧线程 finally 误清新 chat」。
+        """
         self._cancelled = True
         if self.llm and hasattr(self.llm, 'cancel'):
             self.llm.cancel()
             logger.info("[Agent.cancel] 已发送取消信号")
+        self._chat_epoch += 1  # 换代：旧 chat finally 不再复位
+        self._chat_active.set()  # 立即标记为空闲
+        self._is_streaming = False  # 立即标记非运行中
+        self._notify_status('chat_cancelled', session_id=self._active_session_id)
+
+    def _get_last_checkpoint_hash(self) -> str:
+        """从 CheckpointMiddleware 获取最后一个 checkpoint hash
+
+        优先返回 _last_checkpoint_id（每次工具调用都更新的 SQLite id，
+        与 SSE tool_result / 前端一致），回退 git hash。
+        否则中间步骤工具调用的 hash 为空 → 会话重载/诚实渲染后工具卡片
+        checkpoint 丢失，无法恢复。
+        """
+        try:
+            if HAS_MIDDLEWARE and self._middleware_chain:
+                for mw in self._middleware_chain._middlewares:
+                    from .middleware.shadow_checkpoint import CheckpointMiddleware
+                    if isinstance(mw, CheckpointMiddleware):
+                        cp_id = getattr(mw, '_last_checkpoint_id', 0)
+                        if cp_id and cp_id > 0:
+                            return str(cp_id)
+                        return getattr(mw, '_last_hash', '') or ''
+        except Exception:
+            pass
+        return ''
 
     def run_sub_agent(self, agent_name: str, prompt: str, context: Optional[Dict[str, Any]] = None) -> "SubAgentResult":
         """委派任务给子Agent执行"""
@@ -1619,6 +1741,42 @@ class Agent:
             from .sandbox.executor import ExecutionResult
             return ExecutionResult(command=f"<{language} script>", error="沙盒未初始化")
         return self._sandbox.execute_script(script, language=language)
+
+    def _auto_conversation_checkpoint(self, tool_name: str, sqlite_cp_hash: str) -> str:
+        """通用流程自动创建对话快照（迁移自 agent_assistant 的每轮自动保存）
+
+        每次工具调用后创建一个 ContextReloader 的 cp-* 消息快照，并将其 id
+        回填到 SQLite checkpoints 记录的 conversation_checkpoint_id，使前端
+        回退检查点时后端能恢复对话历史（restore API 按 SQLite id 反查 cp-*）。
+        """
+        try:
+            if not HAS_CACHE:
+                return ""
+            sqlite_id = None
+            if sqlite_cp_hash and str(sqlite_cp_hash).isdigit():
+                sqlite_id = int(sqlite_cp_hash)
+            step_info = f"#{sqlite_cp_hash}" if sqlite_id else ""
+            cp = self.create_checkpoint(
+                summary=f"{step_info} {tool_name or '对话'}",
+                snapshot_files=False,
+            )
+            if cp is None:
+                return ""
+            cp_id = getattr(cp, "checkpoint_id", "") or str(cp)
+            # 回填关联：SQLite 检查点 → ContextReloader 对话快照
+            if sqlite_id and HAS_MIDDLEWARE and self._middleware_chain:
+                try:
+                    from .middleware.shadow_checkpoint import CheckpointMiddleware
+                    for mw in self._middleware_chain._middlewares:
+                        if isinstance(mw, CheckpointMiddleware) and getattr(mw, "fdb", None):
+                            mw.fdb.update_conversation_checkpoint(sqlite_id, str(cp_id))
+                            break
+                except Exception:
+                    pass
+            return str(cp_id)
+        except Exception as e:
+            logger.debug(f"自动对话检查点创建失败: {e}")
+            return ""
 
     def create_checkpoint(self, summary: str = "", snapshot_files: bool = False) -> Optional[Any]:
         """创建会话检查点（增强版 — 包含可选的文件快照和 git commit）
@@ -1776,6 +1934,13 @@ def create_agent(
     llm = None
     model_id = ""
     multi_provider_manager = None
+    model_selector = None
+
+    try:
+        from .model_selector import get_model_selector
+        model_selector = get_model_selector()
+    except Exception as e:
+        logger.warning(f"模型选择器初始化失败，使用传统 LLM 路径：{e}")
 
     # 尝试使用多提供商系统（MultiProviderManager 现在在 llm.py 中）
     try:
@@ -1870,7 +2035,12 @@ def create_agent(
         except Exception as e:
             logger.warning(f"自动耦合 event_logger 失败: {e}")
 
-    agent = Agent(llm=llm, config=config, event_logger=event_logger_instance)
+    agent = Agent(
+        llm=llm,
+        config=config,
+        event_logger=event_logger_instance,
+        model_selector=model_selector,
+    )
     
     if multi_provider_manager:
         agent._multi_provider = multi_provider_manager
@@ -1879,6 +2049,8 @@ def create_agent(
         from .plugins import PluginManager
         plugin_mgr = PluginManager(plugins_dirs=[base_dir / "plugins"] if base_dir else [])
         plugin_mgr.discover_plugins()
+        # 保存引用，供 API 层按需加载/激活插件（注入链路使用）
+        agent._plugin_mgr = plugin_mgr
         plugin_ctxs = plugin_mgr.load_all()
         for ctx in plugin_ctxs:
             for tool_reg in ctx.get_registered_tools():
@@ -1901,8 +2073,13 @@ def create_agent(
     if base_dir:
         try:
             from .skill_system import Skill
-            skills_dir = Path(base_dir) / "skills"
-            if skills_dir.exists():
+            # 技能发现来源：本地 skills/ + 市场 skills_market/
+            scan_sources = ["skills", "skills_market"]
+            total_discovered = 0
+            for source_name in scan_sources:
+                skills_dir = Path(base_dir) / source_name
+                if not skills_dir.exists():
+                    continue
                 discovered = 0
                 for skill_subdir in sorted(skills_dir.iterdir()):
                     if not skill_subdir.is_dir():
@@ -1928,13 +2105,15 @@ def create_agent(
                                         "tags": skill_obj.tags,
                                         "allowed_tools": skill_obj.allowed_tools,
                                         "skill_dir": str(skill_subdir),
+                                        "market": (source_name == "skills_market"),
                                     },
                                 ))
                             discovered += 1
                     except Exception as e:
                         logger.debug(f"技能发现跳过 {skill_subdir.name}: {e}")
                 if discovered:
-                    logger.info(f"从 skills/ 目录发现 {discovered} 个技能")
+                    logger.info(f"从 {source_name}/ 目录发现 {discovered} 个技能")
+                    total_discovered += discovered
         except Exception as e:
             logger.debug(f"技能扫描不可用: {e}")
     

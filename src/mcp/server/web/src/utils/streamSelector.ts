@@ -1,4 +1,4 @@
-import type { VideoStreamInfo, AudioStreamInfo } from '../plugins/bridge'
+import type { VideoStreamInfo, AudioStreamInfo } from '../types/extraction'
 
 export type QualityPreference = 'highest' | 'lowest' | number
 

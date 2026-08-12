@@ -61,7 +61,7 @@ import { proxyImageUrl } from '../extractor/BilibiliImageProxy'
 import { useFeedStore } from '../stores/feed'
 import { useSubscriptionsStore } from '../stores/subscriptions'
 import { api, extractNextPage } from '../plugins/bridge'
-import type { StreamInfoItem, FeedInfoResult } from '../plugins/bridge'
+import type { StreamInfoItem, FeedInfoResult } from '../types/extraction'
 
 const router = useRouter()
 const feedStore = useFeedStore()

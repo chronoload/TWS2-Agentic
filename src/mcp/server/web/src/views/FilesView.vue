@@ -1201,7 +1201,15 @@ async function handleDrop(event: DragEvent) {
 const ctxMenu = ref({ visible: false, x: 0, y: 0, entry: null as DirEntry | null })
 
 function showCtxMenu(entry: DirEntry, event: MouseEvent) {
-  ctxMenu.value = { visible: true, x: event.clientX, y: event.clientY, entry }
+  // 菜单跟随被右键点击的条目元素（而非鼠标坐标）：贴在条目右下方
+  let x = event.clientX, y = event.clientY
+  const targetEl = event.currentTarget as HTMLElement | null
+  if (targetEl) {
+    const rect = targetEl.getBoundingClientRect()
+    x = Math.min(rect.left, window.innerWidth - 200)
+    y = Math.min(rect.bottom + 4, window.innerHeight - 200)
+  }
+  ctxMenu.value = { visible: true, x, y, entry }
 }
 
 function closeCtxMenu() {

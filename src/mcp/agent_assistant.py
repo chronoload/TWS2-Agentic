@@ -303,8 +303,8 @@ def _lazy_import_workflow():
     return WorkflowEngine, WorkflowStatus, get_workflow_engine, get_workflow, list_workflows
 
 def _lazy_import_compactor():
-    from .context_compactor import AutoCompact, estimate_messages_tokens
-    return AutoCompact, estimate_messages_tokens
+    from .prompt.context_window import auto_compact, estimate_messages_tokens
+    return auto_compact, estimate_messages_tokens
 
 def _lazy_import_git_searcher():
     from .git_searcher import get_git_searcher
@@ -670,10 +670,6 @@ class AgentAssistantWindow:
         # 工作流引擎 - 懒加载
         self._workflow_engine = None
         self._workflow_loaded = False
-
-        # AutoCompact 上下文压缩 - 懒加载
-        self._compactor = None
-        self._compactor_loaded = False
 
         # Git 搜索 - 懒加载
         self._git_searcher = None
@@ -1604,11 +1600,7 @@ class AgentAssistantWindow:
                 except Exception as e:
                     print(f"[Async] 工作流加载失败: {e}")
 
-                # 2. 延迟加载AutoCompact
-                try:
-                    pass
-                except Exception as e:
-                    print(f"[Async] AutoCompact已禁用: {e}")
+                # 2. 上下文压缩：惰性调用 context_window.auto_compact（见 _async_compact）
 
                 # 3. 延迟加载Git搜索
                 try:
@@ -3880,16 +3872,31 @@ class AgentAssistantWindow:
             messagebox.showerror("错误", f"复制失败: {e}")
     
     def _show_checkpoint_list(self):
-        """显示检查点列表供选择回退 — 合并 context_reloader + CheckpointMiddleware"""
+        """显示检查点列表供选择回退 — 合并 SessionStore + ContextReloader + CheckpointMiddleware"""
         if not self.agent:
             messagebox.showinfo("检查点", "Agent 未就绪")
             return
         
         try:
-            # 收集所有检查点（统一格式）
-            checkpoints = []  # [{id, timestamp, summary, msg_count, type}]
+            checkpoints = []
 
-            # 来源1: ContextReloader（消息快照）
+            # 来源1: SessionStore（新系统）
+            try:
+                from .harness.session_store import SessionStore
+                store = SessionStore()
+                for rec in store.list_sessions(limit=50):
+                    checkpoints.append({
+                        "id": rec.id,
+                        "timestamp": rec.updated_at,
+                        "summary": rec.name or "会话",
+                        "msg_count": len(rec.messages),
+                        "token_count": rec.total_tokens,
+                        "type": "session_store",
+                    })
+            except Exception:
+                pass
+
+            # 来源2: ContextReloader（历史 checkpoint）
             if hasattr(self, '_context_reloader') and self._context_reloader:
                 for cp_id in self._context_reloader.list_checkpoints():
                     cp = self._context_reloader.restore_checkpoint(cp_id)
@@ -3903,7 +3910,7 @@ class AgentAssistantWindow:
                             "type": "reloader",
                         })
 
-            # 来源2: CheckpointMiddleware（文件快照，仅当 middleware 可用）
+            # 来源3: CheckpointMiddleware（文件快照，仅当 middleware 可用）
             if self.agent and hasattr(self.agent, '_middleware_chain') and self.agent._middleware_chain:
                 for mw in self.agent._middleware_chain._middlewares:
                     try:
@@ -3997,7 +4004,7 @@ class AgentAssistantWindow:
             for i, cp in enumerate(checkpoints):
                 dt_str = datetime.fromtimestamp(cp["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
                 msg_part = f"消息: {cp['msg_count']}" if cp["msg_count"] else ""
-                src_tag = {"reloader": "💬消息", "middleware": "📁文件"}.get(cp["type"], "")
+                src_tag = {"reloader": "💬消息", "session_store": "💾会话", "middleware": "📁文件"}.get(cp["type"], "")
                 diff_part = f"{cp.get('diff_count', 0)} files" if cp.get("diff_count") else ""
                 parts = [f"[{dt_str}]", src_tag, cp["summary"]]
                 if diff_part:
@@ -4045,7 +4052,7 @@ class AgentAssistantWindow:
                                 break
                     except Exception:
                         pass
-                elif cp["type"] == "reloader" and hasattr(self, '_context_reloader') and self._context_reloader:
+                elif cp["type"] in ("reloader", "session_store") and hasattr(self, '_context_reloader') and self._context_reloader:
                     try:
                         d = self._context_reloader.get_checkpoint_diff(cp["id"])
                         if d:
@@ -4146,7 +4153,14 @@ class AgentAssistantWindow:
 
         if result:
             try:
-                if cp["type"] == "reloader" and hasattr(self, '_context_reloader') and self._context_reloader:
+                if cp["type"] == "session_store":
+                    try:
+                        from .harness.session_store import SessionStore
+                        store = SessionStore()
+                        store.delete(cp["id"])
+                    except Exception:
+                        pass
+                elif cp["type"] == "reloader" and hasattr(self, '_context_reloader') and self._context_reloader:
                     self._context_reloader.delete_checkpoint(cp["id"])
                 listbox.delete(sel_idx)
                 messagebox.showinfo("成功", "检查点已删除！")
@@ -4216,13 +4230,22 @@ class AgentAssistantWindow:
                     except Exception as e:
                         logger.warning(f"文件恢复失败: {e}")
 
-                # 对话恢复：通过 agent.restore_checkpoint 或 context_reloader
+                # 对话恢复：支持 session_store / reloader / middleware
                 if restore_type in ("task", "taskAndWorkspace"):
                     try:
-                        if cp_type == "reloader" and self.agent and hasattr(self.agent, 'restore_checkpoint'):
+                        if cp_type == "session_store":
+                            try:
+                                from .harness.session_store import SessionStore
+                                store = SessionStore()
+                                rec = store.get(cp_id)
+                                if rec and rec.messages and self.agent:
+                                    self.agent.restore_messages(rec.messages)
+                                    msgs_restored = True
+                            except Exception as e:
+                                logger.warning(f"SessionStore restore failed: {e}")
+                        elif cp_type == "reloader" and self.agent and hasattr(self.agent, 'restore_checkpoint'):
                             msgs_restored = self.agent.restore_checkpoint(cp_id, restore_type="task")
                         elif cp_type == "middleware":
-                            # middleware 检查点：只恢复了文件，消息保留当前
                             pass
                     except Exception as e:
                         logger.warning(f"对话恢复失败: {e}")
@@ -4810,14 +4833,20 @@ class AgentAssistantWindow:
     def _async_compact(self):
         try:
             current = self.agent.snapshot_messages()
-            if self._compactor.should_compact(current):
-                original = len(current)
-                compacted = self._compactor.compact(current)
-                self.agent.restore_messages(compacted)
-                self.window.after(0, lambda: self._append_system_message(
-                    f"🔄 上下文自动压缩: {original} → {len(compacted)} 条消息"
-                ))
-                self._compactor._compaction_count += 1
+            auto_compact, _ = _lazy_import_compactor()
+            # 模型 id 取 Agent 配置（defuse 扫描可能报 loose_match，属跨对象动态属性噪音）
+            try:
+                model_id = self.agent.config.model_id or ""
+            except AttributeError:
+                model_id = ""
+            compacted, did_compact = auto_compact(current, model_id)
+            if not did_compact:
+                return
+            original = len(current)
+            self.agent.restore_messages(compacted)
+            self.window.after(0, lambda: self._append_system_message(
+                f"🔄 上下文自动压缩: {original} → {len(compacted)} 条消息"
+            ))
         except Exception as e:
             print(f"AutoCompact 失败: {e}")
 

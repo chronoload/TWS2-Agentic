@@ -94,6 +94,7 @@
     <PlayQueuePanel :visible="showQueue" @close="showQueue = false" />
     <DownloadDialog :visible="showDownload" :info="info" @close="showDownload = false" @download="onDownload" />
 
+    <ExtractionDebug :data="rawResult" />
     <div class="debug-section">
       <button class="debug-toggle" @click="showDebug = !showDebug">
         {{ showDebug ? '▼' : '▶' }} 诊断信息
@@ -139,12 +140,13 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, extractNextPage } from '../plugins/bridge'
-import type { StreamInfoResult, VideoStreamInfo, AudioStreamInfo } from '../plugins/bridge'
+import type { StreamInfoResult, VideoStreamInfo, AudioStreamInfo } from '../types/extraction'
 import { proxyImageUrl } from '../extractor/BilibiliImageProxy'
 
 import PlayQueuePanel from '../components/PlayQueuePanel.vue'
 import DownloadDialog from '../components/DownloadDialog.vue'
 import ExtractionErrors from '../components/ExtractionErrors.vue'
+import ExtractionDebug from '../components/debug/ExtractionDebug.vue'
 import { usePlayQueueStore } from '../stores/playQueue'
 import { useStreamStateStore } from '../stores/streamState'
 import { usePlaylistsStore } from '../stores/playlists'

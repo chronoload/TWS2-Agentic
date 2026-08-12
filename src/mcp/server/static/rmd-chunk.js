@@ -78,6 +78,52 @@
 
   var FENCE_RE = /^(\s*)(`{3,})(.*)$/;
 
+  // markdown 图片语法：![alt](src) 或 ![alt](src "title")
+  var IMG_RE = /!\[([^\]]*)\]\(([^)]*?)(?:\s+("[^"]*"))?\)/g;
+  // 下载 URL 前缀（可带 origin，也可为根相对路径）
+  var DL_PREFIX = /^(?:https?:\/\/[^/]+)?\/api\/file\/download\//;
+
+  function encodeSegs(path) {
+    return path.split('/').map(function (seg) {
+      try { return encodeURIComponent(seg); } catch (e) { return seg; }
+    }).join('/');
+  }
+
+  function decodeSegs(path) {
+    return path.split('/').map(function (seg) {
+      try { return decodeURIComponent(seg); } catch (e) { return seg; }
+    }).join('/');
+  }
+
+  // 相对路径 → 下载 URL；已是 URL/绝对/协议链接则返回 null（保持原样）
+  function relToDownloadUrl(src) {
+    if (DL_PREFIX.test(src)) return null;
+    if (/^(?:https?:\/\/|\/\/|data:|#|mailto:|<|\/)/.test(src)) return null;
+    var p = src;
+    if (p.indexOf('./') === 0) p = p.slice(2);
+    if (!p) return null;
+    return '/api/file/download/' + encodeSegs(p);
+  }
+
+  // 下载 URL → 相对路径；非下载 URL 返回 null（保持原样）
+  function downloadUrlToRel(src) {
+    var m = DL_PREFIX.exec(src);
+    if (!m) return null;
+    var rest = src.slice(m[0].length);
+    var q = rest.indexOf('?'); if (q !== -1) rest = rest.slice(0, q);
+    var h = rest.indexOf('#'); if (h !== -1) rest = rest.slice(0, h);
+    if (!rest) return null;
+    return decodeSegs(rest);
+  }
+
+  function rewriteImages(line, toEditor) {
+    return line.replace(IMG_RE, function (whole, alt, src, title) {
+      var s = toEditor ? relToDownloadUrl(src) : downloadUrlToRel(src);
+      if (s == null || s === src) return whole;
+      return '![' + alt + '](' + s + (title ? ' ' + title : '') + ')';
+    });
+  }
+
   function rmToEditorSource(md) {
     if (md == null) return '';
     var lines = String(md).split('\n');
@@ -108,7 +154,7 @@
           continue;
         }
       }
-      out.push(line);
+      out.push(rewriteImages(line, true));
       i++;
     }
     return out.join('\n');
@@ -151,7 +197,7 @@
           continue;
         }
       }
-      out.push(line);
+      out.push(rewriteImages(line, false));
       i++;
     }
     return out.join('\n');
@@ -289,8 +335,11 @@
   var _enhancing = false;
   function initRmdChunksWatcher(container, vditor) {
     if (!global.MutationObserver || !container) return;
-    if (container.__rmdWatcherInited) return;
-    container.__rmdWatcherInited = true;
+    // 若同一 container 已有 observer，先 disconnect（Vditor 重建场景）
+    if (container.__rmdObserver) {
+      try { container.__rmdObserver.disconnect(); } catch (e) {}
+      container.__rmdObserver = null;
+    }
     if (vditor) container.__rmdVditor = vditor;
     var observer = new MutationObserver(function () {
       if (_enhancing) return;
@@ -299,6 +348,7 @@
       finally { setTimeout(function () { _enhancing = false; }, 0); }
     });
     observer.observe(container, { childList: true, subtree: true });
+    container.__rmdObserver = observer;  // 存入属性，便于后续 disconnect
     initChunkEditTrigger();
   }
 

@@ -50,6 +50,8 @@ class StdioTransport(BaseTransport):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 env=merged_env,
             )
             return self.is_connected()

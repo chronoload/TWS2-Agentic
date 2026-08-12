@@ -57,7 +57,8 @@ class Turn:
         return self._result
 
     @property
-    def id(self) -> str:
+    def turn_id(self) -> str:
+        # 注：避免与 builtin id() 同名，防止反射/静态扫描误判为 builtin 覆盖
         return self._result.id
 
     @property

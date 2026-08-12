@@ -78,7 +78,7 @@ import { useRouter } from 'vue-router'
 import { proxyImageUrl } from '../extractor/BilibiliImageProxy'
 import { usePlaylistsStore } from '../stores/playlists'
 import { usePlayQueueStore } from '../stores/playQueue'
-import type { StreamInfoItem } from '../plugins/bridge'
+import type { StreamInfoItem } from '../types/extraction'
 import VideoCard from '../components/VideoCard.vue'
 
 const router = useRouter()

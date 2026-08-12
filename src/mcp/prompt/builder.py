@@ -122,5 +122,18 @@ def build_system_prompt(
 
     ctx["model_id"] = model_id or ctx.get("model_id", "")
 
+    # 合并 config 中的提示词组件配置（内置模板覆盖 + 自定义编排提示词）。
+    # 深拷贝 variant，避免污染全局变体单例。
+    try:
+        import copy as _copy
+        variant = _copy.deepcopy(variant)
+        from ..config import get_config_manager
+        _cfg = get_config_manager().get_prompt_components()
+        if _cfg:
+            from .components import apply_config_components
+            apply_config_components(variant, _cfg)
+    except Exception:
+        pass
+
     builder = PromptBuilder(variant=variant, context=ctx)
     return builder.build()

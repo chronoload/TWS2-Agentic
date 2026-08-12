@@ -133,7 +133,7 @@ class FileSyncEngine:
     }
 
     # 仅暴露这些顶级目录（安全限制，不暴露源代码）
-    EXPOSED_DIRS = {"Notes", "bookmarks", "data", "datahub", "projects"}
+    EXPOSED_DIRS = {"Notes", "bookmarks", "data", "datahub", "projects", "docs"}
 
     # 根目录下允许暴露的特定文件
     EXPOSED_ROOT_FILES = {"bookmarks.json", "courses_structured.json", "task_board.json"}
@@ -474,6 +474,10 @@ class FileSyncEngine:
         top_dir = rel_path.split("/")[0]
         return top_dir in self.EXPOSED_DIRS
 
+    def _is_hidden(self, rel_path: str) -> bool:
+        """检查路径是否含隐藏段（任意路径段以 . 开头，如 .ts2_data/.pytest_cache/.env）"""
+        return any(seg.startswith(".") and seg not in (".", "..") for seg in rel_path.split("/") if seg)
+
     def _relative_path(self, abs_path: Path) -> str:
         """获取相对路径"""
         try:
@@ -506,43 +510,123 @@ class FileSyncEngine:
             return ""
 
     def scan_file_tree(self, subdir: str = "", compute_hash: bool = False) -> List[FileEntry]:
-        """扫描文件树（仅暴露允许的目录）"""
+        """
+        扫描文件树（仅暴露允许的目录 — 文件树显示语义）。
+        rg 加速枚举文件 + 推导目录，失败回退 Python rglob；结果两路一致。
+        """
         target = self.workspace_dir / subdir if subdir else self.workspace_dir
         if not target.exists():
             return []
 
-        entries = []
+        # ── rg 加速枚举（零依赖，毫秒级），失败回退 Python rglob ──
+        file_paths = None
         try:
-            for item in sorted(target.rglob("*")):
-                if self._should_ignore(item):
+            from ..rg_search import rg_filelist
+            excludes = []
+            for pat in getattr(self, "IGNORE_PATTERNS", ()) or ():
+                pat = str(pat)
+                if "*" in pat:
+                    excludes.append(f"!**/{pat}")
+                else:
+                    excludes.append(f"!**/{pat}/**")
+                    excludes.append(f"!**/{pat}")
+            raw = rg_filelist("", str(target), excludes=excludes)
+            if raw is not None:
+                file_paths = []
+                for s in raw:
+                    p = Path(s)
+                    if not p.is_absolute():
+                        p = target / p
+                    file_paths.append(p)
+        except Exception as e:
+            logger.debug(f"scan_file_tree rg 枚举回退 Python: {e}")
+
+        entries: List[FileEntry] = []
+        if file_paths is None:
+            # ── 回退：Python rglob（目录+文件）──
+            try:
+                for item in sorted(target.rglob("*")):
+                    if self._should_ignore(item):
+                        continue
+                    rel_path = self._relative_path(item)
+                    # 过滤隐藏目录/文件（文件 nav 不展示）
+                    if self._is_hidden(rel_path):
+                        continue
+                    if not self._is_exposed(rel_path):
+                        continue
+                    entry = FileEntry(
+                        path=rel_path,
+                        name=item.name,
+                        is_dir=item.is_dir(),
+                        ext=item.suffix.lower() if item.suffix else "",
+                    )
+                    if not item.is_dir():
+                        try:
+                            stat = item.stat()
+                            entry.size = stat.st_size
+                            entry.modified = stat.st_mtime
+                            if compute_hash:
+                                entry.hash = self._compute_hash(item)
+                        except (OSError, PermissionError):
+                            continue
+                    entries.append(entry)
+            except (OSError, PermissionError) as e:
+                logger.warning(f"Scan error: {e}")
+        else:
+            # ── rg 路径：文件条目 + 从文件路径推导非空目录条目 ──
+            seen: set = set()
+            dir_set: set = set()
+            for abs_p in file_paths:
+                try:
+                    rel_path = str(abs_p.relative_to(self.workspace_dir)).replace("\\", "/")
+                except ValueError:
+                    rel_path = str(abs_p).replace("\\", "/")
+                if rel_path in seen:
                     continue
-                rel_path = self._relative_path(item)
-                if not self._is_exposed(rel_path):
+                seen.add(rel_path)
+                # 过滤隐藏目录/文件（文件 nav 不展示）
+                if self._is_hidden(rel_path):
+                    continue
+                # 推导父目录（跳过 ignore / 隐藏 / 未暴露的段）
+                for parent in Path(rel_path).parents:
+                    pstr = str(parent).replace("\\", "/")
+                    if pstr in (".", ""):
+                        continue
+                    if self._should_ignore(self.workspace_dir / pstr):
+                        continue
+                    if self._is_hidden(pstr):
+                        continue
+                    if not self._is_exposed(pstr):
+                        continue
+                    dir_set.add(pstr)
+                # 文件条目
+                try:
+                    stat = abs_p.stat()
+                except (OSError, PermissionError):
                     continue
                 entry = FileEntry(
                     path=rel_path,
-                    name=item.name,
-                    is_dir=item.is_dir(),
-                    ext=item.suffix.lower() if item.suffix else "",
+                    name=abs_p.name,
+                    is_dir=False,
+                    size=stat.st_size,
+                    modified=stat.st_mtime,
+                    ext=abs_p.suffix.lower() if abs_p.suffix else "",
                 )
-                if not item.is_dir():
+                if compute_hash:
                     try:
-                        stat = item.stat()
-                        entry.size = stat.st_size
-                        entry.modified = stat.st_mtime
-                        if compute_hash:
-                            entry.hash = self._compute_hash(item)
-                    except (OSError, PermissionError):
-                        continue
+                        entry.hash = self._compute_hash(abs_p)
+                    except Exception:
+                        pass
                 entries.append(entry)
-        except (OSError, PermissionError) as e:
-            logger.warning(f"Scan error: {e}")
+            # 目录条目
+            for d in sorted(dir_set):
+                name = d.rstrip("/").split("/")[-1]
+                entries.append(FileEntry(path=d, name=name, is_dir=True))
 
         # 更新索引
         for entry in entries:
             self._file_index[entry.path] = entry
         self._last_scan_time = time.time()
-
         return entries
 
     def read_dir(self, rel_path: str = "") -> List[FileEntry]:
@@ -557,6 +641,9 @@ class FileSyncEngine:
                 if self._should_ignore(item):
                     continue
                 rel = self._relative_path(item)
+                # 过滤隐藏目录/文件（文件 nav 不展示 .ts2_data / .pytest_cache 等）
+                if self._is_hidden(rel):
+                    continue
                 if not self._is_exposed(rel):
                     continue
                 entry = FileEntry(
@@ -729,14 +816,139 @@ class FileSyncEngine:
             logger.error(f"Create dir error: {e}")
             return False
 
-    def search_files(self, query: str, subdir: str = "") -> List[FileEntry]:
-        """搜索文件（按名称匹配）"""
+    def search_files(self, query: str, subdir: str = "",
+                     sort_by: str = "name", order: str = "asc",
+                     type_filter: str = "") -> List[FileEntry]:
+        """
+        搜索文件（按名称匹配，rg 加速枚举，失败回退 Python rglob）。
+
+        语义（按 subdir 区分两种 nav）：
+        - subdir 为空 → 文件 nav 全局搜索 → 只扫 EXPOSED_DIRS（文件树本就只暴露这些目录）
+        - subdir 非空 → 指定目录搜索（源码浏览器 / 文件 nav 子目录）→ 全扫该目录，不受 EXPOSED_DIRS 限制
+        过滤依据：IGNORE_PATTERNS + 隐藏段过滤（.ts2_data/.pytest_cache 等）。
+        排序（对标 Windows Explorer）：目录优先，再按 sort_by（name/size/mtime/type）+ order。
+        类型筛选：type_filter = ""（全部）| "dir" | "file" | ".py"（扩展名）。
+        rg 与 Python 回退共用同一套过滤代码，结果必然一致。
+        """
         query_lower = query.lower()
         results = []
-        entries = self.scan_file_tree(subdir)
-        for entry in entries:
-            if query_lower in entry.name.lower() or query_lower in entry.path.lower():
-                results.append(entry)
+
+        # ── 枚举根：按 subdir 区分（空=文件 nav 全局限暴露；非空=指定目录全扫）──
+        roots: List[Path] = []
+        if subdir:
+            t = (self.workspace_dir / subdir).resolve()
+            # 路径穿越防御：必须在工作区内
+            try:
+                t.relative_to(self.workspace_dir)
+            except ValueError:
+                logger.warning(f"search_files 路径越界拦截: {subdir}")
+                return results
+            if t.exists():
+                roots.append(t)
+        else:
+            for d in getattr(self, "EXPOSED_DIRS", ()) or ():
+                p = self.workspace_dir / d
+                if p.exists():
+                    roots.append(p)
+            # 根级暴露文件（仅 EXPOSED_ROOT_FILES，直接 iterdir 一层即可）
+            root_files = getattr(self, "EXPOSED_ROOT_FILES", ()) or ()
+            try:
+                for item in self.workspace_dir.iterdir():
+                    if item.is_file() and item.name in root_files:
+                        roots.append(item)
+            except OSError:
+                pass
+        if not roots:
+            return results
+
+        # ── 枚举文件：优先 rg --files（零依赖，毫秒级），失败回退 Python rglob ──
+        file_items: List[Path] = []
+        rg_ok = False
+        try:
+            from ..rg_search import rg_filelist
+            excludes = []
+            for pat in getattr(self, "IGNORE_PATTERNS", ()) or ():
+                pat = str(pat)
+                if "*" in pat:
+                    excludes.append(f"!**/{pat}")
+                else:
+                    excludes.append(f"!**/{pat}/**")
+                    excludes.append(f"!**/{pat}")
+            for root in roots:
+                raw = rg_filelist(query, str(root), excludes=excludes)
+                if raw is None:
+                    rg_ok = False
+                    break
+                for s in raw:
+                    p = Path(s)
+                    if not p.is_absolute():
+                        p = root / p
+                    file_items.append(p)
+                rg_ok = True
+        except Exception as e:
+            logger.debug(f"search_files rg 枚举回退 Python: {e}")
+            rg_ok = False
+        if not rg_ok:
+            file_items = []
+            for root in roots:
+                if root.is_file():
+                    file_items.append(root)
+                else:
+                    file_items.extend(it for it in sorted(root.rglob("*")) if it.is_file())
+
+        # ── 统一过滤：IGNORE_PATTERNS + 隐藏段 + name/path 包含（两路共用）──
+        seen = set()
+        for abs_p in file_items:
+            try:
+                rel_path = str(abs_p.relative_to(self.workspace_dir)).replace("\\", "/")
+            except ValueError:
+                rel_path = str(abs_p).replace("\\", "/")
+            if rel_path in seen:
+                continue
+            seen.add(rel_path)
+            if self._should_ignore(abs_p):
+                continue
+            # 过滤隐藏目录/文件（.ts2_data / .pytest_cache / .env 等，文件 nav 不展示）
+            if self._is_hidden(rel_path):
+                continue
+            if query_lower not in rel_path.lower():
+                continue
+            try:
+                stat = abs_p.stat()
+            except (OSError, PermissionError):
+                continue
+            results.append(FileEntry(
+                path=rel_path,
+                name=abs_p.name,
+                is_dir=False,
+                size=stat.st_size,
+                modified=stat.st_mtime,
+                ext=abs_p.suffix.lower() if abs_p.suffix else "",
+            ))
+
+        # ── 类型筛选（对标 Explorer 的视图筛选）──
+        tf = (type_filter or "").strip().lower()
+        if tf and tf != "all":
+            if tf == "dir":
+                results = [e for e in results if e.is_dir]
+            elif tf == "file":
+                results = [e for e in results if not e.is_dir]
+            else:  # 扩展名如 .py / py
+                ext = tf if tf.startswith(".") else f".{tf}"
+                results = [e for e in results if e.ext == ext]
+
+        # ── 排序（对标 Explorer：目录优先，再按 key + 方向）──
+        key = (sort_by or "name").lower()
+        reverse = (order or "asc").lower() == "desc"
+        if key == "size":
+            results.sort(key=lambda e: (0 if e.is_dir else 1, e.size), reverse=reverse)
+        elif key == "mtime" or key == "modified":
+            results.sort(key=lambda e: (0 if e.is_dir else 1, e.modified), reverse=reverse)
+        elif key == "type" or key == "ext":
+            results.sort(key=lambda e: (0 if e.is_dir else 1, e.ext, e.name.lower()), reverse=reverse)
+        else:  # name 默认
+            results.sort(key=lambda e: (0 if e.is_dir else 1, e.name.lower()), reverse=reverse)
+
         return results
 
     def get_file_stats(self) -> dict:

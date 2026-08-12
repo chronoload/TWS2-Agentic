@@ -26,6 +26,30 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 999999
 
+# ── 工具组加载追踪器 ──────────────────────────────────
+# 记录每个工具组成功加载的工具数，供 tool_search.py 和 components.py 查询
+# 格式: {group_name: {"label": str, "count": int, "tools": list[str]}}
+_LOADED_TOOL_GROUPS: Dict[str, Dict] = {}
+
+
+def _record_tool_group(group_name: str, label: str, tools: list) -> list:
+    """记录工具组加载结果，返回 tools 本身（方便链式调用）"""
+    _LOADED_TOOL_GROUPS[group_name] = {
+        "label": label,
+        "count": len(tools),
+        "tools": [t.name if hasattr(t, 'name') else str(t) for t in tools],
+    }
+    if tools:
+        logger.info(f"工具组 [{group_name}] ({label}): 已加载 {len(tools)} 个工具")
+    else:
+        logger.info(f"工具组 [{group_name}] ({label}): 未加载（依赖缺失或配置为空）")
+    return tools
+
+
+def get_loaded_tool_groups() -> Dict[str, Dict]:
+    """获取所有工具组加载状态（线程安全快照）"""
+    return dict(_LOADED_TOOL_GROUPS)
+
 
 def _get_system_encoding() -> str:
     """获取系统首选编码"""
@@ -803,6 +827,35 @@ class GrepTool(Tool):
             if not full_path.exists():
                 return ToolResult.err(f"路径不存在：{path}")
 
+            # ── rg 加速（零新增依赖；rg 不可用/正则不兼容时自动回退 Python）──
+            try:
+                from .rg_search import rg_grep
+                rg_result = rg_grep(pattern, str(full_path), extension,
+                                    ignore_case, context_lines, max_results)
+                if rg_result is not None:
+                    match_count, file_count, rg_lines = rg_result
+                    if match_count == 0:
+                        return ToolResult.ok(
+                            data={"pattern": pattern, "total_matches": 0, "total_files": 0, "results": []},
+                            message=f"未找到匹配：{pattern}"
+                        )
+                    text = f"--- 搜索结果：{pattern} ---\n"
+                    text += "\n".join(rg_lines[:max_results])
+                    if match_count > max_results:
+                        text += f"\n\n... 还有 {match_count - max_results} 处匹配（共 {file_count} 个文件）"
+                    return ToolResult.ok(
+                        data={
+                            "pattern": pattern,
+                            "total_matches": match_count,
+                            "total_files": file_count,
+                            "showing": min(match_count, max_results),
+                            "results": rg_lines[:max_results],
+                        },
+                        message=text
+                    )
+            except Exception as e:
+                logger.debug(f"rg grep 回退 Python: {e}")
+
             flags = re.IGNORECASE if ignore_case else 0
             pattern_re = re.compile(pattern, flags)
             results = []
@@ -900,7 +953,21 @@ class GlobTool(Tool):
             if not full_path.exists():
                 return ToolResult.err(f"路径不存在：{path}")
 
-            files = sorted(full_path.glob(pattern))
+            # ── rg 加速（零新增依赖；rg 不可用时回退 Python glob）──
+            files = None
+            try:
+                from .rg_search import rg_files
+                rg_rel = rg_files(pattern, str(full_path))
+                if rg_rel is not None:
+                    files = []
+                    for rel in rg_rel:
+                        p = full_path / rel
+                        files.append(p)
+                    files.sort()
+            except Exception:
+                files = None
+            if files is None:
+                files = sorted(full_path.glob(pattern))
             if not files:
                 return ToolResult.ok(
                     data={"pattern": pattern, "total": 0, "results": []},
@@ -2563,9 +2630,11 @@ class RAGTool(Tool):
                     return ToolResult.err(f"目录不存在: {directory_path}")
                 
                 result = rag_engine.add_directory(dir_path)
+                file_count = len(result)
+                chunk_count = sum(len(ids) for ids in result.values())
                 return ToolResult.ok(
-                    data={"directory": str(dir_path), "result": result},
-                    message=f"✅ 已添加目录: {directory_path}，共 {result['file_count']} 个文件，{result['chunk_count']} 个文本块"
+                    data={"directory": str(dir_path), "result": result, "file_count": file_count, "chunk_count": chunk_count},
+                    message=f"✅ 已添加目录: {directory_path}，共 {file_count} 个文件，{chunk_count} 个文本块"
                 )
             
             elif action == "retrieve":
@@ -2575,14 +2644,14 @@ class RAGTool(Tool):
                 results = rag_engine.retrieve_with_scores(query, top_k=top_k)
                 lines = [f"=== 检索到 {len(results)} 个相关片段 ==="]
                 for i, (doc, score) in enumerate(results, 1):
-                    content_preview = doc.page_content[:200].replace('\n', ' ')
+                    content_preview = doc.content[:200].replace('\n', ' ')
                     lines.append(f"\n【片段 {i}】(相似度: {score:.3f})")
                     lines.append(f"内容: {content_preview}...")
                     if doc.metadata:
                         lines.append(f"元数据: {json.dumps(doc.metadata, ensure_ascii=False)}")
                 
                 return ToolResult.ok(
-                    data={"query": query, "results": [(doc.page_content, score) for doc, score in results]},
+                    data={"query": query, "results": [(doc.content, score) for doc, score in results]},
                     message="\n".join(lines)
                 )
             
@@ -2613,7 +2682,7 @@ class RAGTool(Tool):
                 lines = [f"=== 所有文档 ({len(docs)} 个) ==="]
                 for i, doc in enumerate(docs, 1):
                     lines.append(f"\n【{i}】{doc.source}")
-                    lines.append(f"内容预览: {doc.page_content[:100]}...")
+                    lines.append(f"内容预览: {doc.content[:100]}...")
                 
                 return ToolResult.ok(
                     data={"documents": [{"source": doc.source, "id": doc.id} for doc in docs]},
@@ -2638,6 +2707,7 @@ class SandboxTool(Tool):
     """沙箱执行工具 - 安全执行命令"""
     name = "sandbox_execute"
     category = "system"
+    risk_level = "high"
     keywords = ["sandbox", "execute", "沙盒", "安全执行"]
     model_hint = "在受限安全环境中执行可能不信任的命令时使用。"
     description = "在受限沙箱环境中安全执行命令。"
@@ -2669,10 +2739,11 @@ class SandboxTool(Tool):
                 from .sandbox.executor import SandboxExecutor
                 from .sandbox.policy import SandboxPolicy
                 
-                policy = SandboxPolicy(
+                # 从全局配置加载命令策略（白名单免审 / 黑名单直接拒 / 其余走统一审批）
+                policy = SandboxPolicy.from_config(SandboxPolicy(
                     allow_network=allow_network,
                     max_execution_time=max_time
-                )
+                ))
                 executor = SandboxExecutor(policy=policy, cwd=str(self.base_dir))
                 
                 result = executor.execute(command)
@@ -3841,6 +3912,36 @@ class SearchSkillsTool(SearchTool):
     }
     item_type_label = "技能"
 
+    def _scan_market_skills(self) -> list:
+        """扫描 skills_market/ 目录（第三方技能仓库），返回 SkillConfig 对象列表。"""
+        from pathlib import Path
+        from .config import SkillConfig
+        from .skill_system import Skill
+
+        market_dir = Path(__file__).resolve().parent.parent / "skills_market"
+        if not market_dir.exists():
+            return []
+
+        results = []
+        for skill_subdir in sorted(market_dir.iterdir()):
+            if not skill_subdir.is_dir():
+                continue
+            if skill_subdir.name.startswith(".") or skill_subdir.name.startswith("_"):
+                continue
+            try:
+                skill_obj = Skill.from_skill_md(skill_subdir)
+                if skill_obj and skill_obj.name:
+                    results.append(SkillConfig(
+                        name=skill_obj.name,
+                        description=skill_obj.description,
+                        type=skill_obj.category.value if hasattr(skill_obj.category, 'value') else str(skill_obj.category),
+                        enabled=skill_obj.enabled,
+                        metadata={"skill_dir": str(skill_subdir), "market": True},
+                    ))
+            except Exception:
+                continue
+        return results
+
     def execute(self, keyword: Optional[str] = None, status: Optional[str] = None,
                 skill_type: Optional[str] = None, limit: int = 10, offset: int = 0) -> str:
         result = self.execute_structured(keyword, status, skill_type, limit, offset)
@@ -3853,6 +3954,18 @@ class SearchSkillsTool(SearchTool):
             config_mgr = get_config_manager()
 
             all_skills = list(config_mgr.skill_configs.values())
+
+            # 合并 skills_market/ 目录扫描（第三方技能仓库，未写入 config 也可搜索）
+            try:
+                market_skills = self._scan_market_skills()
+                existing_names = {s.name for s in all_skills}
+                for m in market_skills:
+                    if m.name not in existing_names:
+                        all_skills.append(m)
+                        existing_names.add(m.name)
+            except Exception as e:
+                logger = __import__("logging").getLogger(__name__)
+                logger.debug(f"skills_market 扫描失败: {e}")
 
             # 状态过滤
             if status == "enabled":
@@ -4929,16 +5042,23 @@ class AskFollowupQuestionTool(Tool):
     }
 
     def execute(self, question="", options=None) -> str:
+        # 挂起式：返回带 _suspend_ask 标记 + 真实问题数据，
+        # Agent._execute_tool 据此调用 ask 通道挂起当前 turn。
         return self.execute_structured(question, options).to_json()
 
     def execute_structured(self, question="", options=None) -> ToolResult:
         if not question:
             return ToolResult.err("必须提供问题")
-        msg = f"❓ {question}"
-        if options:
-            for i, o in enumerate(options[:5], 1):
-                msg += f"\n  {i}. {o}"
-        return ToolResult.ok(data={"question": question}, message=msg)
+        opts = list((options or [])[:5])
+        # 携带 _suspend_ask 标志（不依赖字符串解析）
+        return ToolResult.ok(
+            data={
+                "question": question,
+                "options": opts,
+                "_suspend_ask": True,
+            },
+            message=f"❓ {question}",
+        )
 
 
 class BrowserActionTool(Tool):
@@ -5030,12 +5150,16 @@ class BrowserActionTool(Tool):
 
 
 def get_tools(base_dir: Optional[Path] = None, enabled_only: bool = False) -> List[Tool]:
-    """获取所有工具
+    """获取所有工具（统一入口，所有工具组在此注册）
     Args:
         base_dir: 基础目录
         enabled_only: 是否只返回启用的工具
     """
-    all_tools = [
+    # 清空旧的追踪记录，重新加载
+    _LOADED_TOOL_GROUPS.clear()
+
+    # ── 核心工具组 ──────────────────────────────────────
+    all_tools = _record_tool_group("core", "核心工具", [
         ReadFileTool(base_dir),
         WriteFileTool(base_dir),
         EditFileTool(base_dir),
@@ -5082,22 +5206,123 @@ def get_tools(base_dir: Optional[Path] = None, enabled_only: bool = False) -> Li
         AccessMCPResourceTool(base_dir),
         AskFollowupQuestionTool(),
         BrowserActionTool(),
-    ]
+    ])
 
+    # ── macdev ──────────────────────────────────────────
+    try:
+        from .macdev_tools import MacdevTool
+        all_tools.extend(_record_tool_group("macdev", "Macdev 开发库", [MacdevTool()]))
+    except Exception:
+        _record_tool_group("macdev", "Macdev 开发库", [])
+
+    # ── 学术搜索 ────────────────────────────────────────
     try:
         from .scholar.server import ScholarMCPServer
         scholar_server = ScholarMCPServer()
-        all_tools.extend(scholar_server.get_scholar_tools())
+        scholar_tools = scholar_server.get_scholar_tools()
+        all_tools.extend(_record_tool_group("scholar", "学术搜索", scholar_tools))
     except Exception:
-        pass
+        _record_tool_group("scholar", "学术搜索", [])
 
+    # ── 自动化任务 ──────────────────────────────────────
     try:
         from .automation.engine import get_automation_engine
         auto_engine = get_automation_engine(base_dir)
-        all_tools.extend(auto_engine.get_automation_tools() if hasattr(auto_engine, 'get_automation_tools') else [])
+        auto_tools = auto_engine.get_automation_tools() if hasattr(auto_engine, 'get_automation_tools') else []
+        all_tools.extend(_record_tool_group("automation", "自动化任务", auto_tools))
     except Exception:
-        pass
-    
+        _record_tool_group("automation", "自动化任务", [])
+
+    # ── DataHub 数据枢纽 ────────────────────────────────
+    try:
+        from .ws2_hub_tools import get_hub_tools
+        hub_tools = get_hub_tools(base_dir=base_dir)
+        all_tools.extend(_record_tool_group("datahub", "DataHub 数据枢纽", hub_tools))
+    except Exception:
+        _record_tool_group("datahub", "DataHub 数据枢纽", [])
+
+    # ── GT 课程追踪 ─────────────────────────────────────
+    try:
+        from .gt.gt_tools import get_gt_tools
+        gt_tools = get_gt_tools()
+        all_tools.extend(_record_tool_group("gt", "GT 课程追踪", gt_tools))
+    except Exception:
+        _record_tool_group("gt", "GT 课程追踪", [])
+
+    # ── 飞书工具 ────────────────────────────────────────
+    try:
+        from .feishu.feishu_tools import get_feishu_tools
+        feishu_tools = get_feishu_tools()
+        all_tools.extend(_record_tool_group("feishu", "飞书", feishu_tools))
+    except Exception:
+        _record_tool_group("feishu", "飞书", [])
+
+    # ── Lean4 定理证明 ──────────────────────────────────
+    try:
+        from .research.lean4.lean4_tools import get_lean4_tools
+        lean4_tools = get_lean4_tools()
+        all_tools.extend(_record_tool_group("lean4", "Lean4 定理证明", lean4_tools))
+    except Exception:
+        _record_tool_group("lean4", "Lean4 定理证明", [])
+
+    # ── Manim 动画 ──────────────────────────────────────
+    try:
+        from .research.manim.manim_tools import get_manim_tools
+        manim_tools = get_manim_tools()
+        all_tools.extend(_record_tool_group("manim", "Manim 动画", manim_tools))
+    except Exception:
+        _record_tool_group("manim", "Manim 动画", [])
+
+    # ── MathLens ────────────────────────────────────────
+    try:
+        from .research.mathlens.mathlens_tools import get_mathlens_tools
+        mathlens_tools = get_mathlens_tools()
+        all_tools.extend(_record_tool_group("mathlens", "MathLens", mathlens_tools))
+    except Exception:
+        _record_tool_group("mathlens", "MathLens", [])
+
+    # ── AutoResearch ────────────────────────────────────
+    try:
+        from .research.autoresearch.autoresearch_tools import get_autoresearch_tools
+        autoresearch_tools = get_autoresearch_tools()
+        all_tools.extend(_record_tool_group("autoresearch", "AutoResearch", autoresearch_tools))
+    except Exception:
+        _record_tool_group("autoresearch", "AutoResearch", [])
+
+    # ── Wolfram 数学 ────────────────────────────────────
+    try:
+        from .wolfram_tools import register_wolfram_tools
+        if register_wolfram_tools:
+            wolfram_tools = register_wolfram_tools()
+            all_tools.extend(_record_tool_group("wolfram", "Wolfram 数学", wolfram_tools))
+        else:
+            _record_tool_group("wolfram", "Wolfram 数学", [])
+    except Exception:
+        _record_tool_group("wolfram", "Wolfram 数学", [])
+
+    # ── 服务端工具 ──────────────────────────────────────
+    try:
+        from .server.server_tools import get_server_tools
+        server_tools = get_server_tools(workspace_dir=str(base_dir) if base_dir else "")
+        all_tools.extend(_record_tool_group("server", "服务端工具", server_tools))
+    except Exception:
+        _record_tool_group("server", "服务端工具", [])
+
+    # ── 多媒体工具 ──────────────────────────────────────
+    try:
+        from .media_tools import get_media_tools
+        media_tools = get_media_tools(base_dir=base_dir)
+        all_tools.extend(_record_tool_group("media", "多媒体工具", media_tools))
+    except Exception:
+        _record_tool_group("media", "多媒体工具", [])
+
+    # ── 远程 MCP 服务工具（如百度搜索等） ────────────────
+    try:
+        mcp_service_tools = load_mcp_service_tools()
+        all_tools.extend(_record_tool_group("mcp_service", "MCP 远程服务", mcp_service_tools))
+    except Exception:
+        _record_tool_group("mcp_service", "MCP 远程服务", [])
+
     if enabled_only:
         try:
             from .config import get_config_manager

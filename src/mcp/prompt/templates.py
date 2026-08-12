@@ -51,6 +51,12 @@ class TemplateEngine:
             combined.update(context)
         combined.update(placeholders)
 
+        # 自动注入标准占位符（如果未提供）
+        standard = TemplateEngine.resolve_standard(combined)
+        for key, value in standard.items():
+            if key not in combined:
+                combined[key] = value
+
         result = re.sub(
             r'\{\{([^}]+)\}\}',
             lambda m: TemplateEngine._resolve_placeholder(m, combined),

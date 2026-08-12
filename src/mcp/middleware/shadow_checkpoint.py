@@ -330,6 +330,7 @@ class ShadowGitCheckpointer:
                 self._run_nested_rename(True)
                 try:
                     self._run_git("add", "--force", ".", "--ignore-errors", timeout=300)
+                    self._reset_excluded_paths()
                     self._run_git("commit", "--allow-empty", "--no-verify", "-m", "TS2 checkpoint baseline")
                 finally:
                     self._run_nested_rename(False)
@@ -381,6 +382,23 @@ class ShadowGitCheckpointer:
             encoding="utf-8", errors="replace",
         )
 
+    def _reset_excluded_paths(self):
+        """git add --force 会绕过 info/exclude 忽略规则；手动撤掉被排除路径的暂存。
+
+        仅处理「目录式」排除项（以 / 结尾且无通配符），如 .git_disabled/、.git/。
+        """
+        try:
+            patterns = get_default_exclusions(self._workspace_root) + list(self._extra_exclusions)
+            dirs = [p.rstrip("/") for p in patterns
+                    if p.endswith("/") and "*" not in p and "?" not in p]
+            if not dirs:
+                return
+            r = self._run_git("reset", "-q", "--", *dirs)
+            if r.returncode != 0:
+                logger.debug(f"reset 排除路径警告: {r.stderr[:120]}")
+        except Exception as e:
+            logger.debug(f"reset 排除路径失败: {e}")
+
     @staticmethod
     def _hash(text: str) -> str:
         import hashlib
@@ -406,7 +424,8 @@ class ShadowGitCheckpointer:
     # ─── 核心操作 ────────────────────────────────────────
 
     def snapshot(self, tool_name: str = "", source: str = "auto", step: int = -1,
-                 snapshot_type: str = "", force: bool = False) -> Optional[str]:
+                 snapshot_type: str = "", force: bool = False,
+                 files: Optional[List[str]] = None) -> Optional[str]:
         """创建快照（当前实例分支上 commit）
 
         Args:
@@ -417,6 +436,7 @@ class ShadowGitCheckpointer:
                            protocol_amendment / rag_injection / health_intervention / opportunity_capture）。
                            空字符串表示普通 TS2 快照。
             force: True 时即使无文件变更也创建 commit（Saber 状态快照场景）
+            files: 只追踪这些文件（工具调用修改的文件，增量快照）；None=全量 add
 
         Returns:
             commit hash (12 chars) 或 None
@@ -434,11 +454,19 @@ class ShadowGitCheckpointer:
                 self._run_nested_rename(True)
                 try:
                     start = time.time()
-                    add_result = self._run_git("add", "--force", ".", "--ignore-errors")
-                    if add_result.returncode != 0:
-                        # git add 可能因不可读文件（如 Windows 长路径）返回非 0，
-                        # 但仍可能已 stage 部分文件，继续尝试 commit
-                        logger.debug(f"git add 有警告: {add_result.stderr[:120]}")
+                    if files:
+                        # 增量：只追踪工具调用修改的文件（不碰排除项/未改动文件）
+                        self._run_git("add", "--force", "--ignore-errors", "--", *files)
+                    else:
+                        add_result = self._run_git("add", "--force", ".", "--ignore-errors")
+                        if add_result.returncode != 0:
+                            # git add 可能因不可读文件（如 Windows 长路径）返回非 0，
+                            # 但仍可能已 stage 部分文件，继续尝试 commit
+                            logger.debug(f"git add 有警告: {add_result.stderr[:120]}")
+                        # git add --force 会绕过 info/exclude 忽略规则，把被禁用的嵌套
+                        # 仓库（.git_disabled/）等排除路径也 stage 进来；手动撤掉其暂存，
+                        # 保证快照只含真实工作区文件
+                        self._reset_excluded_paths()
 
                     elapsed_ms = int((time.time() - start) * 1000)
                     # step: 外部传入优先，否则自增
@@ -871,6 +899,7 @@ class CheckpointMiddleware(AgentMiddleware):
         self._workspace_root = workspace_root
         self._initialized = False
         self._last_hash = ""
+        self._last_checkpoint_id = 0  # 最近一次工具调用的 SQLite checkpoint id（供 SSE/前端 diff 查询，每次工具都更新）
         self._instance_id = ""
         self._snapshot_seq = 0
         self._extra_exclusions = extra_exclusions or []
@@ -973,13 +1002,19 @@ class CheckpointMiddleware(AgentMiddleware):
         sid_changed = False
         if new_sid and new_sid != self._instance_id:
             # session_id 变更（前端传了新的会话 ID）
+            # 关键修复：重置 _initialized 强制重新初始化检查点系统
+            # 因为 ShadowGitCheckpointer 的分支名依赖于 instance_id
             self._instance_id = new_sid
             self._snapshot_seq = 0
+            self._initialized = False  # ← 修复：强制重新初始化
+            self._last_hash = ""
             sid_changed = True
         elif not self._instance_id:
             # 首次初始化，无 session_id
             self._instance_id = new_sid or "global"
             self._snapshot_seq = 0
+            self._initialized = False
+            self._last_hash = ""
             sid_changed = True
 
         # 只在 session_id 变更或首次初始化时创建 baseline
@@ -994,7 +1029,11 @@ class CheckpointMiddleware(AgentMiddleware):
                     tool="",
                     git_hash=h or "",
                 )
-            self._snapshot_seq = 1
+            # baseline 的 commit hash 直接作为首个 checkpoint（否则 _last_hash 为空，
+            # 且 after_tool 的 need_git_snapshot==1 因自增顺序永远不成立 → 全部工具无 checkpoint）
+            if h:
+                self._last_hash = h
+            self._snapshot_seq = 0
         elif not self._initialized and self._ensure_ready():
             # 已有 instance_id 但未初始化（进程重启后）
             self._snapshot_seq = 0
@@ -1008,7 +1047,9 @@ class CheckpointMiddleware(AgentMiddleware):
                     tool="",
                     git_hash=h or "",
                 )
-            self._snapshot_seq = 1
+            if h:
+                self._last_hash = h
+            self._snapshot_seq = 0
         return MiddlewareResult()
 
     def after_tool(self, tool_name: str, tool_args: dict, tool_result: str, context: MiddlewareContext) -> MiddlewareResult:
@@ -1040,6 +1081,10 @@ class CheckpointMiddleware(AgentMiddleware):
                     tool=tool_name,
                     changed_files=changed_files if changed_files else None,
                 )
+                # 每次工具调用都更新最近 checkpoint id（即使不触发 git snapshot 也有值，
+                # 供 SSE tool_result.checkpoint_hash / 前端 📊 diff 查询使用，与 /diff 接口 int() 主路径匹配）
+                if cp_id and cp_id > 0:
+                    self._last_checkpoint_id = cp_id
 
             # 2. Shadow Git 全量快照（低频：baseline + 每 N 步 + 手动）
             need_git_snapshot = (
@@ -1047,7 +1092,12 @@ class CheckpointMiddleware(AgentMiddleware):
                 or self._snapshot_seq % self._shadow_git_interval == 0  # 每 N 步
             )
             if need_git_snapshot:
-                h = self._checkpointer.snapshot(tool_name, source="auto", step=self._snapshot_seq)
+                # 增量：只追踪本工具调用修改的文件（git 快照不含排除项/未改动文件）
+                git_files = [cf.get("path", "") for cf in changed_files if cf.get("path")]
+                h = self._checkpointer.snapshot(
+                    tool_name, source="auto", step=self._snapshot_seq,
+                    files=git_files or None,
+                )
                 if h:
                     self._last_hash = h
                     git_hash = h

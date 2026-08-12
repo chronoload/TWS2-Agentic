@@ -29,13 +29,14 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # 当前 schema 版本，用于迁移
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 -- 检查点元数据
 CREATE TABLE IF NOT EXISTS checkpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     checkpoint_hash TEXT NOT NULL,       -- Shadow Git commit hash（可为空，纯 SQLite 检查点）
+    conversation_checkpoint_id TEXT NOT NULL DEFAULT '', -- ContextReloader 对话快照 id（cp-*，用于回退对话）
     session_id TEXT NOT NULL DEFAULT '', -- 实例/会话标识
     parent_session_id TEXT NOT NULL DEFAULT '', -- 父会话 ID（参考 Crush Session 树）
     source TEXT NOT NULL DEFAULT 'auto', -- auto/manual/baseline
@@ -146,6 +147,28 @@ class FileVersionDB:
                     self._conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_session_id)")
                 except Exception:
                     pass
+            if version < 3:
+                # v2 → v3: 添加 conversation_checkpoint_id 列（ContextReloader 对话快照关联）
+                try:
+                    self._conn.execute("ALTER TABLE checkpoints ADD COLUMN conversation_checkpoint_id TEXT NOT NULL DEFAULT ''")
+                except Exception:
+                    pass
+                try:
+                    self._conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_conversation ON checkpoints(conversation_checkpoint_id)")
+                except Exception:
+                    pass
+                self._conn.execute("UPDATE meta SET value = '3' WHERE key = 'version'")
+                self._conn.commit()
+            else:
+                # 兜底：即使 version>=3，也尝试补列（防止之前迁移不完整）
+                try:
+                    self._conn.execute("ALTER TABLE checkpoints ADD COLUMN conversation_checkpoint_id TEXT NOT NULL DEFAULT ''")
+                except Exception:
+                    pass
+                try:
+                    self._conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_conversation ON checkpoints(conversation_checkpoint_id)")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -160,12 +183,14 @@ class FileVersionDB:
                           step: int = 0, tool: str = "",
                           git_hash: str = "", duration_ms: int = 0,
                           changed_files: Optional[List[Dict]] = None,
-                          parent_session_id: str = "") -> int:
+                          parent_session_id: str = "",
+                          conversation_checkpoint_id: str = "") -> int:
         """创建检查点并记录变更文件
 
         Args:
             changed_files: [{"path": "...", "status": "A/M/D", "content_hash": "...", "additions": N, "deletions": N}]
             parent_session_id: 父会话 ID（参考 Crush Session 树，工具子会话时使用）
+            conversation_checkpoint_id: ContextReloader 对话快照 id（cp-*），用于前端回退时恢复对话
 
         Returns:
             checkpoint_id
@@ -174,9 +199,9 @@ class FileVersionDB:
         now = time.time()
         try:
             cur = conn.execute(
-                "INSERT INTO checkpoints (checkpoint_hash, session_id, parent_session_id, source, step, tool, duration_ms, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (git_hash, session_id, parent_session_id, source, step, tool, duration_ms, now),
+                "INSERT INTO checkpoints (checkpoint_hash, conversation_checkpoint_id, session_id, parent_session_id, source, step, tool, duration_ms, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (git_hash, conversation_checkpoint_id, session_id, parent_session_id, source, step, tool, duration_ms, now),
             )
             cp_id = cur.lastrowid
 
@@ -205,6 +230,32 @@ class FileVersionDB:
             conn.rollback()
             logger.warning(f"创建检查点失败: {e}")
             return -1
+
+    def update_conversation_checkpoint(self, checkpoint_id: int, conversation_checkpoint_id: str) -> bool:
+        """回填 SQLite 检查点与 ContextReloader 对话快照的关联"""
+        try:
+            conn = self._connect()
+            conn.execute(
+                "UPDATE checkpoints SET conversation_checkpoint_id = ? WHERE id = ?",
+                (conversation_checkpoint_id, int(checkpoint_id)),
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.warning(f"回填对话检查点关联失败: {e}")
+            return False
+
+    def get_conversation_checkpoint(self, checkpoint_id) -> str:
+        """根据 SQLite 检查点 id 获取关联的 ContextReloader 对话快照 id"""
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT conversation_checkpoint_id FROM checkpoints WHERE id = ?",
+                (int(checkpoint_id),),
+            ).fetchone()
+            return row["conversation_checkpoint_id"] if row else ""
+        except Exception:
+            return ""
 
     def get_checkpoints(self, session_id: str, count: int = 50) -> List[Dict[str, Any]]:
         """获取检查点列表（含文件变更统计）"""
@@ -265,6 +316,26 @@ class FileVersionDB:
         conn = self._connect()
         row = conn.execute("SELECT * FROM checkpoints WHERE id = ?", (checkpoint_id,)).fetchone()
         return dict(row) if row else None
+
+    def delete_checkpoints_by_session(self, session_id: str) -> int:
+        """按会话 ID 删除全部检查点及其文件版本（会话删除时联动清理）"""
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "SELECT id FROM checkpoints WHERE session_id = ?", (session_id,)
+            )
+            cp_ids = [r["id"] for r in cur.fetchall()]
+            for cp_id in cp_ids:
+                conn.execute("DELETE FROM file_versions WHERE checkpoint_id = ?", (cp_id,))
+                conn.execute("DELETE FROM checkpoints WHERE id = ?", (cp_id,))
+            # 一并清理该会话的读取追踪
+            conn.execute("DELETE FROM read_files WHERE session_id = ?", (session_id,))
+            conn.commit()
+            return len(cp_ids)
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"删除会话检查点失败 ({session_id}): {e}")
+            return 0
 
     # ─── 文件版本操作 ──────────────────────────────────────
 

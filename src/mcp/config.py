@@ -318,59 +318,9 @@ class ConfigManager:
                 self.add_sub_agent_config(cfg)
 
         if not self.skill_configs:
-            # 添加默认 Skills
-            default_skills = [
-                SkillConfig(
-                    name="read_file",
-                    description="读取文件内容",
-                    type="builtin",
-                    enabled=True
-                ),
-                SkillConfig(
-                    name="write_file",
-                    description="写入文件内容",
-                    type="builtin",
-                    enabled=True
-                ),
-                SkillConfig(
-                    name="list_directory",
-                    description="列出目录内容",
-                    type="builtin",
-                    enabled=True
-                ),
-                SkillConfig(
-                    name="web_search",
-                    description="网络搜索",
-                    type="builtin",
-                    enabled=True
-                ),
-                SkillConfig(
-                    name="calculate",
-                    description="数学计算",
-                    type="builtin",
-                    enabled=True
-                ),
-                SkillConfig(
-                    name="analyze_paper",
-                    description="分析科研论文",
-                    type="builtin",
-                    enabled=True
-                ),
-                SkillConfig(
-                    name="crawl_website",
-                    description="爬取网站内容",
-                    type="builtin",
-                    enabled=False
-                ),
-                SkillConfig(
-                    name="github_search",
-                    description="搜索 GitHub 项目",
-                    type="builtin",
-                    enabled=False
-                )
-            ]
-            for skill in default_skills:
-                self.add_skill_config(skill)
+            # 不再注入 builtin 工具影子（read_file 等是工具，非技能）。
+            # 技能注册表由 agent 启动时的目录发现驱动（skills/ + skills_market/）。
+            pass
 
     def _load_api_configs(self):
         """加载 API 配置"""
@@ -637,6 +587,55 @@ class ConfigManager:
         """清除所有总是批准的工具"""
         self.settings["always_approved_tools"] = []
         self._save_settings()
+
+    # ─── 沙箱命令策略管理 ──────────────────────────────────
+    # 与 harness 审批共用同一套决策：白名单免审、黑名单直接拒、
+    # 其余命令走统一审批弹窗。列表可在此管理与 config_ui 编辑。
+
+    def get_sandbox_allowed_commands(self) -> List[str]:
+        """获取沙箱白名单命令（免审直接执行）"""
+        return self.settings.get("sandbox_allowed_commands", [])
+
+    def set_sandbox_allowed_commands(self, commands: List[str]):
+        """设置沙箱白名单命令"""
+        self.settings["sandbox_allowed_commands"] = [c.strip() for c in commands if c.strip()]
+        self._save_settings()
+
+    def get_sandbox_denied_commands(self) -> List[str]:
+        """获取沙箱黑名单命令（直接拒绝，不可审批）"""
+        return self.settings.get("sandbox_denied_commands", [])
+
+    def set_sandbox_denied_commands(self, commands: List[str]):
+        """设置沙箱黑名单命令"""
+        self.settings["sandbox_denied_commands"] = [c.strip() for c in commands if c.strip()]
+        self._save_settings()
+
+    # ─── 提示词组件配置（内置组件模板覆盖 + 自定义编排提示词）──────────
+    def get_prompt_components(self) -> Dict[str, Dict]:
+        """获取全部提示词组件配置
+
+        Returns:
+            {component_id: {"name"?, "template"?, "enabled"?, "order"?}}
+            - 内置组件（AGENT_ROLE/RULES/...）：template 覆盖 / enabled 启停
+            - 自定义组件（手写编排提示词）：name + template + enabled + order
+        """
+        return self.settings.get("prompt_components", {})
+
+    def set_prompt_component(self, component_id: str, config: Dict) -> None:
+        """保存单个提示词组件配置（内置覆盖或自定义组件）"""
+        components = self.settings.get("prompt_components", {})
+        components[component_id] = config
+        self.settings["prompt_components"] = components
+        self._save_settings()
+
+    def delete_prompt_component(self, component_id: str) -> None:
+        """删除提示词组件配置（恢复内置默认 / 移除自定义）"""
+        components = self.settings.get("prompt_components", {})
+        if component_id in components:
+            del components[component_id]
+            self.settings["prompt_components"] = components
+            self._save_settings()
+
 
     # 提供商配置管理（新增）
     def add_provider_config(self, config: 'ProviderConfig') -> bool:

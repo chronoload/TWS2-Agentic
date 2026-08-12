@@ -38,8 +38,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import PipePipe, { api } from '../plugins/bridge'
-import type { ChannelInfoResult, StreamInfoItem } from '../plugins/bridge'
+import { api } from '../plugins/bridge'
+import type { ChannelInfoResult, StreamInfoItem } from '../types/extraction'
 import { proxyImageUrl } from '../extractor/BilibiliImageProxy'
 import { useSubscriptionsStore } from '../stores/subscriptions'
 import VideoCard from '../components/VideoCard.vue'

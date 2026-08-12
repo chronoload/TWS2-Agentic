@@ -758,6 +758,9 @@ class EnhancedAgentConfigDialog:
         # 自动化标签页
         self._create_automation_tab(notebook)
         
+        # 提示词组件标签页
+        self._create_prompt_components_tab(notebook)
+        
         # 设置标签页
         self._create_settings_tab(notebook)
         
@@ -818,6 +821,7 @@ class EnhancedAgentConfigDialog:
         ttk.Button(list_btn_frame, text="➕ 添加", command=self._add_provider).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(list_btn_frame, text="✏️ 编辑", command=self._edit_provider).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
         ttk.Button(list_btn_frame, text="🗑️ 删除", command=self._delete_provider).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        ttk.Button(list_btn_frame, text="🧠 模型管理", command=lambda: ModelManagerDialog(self.window)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
         
         # 快捷添加按钮
         quick_frame = ttk.LabelFrame(left_frame, text="快捷添加", padding="10")
@@ -1217,7 +1221,7 @@ class EnhancedAgentConfigDialog:
                 return
             
             try:
-                from .skills import get_skill_registry, SkillParameter
+                from .extensions.skills import get_skill_registry, SkillParameter
                 registry = get_skill_registry()
                 registry.create_custom_skill(
                     name=name,
@@ -1264,7 +1268,7 @@ class EnhancedAgentConfigDialog:
         
         try:
             # 从配置中删除
-            from .skills import get_skill_registry
+            from .extensions.skills import get_skill_registry
             registry = get_skill_registry()
             
             if skill_name in self.config_manager.skill_configs:
@@ -1291,7 +1295,7 @@ class EnhancedAgentConfigDialog:
         
         if file_path:
             try:
-                from .skills import get_skill_registry, Path
+                from .extensions.skills import get_skill_registry, Path
                 registry = get_skill_registry()
                 skill = registry.import_skill(Path(file_path))
                 if skill:
@@ -1321,7 +1325,7 @@ class EnhancedAgentConfigDialog:
         
         if file_path:
             try:
-                from .skills import get_skill_registry, Path
+                from .extensions.skills import get_skill_registry, Path
                 registry = get_skill_registry()
                 success = registry.export_skill(skill_name, Path(file_path))
                 if success:
@@ -1838,7 +1842,76 @@ class EnhancedAgentConfigDialog:
                    command=self._remove_always_approve_tool).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(always_approve_btn_frame, text="🔄 刷新", 
                    command=self._refresh_always_approve_list).pack(side=tk.LEFT, padx=(5, 0))
+
+        # 沙箱命令策略（与统一审批联动：白名单免审 / 黑名单直接拒 / 其余弹窗审批）
+        sandbox_frame = ttk.LabelFrame(approval_frame, text="沙箱命令策略", padding="10")
+        sandbox_frame.pack(fill=tk.X, pady=(10, 0))
+
+        policy_hint = ttk.Label(
+            sandbox_frame,
+            text="白名单命令免审直接执行；黑名单命令直接拒绝（不可审批）；其余命令弹窗请求授权。每行一个命令。",
+            wraplength=680, foreground="#888"
+        )
+        policy_hint.pack(anchor=tk.W, pady=(0, 4))
+
+        policy_row = ttk.Frame(sandbox_frame)
+        policy_row.pack(fill=tk.X)
+
+        allowed_col = ttk.Frame(policy_row)
+        allowed_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+        ttk.Label(allowed_col, text="白名单（免审）").pack(anchor=tk.W)
+        self.sandbox_allowed_text = scrolledtext.ScrolledText(allowed_col, height=5, wrap=tk.WORD)
+        self.sandbox_allowed_text.pack(fill=tk.BOTH, expand=True)
+
+        denied_col = ttk.Frame(policy_row)
+        denied_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+        ttk.Label(denied_col, text="黑名单（直接拒绝）").pack(anchor=tk.W)
+        self.sandbox_denied_text = scrolledtext.ScrolledText(denied_col, height=5, wrap=tk.WORD)
+        self.sandbox_denied_text.pack(fill=tk.BOTH, expand=True)
+
+        policy_btn_frame = ttk.Frame(sandbox_frame)
+        policy_btn_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(policy_btn_frame, text="💾 保存策略", command=self._save_sandbox_policy).pack(side=tk.LEFT)
+        ttk.Button(policy_btn_frame, text="🔄 加载当前", command=self._load_sandbox_policy).pack(side=tk.LEFT, padx=(5, 0))
+
+        self._load_sandbox_policy()
     
+    def _load_sandbox_policy(self):
+        """加载沙箱命令策略到界面（默认列表 + 配置追加）"""
+        try:
+            from .sandbox.policy import DEFAULT_ALLOWED_COMMANDS, DEFAULT_DENIED_COMMANDS
+            cm = get_config_manager()
+            extra_allowed = set(cm.get_sandbox_allowed_commands() or [])
+            extra_denied = set(cm.get_sandbox_denied_commands() or [])
+            allowed = sorted(set(DEFAULT_ALLOWED_COMMANDS) | extra_allowed)
+            denied = sorted(set(DEFAULT_DENIED_COMMANDS) | extra_denied)
+            self.sandbox_allowed_text.delete(1.0, tk.END)
+            self.sandbox_allowed_text.insert(1.0, "\n".join(allowed))
+            self.sandbox_denied_text.delete(1.0, tk.END)
+            self.sandbox_denied_text.insert(1.0, "\n".join(denied))
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"加载沙箱命令策略失败: {e}")
+
+    def _save_sandbox_policy(self):
+        """保存沙箱命令策略（仅持久化「默认列表之外」的追加项，默认由默认值兜底）"""
+        try:
+            from .sandbox.policy import DEFAULT_ALLOWED_COMMANDS, DEFAULT_DENIED_COMMANDS
+            cm = get_config_manager()
+
+            def _parse(txt):
+                return [ln.strip().lower() for ln in txt.splitlines() if ln.strip()]
+
+            allowed = _parse(self.sandbox_allowed_text.get(1.0, tk.END))
+            denied = _parse(self.sandbox_denied_text.get(1.0, tk.END))
+            extra_allowed = [c for c in allowed if c not in DEFAULT_ALLOWED_COMMANDS]
+            extra_denied = [c for c in denied if c not in DEFAULT_DENIED_COMMANDS]
+            cm.set_sandbox_allowed_commands(extra_allowed)
+            cm.set_sandbox_denied_commands(extra_denied)
+            messagebox.showinfo("成功", "沙箱命令策略已保存")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存失败: {e}")
+
     def _add_always_approve_tool(self):
         """添加工具到总是批准列表"""
         if not HAS_APPROVAL or not self.approval_manager:
@@ -2068,6 +2141,197 @@ class EnhancedAgentConfigDialog:
         ApprovalDialog(parent_window, request, handle_decision)
         self._refresh_pending_list()
     
+    def _create_prompt_components_tab(self, notebook):
+        """创建提示词组件标签页（内置模板覆盖 + 自定义编排提示词）"""
+        pc_frame = ttk.Frame(notebook, padding="10")
+        notebook.add(pc_frame, text="📝 提示词组件")
+
+        hint = ttk.Label(
+            pc_frame,
+            text="管理系统提示词组件：内置组件可覆盖模板或启停；「自定义」组件可手写任意编排提示词段落。"
+                 "模板需自带标题（如 RULES\\n\\n...），支持 {{占位符}} 模板语法。保存后新对话立即生效。",
+            wraplength=920, foreground="#666"
+        )
+        hint.pack(anchor=tk.W, pady=(0, 8))
+
+        content = ttk.Frame(pc_frame)
+        content.pack(fill=tk.BOTH, expand=True)
+
+        # 左侧：组件列表
+        left = ttk.Frame(content)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        self.pc_tree = ttk.Treeview(
+            left, columns=("id", "kind", "enabled"), show="headings", height=20
+        )
+        self.pc_tree.heading("id", text="组件 ID")
+        self.pc_tree.heading("kind", text="类型")
+        self.pc_tree.heading("enabled", text="启用")
+        self.pc_tree.column("id", width=180)
+        self.pc_tree.column("kind", width=64)
+        self.pc_tree.column("enabled", width=48)
+        self.pc_tree.pack(fill=tk.BOTH, expand=True)
+        self.pc_tree.bind("<<TreeviewSelect>>", self._on_select_prompt_component)
+
+        # 右侧：编辑区
+        right = ttk.Frame(content)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        edit = ttk.LabelFrame(right, text="组件编辑", padding="8")
+        edit.pack(fill=tk.BOTH, expand=True)
+
+        self.pc_selected_id = tk.StringVar(value="")
+        meta_row = ttk.Frame(edit)
+        meta_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(meta_row, text="名称:").pack(side=tk.LEFT)
+        self.pc_name_entry = ttk.Entry(meta_row, width=26)
+        self.pc_name_entry.pack(side=tk.LEFT, padx=(4, 12))
+        ttk.Label(meta_row, text="排序:").pack(side=tk.LEFT)
+        self.pc_order_entry = ttk.Entry(meta_row, width=8)
+        self.pc_order_entry.pack(side=tk.LEFT, padx=(4, 12))
+        self.pc_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(meta_row, text="启用", variable=self.pc_enabled_var).pack(side=tk.LEFT)
+
+        ttk.Label(edit, text="模板（自定义组件请自带标题，支持 {{占位符}}）:").pack(anchor=tk.W)
+        self.pc_template_text = scrolledtext.ScrolledText(edit, height=18, wrap=tk.WORD)
+        self.pc_template_text.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        btn_row = ttk.Frame(pc_frame)
+        btn_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btn_row, text="💾 保存选中", command=self._save_prompt_component).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="↩️ 恢复默认", command=self._restore_prompt_component_default).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(btn_row, text="➕ 添加自定义", command=self._add_prompt_component).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(btn_row, text="🗑️ 删除选中", command=self._delete_prompt_component).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(btn_row, text="🔄 刷新", command=self._refresh_prompt_component_list).pack(side=tk.LEFT, padx=(5, 0))
+
+        self._refresh_prompt_component_list()
+
+    def _get_prompt_components_meta(self) -> dict:
+        """内置组件元信息 {id: {name, order, default_template}}"""
+        from .prompt.components import get_component_registry
+        registry = get_component_registry()
+        meta = {}
+        for cid in registry.all_ids:
+            comp = registry.get(cid)
+            default_template = ""
+            if comp is not None:
+                try:
+                    default_template = comp.generator(None, None) or ""
+                except Exception:
+                    default_template = ""
+                meta[cid] = {
+                    "name": comp.name or cid,
+                    "order": comp.order or 0,
+                    "default_template": default_template,
+                }
+        return meta
+
+    def _clear_prompt_component_editor(self):
+        self.pc_name_entry.delete(0, tk.END)
+        self.pc_order_entry.delete(0, tk.END)
+        self.pc_enabled_var.set(True)
+        self.pc_template_text.delete(1.0, tk.END)
+
+    def _refresh_prompt_component_list(self):
+        self.pc_tree.delete(*self.pc_tree.get_children())
+        cm = get_config_manager()
+        overrides = cm.get_prompt_components() or {}
+        meta = self._get_prompt_components_meta()
+        for cid, m in meta.items():
+            enabled = overrides.get(cid, {}).get("enabled", True)
+            self.pc_tree.insert("", tk.END, iid="b:" + cid,
+                                values=(cid, "内置", "✓" if enabled else "✗"))
+        for cid, cfg in overrides.items():
+            if cid in meta:
+                continue
+            enabled = cfg.get("enabled", True)
+            self.pc_tree.insert("", tk.END, iid="c:" + cid,
+                                values=(cid, "自定义", "✓" if enabled else "✗"))
+        self.pc_selected_id.set("")
+        self._clear_prompt_component_editor()
+
+    def _on_select_prompt_component(self, event=None):
+        sel = self.pc_tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        cid = iid.split(":", 1)[1]
+        cm = get_config_manager()
+        overrides = cm.get_prompt_components() or {}
+        meta = self._get_prompt_components_meta()
+        cfg = overrides.get(cid, {})
+        self.pc_selected_id.set(cid)
+        name = cfg.get("name") or meta.get(cid, {}).get("name", cid)
+        order = cfg.get("order") if cfg.get("order") is not None else meta.get(cid, {}).get("order", "")
+        template = cfg.get("template") or meta.get(cid, {}).get("default_template", "")
+        enabled = cfg.get("enabled", True)
+        self._clear_prompt_component_editor()
+        self.pc_name_entry.insert(0, str(name))
+        self.pc_order_entry.insert(0, str(order))
+        self.pc_enabled_var.set(bool(enabled))
+        self.pc_template_text.insert(1.0, str(template))
+
+    def _save_prompt_component(self):
+        cid = self.pc_selected_id.get()
+        if not cid:
+            messagebox.showinfo("提示", "请先在左侧选择一个组件")
+            return
+        cfg = {
+            "template": self.pc_template_text.get(1.0, tk.END).rstrip("\n"),
+            "enabled": bool(self.pc_enabled_var.get()),
+        }
+        if cid not in self._get_prompt_components_meta():
+            cfg["name"] = self.pc_name_entry.get().strip() or cid
+            try:
+                cfg["order"] = int(self.pc_order_entry.get().strip() or 100)
+            except ValueError:
+                cfg["order"] = 100
+        get_config_manager().set_prompt_component(cid, cfg)
+        messagebox.showinfo("成功", f"组件 {cid} 已保存")
+        self._refresh_prompt_component_list()
+
+    def _add_prompt_component(self):
+        from tkinter import simpledialog
+        cid = simpledialog.askstring("添加自定义组件", "组件 ID（英文大写，如 MY_ORCH）:", parent=self.window)
+        if not cid or not cid.strip():
+            return
+        cid = cid.strip()
+        meta = self._get_prompt_components_meta()
+        if cid in meta:
+            messagebox.showwarning("提示", f"{cid} 是内置组件，直接编辑即可")
+            return
+        cm = get_config_manager()
+        if cid in (cm.get_prompt_components() or {}):
+            messagebox.showinfo("提示", "组件已存在")
+            return
+        cm.set_prompt_component(cid, {"name": cid, "template": "", "enabled": True, "order": 100})
+        self._refresh_prompt_component_list()
+        for item in self.pc_tree.get_children():
+            if item == "c:" + cid:
+                self.pc_tree.selection_set(item)
+                self.pc_tree.focus(item)
+                break
+        self._on_select_prompt_component()
+
+    def _delete_prompt_component(self):
+        sel = self.pc_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选择一个组件")
+            return
+        iid = sel[0]
+        cid = iid.split(":", 1)[1]
+        if not messagebox.askyesno("确认", f"删除组件 {cid}？\n内置组件将恢复默认模板；自定义组件将被移除。"):
+            return
+        get_config_manager().delete_prompt_component(cid)
+        self._refresh_prompt_component_list()
+
+    def _restore_prompt_component_default(self):
+        cid = self.pc_selected_id.get()
+        if not cid:
+            messagebox.showinfo("提示", "请先选择一个组件")
+            return
+        get_config_manager().delete_prompt_component(cid)
+        self._refresh_prompt_component_list()
+
     def _create_workflow_tab(self, notebook):
         """创建工作流管理标签页"""
         workflow_frame = ttk.Frame(notebook, padding="10")
@@ -2160,6 +2424,14 @@ class EnhancedAgentConfigDialog:
         self._start_wf_auto_refresh()
     
     def _start_wf_auto_refresh(self):
+        # 窗口已销毁（用户 X 关闭）时停止重排，避免 TclError
+        try:
+            if not self.window.winfo_exists():
+                self._wf_auto_refresh_id = None
+                return
+        except Exception:
+            self._wf_auto_refresh_id = None
+            return
         if self._wf_auto_refresh_id:
             self.window.after_cancel(self._wf_auto_refresh_id)
         if HAS_WORKFLOW and self.workflow_engine:
@@ -3299,6 +3571,13 @@ class EnhancedAgentConfigDialog:
     
     def _save_and_close(self):
         """保存并关闭"""
+        # 取消工作流自动刷新循环（after 回调在 window 销毁后访问会抛 TclError）
+        if getattr(self, "_wf_auto_refresh_id", None):
+            try:
+                self.window.after_cancel(self._wf_auto_refresh_id)
+            except Exception:
+                pass
+            self._wf_auto_refresh_id = None
         self.config_manager._save_provider_configs()
         self.window.destroy()
     
@@ -3905,3 +4184,97 @@ def get_global_approval_manager() -> GlobalApprovalManager:
     if _global_approval_manager is None:
         _global_approval_manager = GlobalApprovalManager()
     return _global_approval_manager
+
+class ModelManagerDialog(tk.Toplevel):
+    """模型管理：mode 切换、全局默认模型、目录浏览与刷新、opencode 导入。"""
+
+    def __init__(self, master=None):
+        super().__init__(master)
+        self.title("模型管理")
+        self.geometry("720x560")
+        try:
+            from .model_selector import get_model_selector
+            from .opencode_adapter import discover_opencode_config
+            self.selector = get_model_selector()
+            self._build_ui()
+        except Exception as e:
+            tk.messagebox.showerror("错误", f"初始化失败: {e}")
+            self.destroy()
+
+    def _build_ui(self):
+        # mode 单选
+        top = ttk.Frame(self, padding=8)
+        top.pack(fill="x")
+        self.mode_var = tk.StringVar(value=self.selector.get_mode())
+        ttk.Label(top, text="选择模式:").pack(side="left")
+        ttk.Radiobutton(top, text="路由（fallback）", variable=self.mode_var,
+                        value="route").pack(side="left", padx=4)
+        ttk.Radiobutton(top, text="固定自定义", variable=self.mode_var,
+                        value="fixed").pack(side="left", padx=4)
+        ttk.Button(top, text="应用 mode", command=self._apply_mode).pack(side="left", padx=8)
+        # 全局默认模型
+        mid = ttk.Frame(self, padding=8)
+        mid.pack(fill="x")
+        ttk.Label(mid, text="全局默认模型:").pack(side="left")
+        self.model_var = tk.StringVar(value=self.selector.get_default_model() or "")
+        self.model_entry = ttk.Combobox(mid, textvariable=self.model_var, width=50)
+        self.model_entry.pack(side="left", padx=4)
+        ttk.Button(mid, text="设置", command=self._apply_default).pack(side="left")
+        # 目录树
+        ttk.Label(self, text="模型目录（已缓存）:", padding=(8, 4, 8, 0)).pack(anchor="w")
+        self.tree = ttk.Treeview(self, columns=("model", "ctx", "max", "reasoning", "tools"),
+                                 show="headings", height=12)
+        for col, title in [("model", "模型"), ("ctx", "上下文"), ("max", "max_tokens"),
+                           ("reasoning", "推理"), ("tools", "工具")]:
+            self.tree.heading(col, text=title)
+            self.tree.column(col, width=120)
+        self.tree.pack(fill="both", expand=True, padx=8, pady=4)
+        self._reload_catalog()
+        # 底部按钮
+        bottom = ttk.Frame(self, padding=8)
+        bottom.pack(fill="x")
+        ttk.Button(bottom, text="从提供商刷新", command=self._refresh_catalog).pack(side="left", padx=4)
+        ttk.Button(bottom, text="导入 opencode 配置", command=self._import_opencode).pack(side="left", padx=4)
+        ttk.Button(bottom, text="关闭", command=self.destroy).pack(side="right")
+
+    def _reload_catalog(self):
+        self.tree.delete(*self.tree.get_children())
+        for row in self.selector.get_catalog():
+            self.tree.insert("", "end", values=(
+                f"{row.get('provider')}/{row.get('model_id')}",
+                row.get("context_window", ""), row.get("max_tokens", ""),
+                "是" if row.get("is_reasoning") else "否",
+                "是" if row.get("supports_tools") else "否",
+            ))
+
+    def _apply_mode(self):
+        self.selector.set_mode(self.mode_var.get())
+        tk.messagebox.showinfo("完成", f"已切换为 {self.mode_var.get()} 模式")
+
+    def _apply_default(self):
+        key = self.model_var.get().strip()
+        if not key:
+            tk.messagebox.showwarning("提示", "请输入模型 key（格式: provider名/模型名）")
+            return
+        self.selector.set_default_model(key)
+        tk.messagebox.showinfo("完成", f"默认模型已设为 {key}")
+
+    def _refresh_catalog(self):
+        try:
+            result = self.selector.refresh_catalog()
+            ok_count = sum(1 for v in result.values() if v.get("ok"))
+            self._reload_catalog()
+            tk.messagebox.showinfo("完成", f"刷新成功 {ok_count}/{len(result)} 个提供商")
+        except Exception as e:
+            tk.messagebox.showerror("错误", f"刷新失败: {e}")
+
+    def _import_opencode(self):
+        try:
+            from .opencode_adapter import import_opencode_config
+            result = import_opencode_config()
+            msg = f"导入 {result.get('imported', 0)} 个, 跳过 {result.get('skipped', 0)} 个"
+            if result.get("error"):
+                msg += f"\n{result['error']}"
+            tk.messagebox.showinfo("导入完成", msg)
+        except Exception as e:
+            tk.messagebox.showerror("错误", f"导入失败: {e}")

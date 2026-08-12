@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { StreamInfoItem, Page } from '../plugins/bridge'
+import type { StreamInfoItem, Page } from '../types/extraction'
 import { feedRepo, FeedRepository } from '../db'
 
 const STORAGE_KEY = 'ts2_feed'

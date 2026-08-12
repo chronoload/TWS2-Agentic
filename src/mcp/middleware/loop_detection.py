@@ -21,9 +21,18 @@ class LoopDetectionConfig:
 
 
 def _is_tool_error(tool_result: Any) -> bool:
-    """判断工具返回是否为错误"""
+    """判断工具返回是否为错误（用于循环检测）
+    
+    注意：超时/批处理超时 不算循环错误，因为模型可以基于此继续。
+    """
     if isinstance(tool_result, str):
         lower = tool_result.lower().strip()
+        # 超时类错误不算循环 — 模型可以基于此继续处理
+        if '超时' in tool_result or 'timeout' in lower:
+            return False
+        # 结果丢失也不算循环
+        if '结果丢失' in tool_result:
+            return False
         if lower.startswith('{"success":false'):
             return True
         if lower.startswith('{"success": false'):

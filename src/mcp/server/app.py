@@ -21,7 +21,7 @@ import concurrent.futures
 import datetime
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 # 高性能 JSON 序列化（orjson 优先）
 try:
@@ -92,6 +92,9 @@ class DirCreateRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     subdir: str = ""
+    sort_by: str = "name"     # name | size | mtime | type
+    order: str = "asc"        # asc | desc
+    type_filter: str = ""     # "" | dir | file | .ext
 
 
 class ScanRequest(BaseModel):
@@ -161,10 +164,18 @@ class CourseProgressRequest(BaseModel):
 
 
 class LessonStatusRequest(BaseModel):
-    """课时状态请求"""
+    """课时状态请求（status: 'completed' / 'not_started' 等字符串状态）"""
     course_id: str
     lesson_number: int
     status: str
+
+
+class LessonReviewRequest(BaseModel):
+    """复习调度请求（workload: 工作量/难度，参考 course_tracker.py 的 update_review_schedule）
+    用于复习间隔计算：<=5→7天, <=15→4天, <=30→2天, >30→1天"""
+    course_id: str
+    lesson_number: int
+    workload: int = 5
 
 
 class TimetableSlotCreateRequest(BaseModel):
@@ -260,6 +271,19 @@ class NotePairSaveRequest(BaseModel):
     primary_elem_type: str = ""  # 定理类型（theorem/corollary/lemma/...）或 "problem"
 
 
+class UpdateLessonRequest(BaseModel):
+    """更新课时信息请求"""
+    course_id: str
+    lesson_number: int
+    updates: Dict[str, Any]
+
+
+class UpdateCourseRequest(BaseModel):
+    """更新课程信息请求"""
+    course_id: str
+    updates: Dict[str, Any]
+
+
 class AgentChatRequest(BaseModel):
     """Agent 聊天请求"""
     message: str
@@ -271,6 +295,14 @@ class AgentChatRequest(BaseModel):
 class AgentSessionSwitchRequest(BaseModel):
     """Agent 会话切换/删除请求"""
     session_id: str
+
+
+class AgentInjectSkillRequest(BaseModel):
+    """注入技能请求：把选中的 SKILL.md 全文作为指令注入当前会话"""
+    skill_name: str
+    session_id: str = ""
+    as_system: bool = False  # True=注入为 system 指令；False=作为 user 消息呈现
+    direct_text: str = ""    # 非技能类型（tool/mcp/workflow/plugin）直接注入的指令文本
 
 
 # ─── 工具函数 ────────────────────────────────────────────────
@@ -600,6 +632,10 @@ def _check_source_auth(request: Request, require_write: bool = False) -> bool:
 
 # ─── 应用创建 ────────────────────────────────────────────────
 
+def _get_model_selector():
+    from ..model_selector import get_model_selector
+    return get_model_selector()
+
 def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                port: int = 6906) -> FastAPI:
     """创建 FastAPI 应用实例"""
@@ -694,6 +730,38 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         CheckpointMiddleware.on_event(_on_checkpoint_event)
     except Exception:
         pass
+
+    # ─── Workflow 引擎事件 → WS 广播桥 ──────────────────────
+    # 在模块加载时先用 workspace 路径固定进程内 WorkflowEngine 单例，
+    # 后续 config_ui 入口 / WorkflowTool 工具 / /api/workflow/* 拿到的是同一实例，
+    # agent 创建处的 set_agent 注入也随之全局生效。
+    try:
+        from ..workflow_engine import get_workflow_engine as _get_wf_engine
+
+        def _on_workflow_event(event):
+            """WorkflowEngine 事件（工作流线程回调）→ WS 广播（同步→异步桥接）"""
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(
+                            ws_manager.broadcast("workflow_" + event.type.value, 0, "", {
+                                "instance_id": event.instance_id,
+                                "event": event.type.value,
+                                **event.data,
+                            })
+                        )
+                    )
+            except Exception:
+                pass
+
+        _wf_db_path = os.path.join(str(workspace_dir), "data", "workflow.db")
+        _wf_engine = _get_wf_engine(_wf_db_path)
+        _wf_engine.on_event(_on_workflow_event)
+        app.state.workflow_engine = _wf_engine
+        logger.info(f"WorkflowEngine 事件桥已注册: {_wf_db_path}")
+    except Exception as e:
+        logger.warning(f"WorkflowEngine 事件桥注册失败: {e}")
 
     # 将引擎挂到 app.state
     app.state.sync_engine = sync_engine
@@ -947,6 +1015,33 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         logger.info("note_analyzer loaded, SRM data: %s", _srm_data_path)
     except Exception as _e:
         logger.warning("note_analyzer import failed: %s", _e)
+
+    # ─── 数据枢纽初始化（与 course_tracker 共用 data_hub/data_hub.db）───
+    _hub_ready = False
+    _hub = None
+    try:
+        from ws2_data_hub import init_data_hub, get_data_hub
+        _hub = get_data_hub()
+        if _hub is None:
+            _hub = init_data_hub(Path(workspace_dir))
+        _hub_ready = _hub is not None
+        logger.info("data_hub initialized at %s", _hub.db_path if _hub else "N/A")
+    except Exception as _he:
+        _hub = None
+        _hub_ready = False
+        logger.warning("data_hub init failed: %s", _he)
+
+    def _get_hub():
+        if not _hub_ready:
+            return None
+        return _hub
+
+    async def _hub_body(req: Request) -> dict:
+        """安全读取 JSON body（空 body 返回 {}）"""
+        try:
+            return await req.json()
+        except Exception:
+            return {}
 
     def _resolve_ws_path(rel_path: str) -> str:
         """将相对路径解析为工作区绝对路径"""
@@ -1229,8 +1324,8 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     # ─── 独立管线：文件IO、数据查询、Agent 各自独立线程池 ──────
     _file_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="file-io")
     _data_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="data")
-    _agent_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent")
-    _push_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="push")
+    _agent_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent")
+    _push_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="push")
 
     async def _run_file(method, *args):
         """文件IO管线：读文件、写文件、目录操作、同步"""
@@ -1337,11 +1432,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
     @app.post("/api/file/search")
     async def file_search(req: SearchRequest):
-        """搜索文件"""
+        """搜索文件（支持排序/筛选，对标 Explorer）"""
         if not check_path_access(req.subdir, "read"):
             return err(403, "路径不在允许的读取目录中")
         engine: FileSyncEngine = app.state.sync_engine
-        results = await _run_file(engine.search_files, req.query, req.subdir)
+        results = await _run_file(engine.search_files, req.query, req.subdir,
+                                  req.sort_by, req.order, req.type_filter)
         return ok(data=[e.to_dict() for e in results])
 
     @app.post("/api/file/stat")
@@ -1593,6 +1689,10 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             ".pdf": "application/pdf",
             ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".gif": "image/gif", ".svg": "image/svg+xml",
+            ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon",
+            ".tif": "image/tiff", ".tiff": "image/tiff",
+            ".avif": "image/avif", ".jfif": "image/jpeg", ".apng": "image/apng",
+            ".heic": "image/heic", ".heif": "image/heif",
             ".mp4": "video/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav",
             ".md": "text/markdown", ".txt": "text/plain", ".rmd": "text/plain",
             ".py": "text/x-python", ".json": "application/json",
@@ -1601,7 +1701,8 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             ".gz": "application/gzip",
         }
         media_type = mime_map.get(abs_path.suffix.lower(), "application/octet-stream")
-        if preview:
+        is_media = media_type.startswith(("image/", "video/", "audio/"))
+        if preview or is_media:
             return FileResponse(abs_path, media_type=media_type)
         return FileResponse(abs_path, media_type=media_type, filename=abs_path.name)
 
@@ -2142,6 +2243,73 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         finally:
             await app.state.ws_manager.remove_session(app_id, session_id)
 
+    # ─── 协同：创建物理副本（右键"协同打开副本"）────
+    from .collab import create_copy
+    from pydantic import BaseModel
+
+    class CollabCopyRequest(BaseModel):
+        path: str
+
+    @app.post("/api/collab/createCopy")
+    async def collab_create_copy(req: CollabCopyRequest, request: Request):
+        config = load_api_config()
+        if not check_auth(request, config):  # type: ignore[name-defined]
+            return err(403, "未授权")
+        try:
+            result = create_copy(req.path, _read_collab_initial, _write_collab_persist)
+            return ok(data=result)
+        except Exception as e:
+            logger.error(f"collab createCopy failed {req.path}: {e}")
+            return err(msg=str(e))
+
+    # ─── 协同 WebSocket（Loro 协同编辑，正式项目）────────
+
+    from .collab import CollabManager
+
+    def _read_collab_initial(p: str) -> Optional[str]:
+        """协同文件初始文本（用于服务端权威 LoroDoc 初始化）。"""
+        try:
+            base = Path(str(app.state.workspace_dir)).resolve()
+            fp = (base / p.lstrip("/")).resolve()
+            if not str(fp).startswith(str(base)):
+                return None
+            if fp.is_file():
+                return fp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        return None
+
+    def _write_collab_persist(p: str, text: str) -> None:
+        """协同权威 LoroDoc 文本写回文件（持久化）。"""
+        try:
+            base = Path(str(app.state.workspace_dir)).resolve()
+            fp = (base / p.lstrip("/")).resolve()
+            if not str(fp).startswith(str(base)):
+                return
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(text, encoding="utf-8")
+        except Exception as e:
+            logger.error(f"collab persist write failed {p}: {e}")
+
+    collab_manager = CollabManager(
+        load_text=_read_collab_initial,
+        persist_text=_write_collab_persist,
+    )
+    app.state.collab_manager = collab_manager
+
+    @app.websocket("/ws/collab/{path:path}")
+    async def collab_ws(websocket: WebSocket, path: str):
+        """协同编辑 WebSocket。纯转发：CRDT 在客户端，服务端做房间与快照协商。"""
+        config = load_api_config()
+        if not _check_ws_auth(websocket, config):
+            await websocket.close(code=4001, reason="未授权")
+            return
+        await websocket.accept()
+        await collab_manager.handle(
+            websocket, path,
+            send_json=lambda m: websocket.send_text(_json_dumps(m, ensure_ascii=False)),
+        )
+
     # ─── 终端 WebSocket（xterm.js）────────────────────────
 
     @app.websocket("/api/terminal")
@@ -2212,14 +2380,25 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             init_cols, init_rows = 100, 30
 
         import winpty as _winpty
+        import shutil as _shutil
+        # pywinpty 3.x 接口要点：
+        #   - spawn 的 appname 必须是完整路径（'cmd.exe' 会 os error 2）
+        #   - write 要 str（bytes 报 TypeError）
+        #   - read(blocking=False) 无 length 参数，返回 str（已解码）
+        #   - spawn 的 env 是 "\0" 分隔的字符串（非 dict）
+        env_str = '\0'.join(f'{k}={v}' for k, v in proc_env.items()) + '\0'
+        # 解析 shell 完整路径：cmd.exe → C:\Windows\System32\cmd.exe
+        shell_full = _shutil.which(shell) or shell
         pty = None
         def _create_pty():
             p = _winpty.PTY(init_cols, init_rows)
-            p.spawn(shell, cwd=spawn_cwd, env=proc_env)
+            p.spawn(shell_full, cwd=spawn_cwd, env=env_str)
             return p
         try:
             pty = await loop.run_in_executor(None, _create_pty)
-        except Exception:
+            logger.info(f"PTY spawn OK: shell={shell_full} cwd={spawn_cwd} cols={init_cols} rows={init_rows}")
+        except Exception as _e:
+            logger.warning(f"PTY spawn failed, falling back to subprocess: {_e}")
             pty = None
 
         if pty is not None:
@@ -2235,12 +2414,20 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             async def read_pty():
                 while True:
                     try:
-                        raw = await _run("read", 4096)
-                        if raw:
+                        # pywinpty 3.x: read(blocking=False) 返回 str，无数据时返回 ''
+                        raw = await _run("read", False)
+                        if not raw:
+                            await asyncio.sleep(0.02)
+                            continue
+                        if isinstance(raw, str):
                             await websocket.send_bytes(raw.encode("utf-8", errors="replace"))
+                        else:
+                            await websocket.send_bytes(raw)
                     except EOFError:
+                        logger.info("terminal read_pty: EOF")
                         break
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"terminal read_pty exit: {type(e).__name__}: {e}")
                         break
 
             async def write_pty():
@@ -2256,10 +2443,15 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                                     pass
                             continue
                         if await _run("isalive"):
+                            # pywinpty 3.x: write 要 str（不是 bytes）
                             await _run("write", msg)
+                        else:
+                            logger.info("terminal write_pty: PTY not alive")
+                            break
                     except WebSocketDisconnect:
                         break
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"terminal write_pty error: {type(e).__name__}: {e}")
                         break
 
             tasks = [asyncio.create_task(read_pty()), asyncio.create_task(write_pty())]
@@ -2273,6 +2465,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                         await _run("write", "\x03")
                 except Exception:
                     pass
+            logger.info("terminal PTY session ended")
             return
 
         # ── Fallback: 无 PTY ──
@@ -2313,13 +2506,21 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     break
 
         async def write_proc():
+            # fallback 路径下 stdin 是 pipe，cmd.exe 不回显输入。
+            # 后端收到用户输入时先回显给前端，再写入 stdin，让用户能看到自己打的内容。
+            # （PTY 路径不需要这层：console 回显由 PTY 自己处理）
             while True:
                 try:
                     msg = await websocket.receive_text()
-                    if msg == "__resize__":
+                    if msg.startswith("__resize__"):
                         continue
                     if proc.stdin and not proc.stdin.is_closing():
-                        proc.stdin.write(msg.encode())
+                        # 回显：把用户输入原样发回前端（bytes）
+                        try:
+                            await websocket.send_bytes(msg.encode("utf-8"))
+                        except Exception:
+                            pass
+                        proc.stdin.write(msg.encode("utf-8"))
                         await proc.stdin.drain()
                 except WebSocketDisconnect:
                     break
@@ -2768,6 +2969,70 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
         return progress_data, None
 
+    def _update_lesson_data(workspace_dir: str, course_id: str, lesson_number: int, updates: dict):
+        """更新课时信息（lesson_title, central_question, description, estimated_hours 等）"""
+        scan_dirs = [Path(workspace_dir), Path.home() / ".ts2", Path(workspace_dir).parent]
+        for scan_dir in scan_dirs:
+            if not scan_dir.exists():
+                continue
+            for f in sorted(scan_dir.glob("*.json")):
+                if "_progress" in f.name or f.name in {"courses_structured_progress.json",
+                                                        "resource_index.json",
+                                                        "courses_structured_progress.bak.json"}:
+                    continue
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    data = _json_loads(content)
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                courses = data.get("courses")
+                if not isinstance(courses, list):
+                    continue
+                for course in courses:
+                    cid = course.get("note_id", "") or course.get("id", "")
+                    if str(cid) != str(course_id):
+                        continue
+                    lessons = course.get("lessons", [])
+                    for lesson in lessons:
+                        ln = lesson.get("lesson_number", lesson.get("number", 0))
+                        if ln == lesson_number:
+                            lesson.update(updates)
+                            f.write_text(_json_dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                            return lesson, None
+        return None, "Lesson not found"
+
+    def _update_course_data(workspace_dir: str, course_id: str, updates: dict):
+        """更新课程信息（course_title, domain, total_hours 等）"""
+        scan_dirs = [Path(workspace_dir), Path.home() / ".ts2", Path(workspace_dir).parent]
+        for scan_dir in scan_dirs:
+            if not scan_dir.exists():
+                continue
+            for f in sorted(scan_dir.glob("*.json")):
+                if "_progress" in f.name or f.name in {"courses_structured_progress.json",
+                                                        "resource_index.json",
+                                                        "courses_structured_progress.bak.json"}:
+                    continue
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    data = _json_loads(content)
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                courses = data.get("courses")
+                if not isinstance(courses, list):
+                    continue
+                for course in courses:
+                    cid = course.get("note_id", "") or course.get("id", "")
+                    if str(cid) != str(course_id):
+                        continue
+                    course.update(updates)
+                    f.write_text(_json_dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                    return course, None
+        return None, "Course not found"
+
     # ── 数据 API 路由 ──
 
     @app.post("/api/data/tasks")
@@ -3125,6 +3390,22 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     async def lesson_status(req: LessonStatusRequest):
         """更新课时状态（data/progress/{course_id}.json）"""
         result, error = await _run_data(_update_lesson_status, app.state.workspace_dir, req.course_id, req.lesson_number, req.status)
+        if error:
+            return err(msg=error)
+        return ok(data=result)
+
+    @app.post("/api/data/courses/updateLesson")
+    async def update_lesson(req: UpdateLessonRequest):
+        """更新课时信息（标题、中心问题、描述、预计时长等）"""
+        result, error = await _run_data(_update_lesson_data, app.state.workspace_dir, req.course_id, req.lesson_number, req.updates)
+        if error:
+            return err(msg=error)
+        return ok(data=result)
+
+    @app.post("/api/data/courses/update")
+    async def update_course(req: UpdateCourseRequest):
+        """更新课程信息（标题、域、总学时等）"""
+        result, error = await _run_data(_update_course_data, app.state.workspace_dir, req.course_id, req.updates)
         if error:
             return err(msg=error)
         return ok(data=result)
@@ -3747,8 +4028,8 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             return None, str(e)
         return progress_data, None
 
-    def _update_review_schedule(workspace_dir: str, course_id: str, lesson_number: int, status: str):
-        """同步更新复习调度"""
+    def _update_review_schedule(workspace_dir: str, course_id: str, lesson_number: int, workload: int = 5):
+        """同步更新复习调度（参考 course_tracker.py 的 update_review_schedule）"""
         from datetime import datetime, timedelta
         progress_dir = Path(workspace_dir) / "data" / "progress"
         progress_path = progress_dir / f"{course_id}.json"
@@ -3761,7 +4042,6 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
         rs = progress_data.setdefault("review_schedule", {})
         ln_str = str(lesson_number)
-        workload = status if isinstance(status, (int, float)) else 5
         now = datetime.now()
         if workload <= 0: interval_days = 14
         elif workload <= 5: interval_days = 7
@@ -3883,9 +4163,9 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         return ok(data=result)
 
     @app.post("/api/data/courses/updateReview")
-    async def courses_update_review(req: LessonStatusRequest):
+    async def courses_update_review(req: LessonReviewRequest):
         """根据工作量更新复习调度"""
-        result, error = await _run_data(_update_review_schedule, app.state.workspace_dir, req.course_id, req.lesson_number, req.status)
+        result, error = await _run_data(_update_review_schedule, app.state.workspace_dir, req.course_id, req.lesson_number, req.workload)
         if error:
             return err(msg=error)
         return ok(data=result)
@@ -4041,6 +4321,319 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         """获取所有课程资源（可选搜索过滤）"""
         data = await _run_data(_get_all_resources, app.state.workspace_dir, query)
         return ok(data=data)
+
+    # ─── 数据枢纽 API ──────────────────────────────────────
+
+    @app.post("/api/hub/rss/list")
+    async def hub_rss_list(req: Request):
+        """列出 RSS 订阅源"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        subs = await _run_data(hub.get_rss_subscriptions, bool(body.get("active_only", False)))
+        return ok(data={
+            "count": len(subs),
+            "subscriptions": [
+                {"id": s.id, "title": s.title, "url": s.url, "category": s.category,
+                 "active": s.active, "last_polled": s.last_polled,
+                 "poll_interval_minutes": s.poll_interval_minutes}
+                for s in subs
+            ],
+        })
+
+    @app.post("/api/hub/rss/add")
+    async def hub_rss_add(req: Request):
+        """添加 RSS 订阅"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        url = (body.get("url") or "").strip()
+        if not url:
+            return err(msg="URL 不能为空")
+        from ws2_data_hub import RSSSubscription
+        sub = RSSSubscription(
+            url=url,
+            title=(body.get("title") or "").strip(),
+            category=(body.get("category") or "").strip(),
+            poll_interval_minutes=int(body.get("poll_interval_minutes") or 60),
+        )
+        result = await _run_data(hub.add_rss_subscription, sub)
+        return ok(data={"id": result.id, "url": result.url, "title": result.title})
+
+    @app.post("/api/hub/rss/remove")
+    async def hub_rss_remove(req: Request):
+        """移除 RSS 订阅"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        sub_id = (body.get("sub_id") or "").strip()
+        if not sub_id:
+            return err(msg="sub_id 不能为空")
+        success = await _run_data(hub.remove_rss_subscription, sub_id)
+        if not success:
+            return err(msg=f"未找到订阅: {sub_id}")
+        return ok(data={"removed_id": sub_id})
+
+    @app.post("/api/hub/rss/update")
+    async def hub_rss_update(req: Request):
+        """更新 RSS 订阅（active/poll_interval_minutes/category 等）"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        sub_id = (body.get("sub_id") or "").strip()
+        if not sub_id:
+            return err(msg="sub_id 不能为空")
+        updates = {}
+        for k in ("title", "category", "poll_interval_minutes", "active"):
+            if k in body and body[k] is not None:
+                updates[k] = body[k]
+        if not updates:
+            return err(msg="未提供任何更新字段")
+        success = await _run_data(lambda: hub.update_rss_subscription(sub_id, **updates))
+        if not success:
+            return err(msg=f"未找到订阅: {sub_id}")
+        return ok(data={"updated": list(updates.keys())})
+
+    @app.post("/api/hub/rss/poll")
+    async def hub_rss_poll(req: Request):
+        """轮询 RSS：sub_id 为空则轮询全部活跃订阅"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        sub_id = (body.get("sub_id") or "").strip()
+        if sub_id:
+            new_items = await _run_data(hub.poll_rss_feed, sub_id)
+            return ok(data={
+                "sub_id": sub_id, "total_new": len(new_items),
+                "new_items": [{"id": i.id, "title": i.title, "url": i.url} for i in new_items[:20]],
+            })
+        results = await _run_data(hub.poll_all_rss_feeds)
+        total = sum(v for v in results.values() if v > 0)
+        return ok(data={"results": results, "total_new": total})
+
+    @app.post("/api/hub/items")
+    async def hub_items_query(req: Request):
+        """查询数据项（支持过滤）"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        items = await _run_data(lambda: hub.query_items(
+            source_type=body.get("source_type") or None,
+            item_type=body.get("item_type") or None,
+            tag=body.get("tag") or None,
+            starred_only=bool(body.get("starred_only")),
+            unread_only=bool(body.get("unread_only")),
+            search=body.get("search") or None,
+            limit=int(body.get("limit") or 100),
+            offset=int(body.get("offset") or 0),
+        ))
+        return ok(data={
+            "count": len(items),
+            "items": [{
+                "id": i.id, "title": i.title, "url": i.url, "summary": i.summary,
+                "content": i.content,
+                "source_type": i.source_type, "item_type": i.item_type,
+                "tags": i.tags, "is_read": i.is_read, "is_starred": i.is_starred,
+                "metadata": i.metadata, "created_at": i.created_at, "updated_at": i.updated_at,
+            } for i in items],
+        })
+
+    @app.post("/api/hub/items/add")
+    async def hub_items_add(req: Request):
+        """添加数据项"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        title = (body.get("title") or "").strip()
+        if not title:
+            return err(msg="标题不能为空")
+        from ws2_data_hub import HubItem
+        item = HubItem(
+            title=title, url=body.get("url") or "", content=body.get("content") or "",
+            summary=body.get("summary") or "",
+            source_type=body.get("source_type") or "manual",
+            item_type=body.get("item_type") or "webpage",
+            tags=[t.strip() for t in (body.get("tags") or "").split(",") if t.strip()],
+        )
+        result = await _run_data(hub.add_item, item)
+        return ok(data={"id": result.id, "title": result.title})
+
+    @app.post("/api/hub/items/update")
+    async def hub_items_update(req: Request):
+        """更新数据项（is_read/is_starred 等）"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        item_id = (body.get("item_id") or "").strip()
+        if not item_id:
+            return err(msg="item_id 不能为空")
+        updates = {}
+        for k in ("title", "content", "summary", "is_read", "is_starred", "is_archived"):
+            if k in body and body[k] is not None:
+                updates[k] = body[k]
+        if not updates:
+            return err(msg="未提供任何更新字段")
+        success = await _run_data(lambda: hub.update_item(item_id, **updates))
+        if not success:
+            return err(msg=f"未找到数据项: {item_id}")
+        return ok(data={"updated": list(updates.keys())})
+
+    @app.post("/api/hub/items/delete")
+    async def hub_items_delete(req: Request):
+        """删除数据项"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        item_id = (body.get("item_id") or "").strip()
+        if not item_id:
+            return err(msg="item_id 不能为空")
+        success = await _run_data(hub.delete_item, item_id)
+        if not success:
+            return err(msg=f"未找到数据项: {item_id}")
+        return ok(data={"deleted_id": item_id})
+
+    @app.post("/api/hub/collections")
+    async def hub_collections():
+        """列出数据集合"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        colls = await _run_data(hub.get_collections)
+        return ok(data={
+            "count": len(colls),
+            "collections": [
+                {"id": c.id, "title": c.title, "description": c.description,
+                 "item_count": len(c.item_ids), "tags": c.tags}
+                for c in colls
+            ],
+        })
+
+    @app.post("/api/hub/collections/create")
+    async def hub_collections_create(req: Request):
+        """创建数据集合"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        title = (body.get("title") or "").strip()
+        if not title:
+            return err(msg="标题不能为空")
+        from ws2_data_hub import DataCollection
+        coll = DataCollection(title=title, description=body.get("description") or "")
+        result = await _run_data(hub.create_collection, coll)
+        return ok(data={"id": result.id, "title": result.title})
+
+    @app.post("/api/hub/collections/addItem")
+    async def hub_collections_add_item(req: Request):
+        """向集合添加数据项"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        ok_flag = await _run_data(
+            hub.add_to_collection, body.get("collection_id", ""), body.get("item_id", ""))
+        if not ok_flag:
+            return err(msg="集合或数据项不存在")
+        return ok(data={})
+
+    @app.post("/api/hub/collections/delete")
+    async def hub_collections_delete(req: Request):
+        """删除数据集合"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        await _run_data(hub.delete_collection, body.get("collection_id", ""))
+        return ok(data={})
+
+    @app.post("/api/hub/stats")
+    async def hub_stats():
+        """数据枢纽统计"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        stats = await _run_data(hub.get_statistics)
+        return ok(data=stats)
+
+    @app.post("/api/hub/pipeline/run")
+    async def hub_pipeline_run(req: Request):
+        """运行数据管道（空 stage=完整管道）"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        engine = hub.get_pipeline_engine()
+        stage = (body.get("stage") or "").strip()
+        if stage:
+            stage_map = {
+                "scan": engine._stage_scan,
+                "enrich": lambda: engine._stage_enrich(limit=int(body.get("enrich_limit") or 20)),
+                "filter": engine._stage_filter,
+                "update": lambda: engine._stage_update(max_age_hours=int(body.get("update_max_age_hours") or 24)),
+                "syncback": engine._stage_syncback,
+            }
+            if stage not in stage_map:
+                return err(msg=f"未知阶段: {stage}")
+            result = await _run_data(stage_map[stage])
+            return ok(data={"stage": stage, "result": result})
+        result = await _run_data(engine.run_full_pipeline)
+        return ok(data=result)
+
+    @app.post("/api/hub/pipeline/status")
+    async def hub_pipeline_status():
+        """管道运行状态"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        status = await _run_data(hub.get_pipeline_status)
+        stage_stats = await _run_data(hub.get_pipeline_stage_stats)
+        return ok(data={**status, "stage_stats": stage_stats})
+
+    @app.post("/api/hub/logs")
+    async def hub_logs(req: Request):
+        """管道日志"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        logs = await _run_data(hub.get_pipeline_logs, int(body.get("limit") or 50))
+        return ok(data={"logs": logs})
+
+    @app.post("/api/hub/discover")
+    async def hub_discover(req: Request):
+        """轻度爬取探测 URL，可选自动导入发现的订阅源"""
+        hub = _get_hub()
+        if not hub:
+            return err(msg="数据枢纽未初始化")
+        body = await _hub_body(req)
+        url = (body.get("url") or "").strip()
+        if not url:
+            return err(msg="URL 不能为空")
+        try:
+            info = await _run_data(hub.lightweight_crawl, url)
+        except Exception as _e:
+            logger.warning("hub discover failed: %s", _e)
+            return ok(data={"url": url, "error": str(_e), "feeds": []})
+        feeds = info.get("feeds", [])
+        imported = 0
+        if body.get("discover_feeds") and feeds:
+            imported = await _run_data(
+                hub.import_discovered_subscriptions,
+                [{"url": f["url"], "type": f.get("type", "rss"), "title": f.get("title", "")} for f in feeds],
+            )
+        return ok(data={
+            "url": url, "title": info.get("title", ""), "description": info.get("description", ""),
+            "feeds": feeds, "imported": imported,
+        })
 
     # ─── 内容推送 API ──────────────────────────────────────
 
@@ -4254,6 +4847,26 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             except Exception:
                 pass
 
+        # 3.5 RSS 新条目推送（数据枢纽未初始化时跳过）
+        try:
+            if _hub_ready:
+                rss_items = _hub.query_items(source_type="rss", unread_only=True, limit=10)
+                result["rss_new_entries"] = [{
+                    "id": i.id, "title": i.title, "url": i.url, "summary": i.summary,
+                    "source_type": i.source_type,
+                    "sub_title": i.metadata.get("rss_sub_title", ""),
+                    "published": i.metadata.get("published", ""),
+                    "created_at": i.created_at,
+                } for i in rss_items]
+                result["rss_new_count"] = len(rss_items)
+            else:
+                result["rss_new_entries"] = []
+                result["rss_new_count"] = 0
+        except Exception as _e:
+            logger.warning(f"Push dashboard: read rss failed: {_e}")
+            result["rss_new_entries"] = []
+            result["rss_new_count"] = 0
+
         # 4. 今日统计
         result["today_stats"] = {
             "overdue_tasks_count": len(result["overdue_tasks"]),
@@ -4294,44 +4907,118 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
     # ─── Agent 聊天 API（连接 TS2 MCP 系统）────────────────
 
-    # 懒加载 Agent 实例
-    _web_agent = None
-    _web_agent_lock = threading.Lock()
+    # 共享基础组件（LLM, config, context_injector）— 所有会话共用
+    _agent_base = None
+    _agent_base_lock = threading.Lock()
 
-    def _get_session_preview(messages_snapshot: list) -> str:
-        """从消息快照中提取适合预览的文本（优先取 user/assistant 消息）"""
-        if not messages_snapshot:
-            return ""
-        # 从后往前找第一条 user 或 assistant 消息
-        for msg in reversed(messages_snapshot):
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role in ("user", "assistant") and content:
-                text = content if isinstance(content, str) else str(content)
-                return text[:80]
-        return ""
+    # Agent 实例池 — 每个会话独立 Agent 实例
+    _agent_pool: dict = {}
+    _agent_pool_lock = threading.Lock()
+    
+    # Agent 池状态推送函数引用（供回调使用）— 使用列表作为可变容器
+    _push_agent_pool_status_ref = [None]
 
-    def _get_web_agent(workspace_dir: str):
-        """获取或创建 Web Agent 实例"""
-        nonlocal _web_agent, _web_agent_lock
-        if _web_agent is not None:
-            return _web_agent
-        with _web_agent_lock:
-            if _web_agent is not None:
-                return _web_agent
+    # 会话存储 — 独立于 checkpoint，用于会话列表/切换/恢复
+    _session_store = None
+    _session_store_lock = threading.Lock()
+
+    def _get_session_store():
+        nonlocal _session_store, _session_store_lock
+        if _session_store is not None:
+            return _session_store
+        with _session_store_lock:
+            if _session_store is not None:
+                return _session_store
+            try:
+                from ..harness.session_store import SessionStore
+                _session_store = SessionStore()
+                logger.info(f"SessionStore initialized at {_session_store.store_dir}")
+            except Exception as e:
+                logger.error(f"Failed to init SessionStore: {e}")
+                _session_store = None
+            return _session_store
+
+    def _extract_session_name(messages: list, checkpoints: list, fallback_id: str) -> str:
+        """从对话内容中提取会话名称
+        
+        优先从用户消息中提取首条有意义的内容作为名称，
+        回退到检查点中的文件路径或工具名称。
+        """
+        # 1. 尝试从用户消息中提取名称（跳过 system-reminder 伪消息，如 <current_date> 包装）
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if not content or not isinstance(content, str):
+                    continue
+                stripped = content.strip()
+                if stripped.startswith("<system-reminder>") and stripped.endswith("</system-reminder>"):
+                    continue
+                # 去除空白和换行
+                clean = content.strip().replace("\n", " ")
+                # 提取前 30 个字符作为名称
+                if len(clean) > 5:
+                    name = clean[:30]
+                    if len(clean) > 30:
+                        name += "..."
+                    return name
+        
+        # 2. 从检查点中的文件路径提取（如果有）
+        if checkpoints:
+            try:
+                fdb_inst = _get_fdb_for_workspace(app.state.workspace_dir)
+                if fdb_inst:
+                    conn = fdb_inst._connect()
+                    for cp in checkpoints[:3]:  # 只看前 3 个检查点
+                        cp_id = cp.get("id", 0)
+                        if cp_id:
+                            row = conn.execute(
+                                "SELECT path FROM file_versions WHERE checkpoint_id = ? LIMIT 1",
+                                (cp_id,)
+                            ).fetchone()
+                            if row:
+                                path = row["path"]
+                                import os
+                                filename = os.path.basename(path)
+                                if filename and not filename.endswith("/"):
+                                    return f"关于 {filename}"
+            except Exception:
+                pass
+        
+        # 3. 从检查点的工具名称提取
+        if checkpoints:
+            tool_counter = {}
+            for cp in checkpoints:
+                tool = cp.get("tool", "")
+                if tool:
+                    tool_counter[tool] = tool_counter.get(tool, 0) + 1
+            if tool_counter:
+                top_tool = max(tool_counter, key=tool_counter.get)
+                tool_desc = {
+                    "edit_file": "编辑文件", "read_file": "阅读文件",
+                    "write_file": "写入文件", "list_directory": "浏览目录",
+                    "cli_execute": "执行命令", "grep": "搜索代码",
+                    "glob": "查找文件", "run_command": "运行命令",
+                }
+                return tool_desc.get(top_tool, top_tool)
+        
+        # 4. 回退到 ID
+        return f"会话 {fallback_id[:8]}"
+
+    def _get_agent_base(workspace_dir: str):
+        """创建或获取共享的 Agent 基础组件（LLM, config, context_injector）"""
+        nonlocal _agent_base, _agent_base_lock
+        if _agent_base is not None:
+            return _agent_base
+        with _agent_base_lock:
+            if _agent_base is not None:
+                return _agent_base
             try:
                 from ..config import get_config_manager
                 from ..llm import MultiProviderManager, SimulatorLLM
                 from ..agent import Agent, AgentConfig
 
                 config_mgr = get_config_manager()
-
-                # 优先使用新的 ProviderConfig（支持环境变量自动检测）
                 provider_configs = config_mgr.get_provider_configs_for_manager()
-
-                # 过滤掉 simulator 和未启用的
                 enabled_configs = [
                     cfg for cfg in provider_configs
                     if cfg.enabled and cfg.provider.value != 'simulator'
@@ -4354,7 +5041,6 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     llm = _AdapterLLM(raw_llm)
                     logger.info(f"Web Agent: 使用真实 LLM ({len(enabled_configs)} 个提供商)")
                 else:
-                    # 尝试从环境变量直接创建 OpenAI 兼容配置
                     import os
                     api_key = os.environ.get("OPENAI_API_KEY", "")
                     base_url = os.environ.get("OPENAI_BASE_URL", os.environ.get("OPENAI_API_BASE", ""))
@@ -4387,37 +5073,45 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                         logger.info(f"Web Agent: 使用环境变量 LLM (model={model_id})")
                     else:
                         llm = SimulatorLLM()
-                        logger.warning("Web Agent: 未找到 LLM 配置，使用模拟模式。请设置 OPENAI_API_KEY 环境变量或配置 ~/.ts2/agent_config/providers.json")
+                        logger.warning("Web Agent: 未找到 LLM 配置，使用模拟模式")
 
-                # 获取 model_id（用于构建正确的系统提示词）
                 _web_model_id = ""
                 if enabled_configs:
                     _web_model_id = enabled_configs[0].model or ""
                 elif api_key:
-                    _web_model_id = model_id  # 环境变量中的 model_id
+                    _web_model_id = model_id
 
+                _web_ws2_system = None
+                try:
+                    import sys as _sys
+                    _project_root = str(Path(__file__).resolve().parent.parent.parent)
+                    if _project_root not in _sys.path:
+                        _sys.path.insert(0, _project_root)
+                    from course_tracker import CourseSystem
+                    _web_ws2_system = CourseSystem()
+                    logger.info(f"Web Agent: WS2 系统已注入 (课程数={len(_web_ws2_system.courses)})")
+                except Exception as _e:
+                    logger.warning(f"Web Agent: WS2 系统初始化失败: {_e}")
+
+                from ..agent import AgentConfig
                 agent_config = AgentConfig(
                     name="TS2 Web Agent",
                     base_dir=Path(workspace_dir),
                     workspace_root=workspace_dir,
-                    mode="act",
+                    mode="act",  # 共享 base 不带模式；per-session 模式在实例创建时按会话恢复
                     model_id=_web_model_id,
+                    ws2_system=_web_ws2_system,
                 )
-                # Agent.__init__ 会自动加载默认工具 + server_tools + WS2/DataHub 等
-                # server_tools 已在 Agent.__init__ 中统一加载，无需手动合并
-                agent = Agent(llm=llm, config=agent_config)
 
-                # 动态注入当前工作目录 + Web 客户端连接信息
                 def _web_context_injector(a, u):
                     parts = [f"[当前工作目录: {workspace_dir}]"]
-                    # 注入当前连接的 Web 客户端信息
                     try:
                         ws_mgr = getattr(app.state, 'ws_manager', None)
                         if ws_mgr:
                             sessions = ws_mgr.get_sessions_info()
                             if sessions:
                                 parts.append(f"[当前 Web 客户端连接数: {len(sessions)}]")
-                                for s in sessions[:5]:  # 最多显示5个
+                                for s in sessions[:5]:
                                     parts.append(
                                         f"  - app_id={s.get('app_id','?')}, "
                                         f"session={s.get('session_id','?')[:8]}, "
@@ -4429,21 +5123,242 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                         pass
                     return "\n".join(parts)
 
-                agent.register_context_injector(_web_context_injector)
-
-                _web_agent = agent
-                logger.info(f"Web Agent 已初始化 ({len(agent.tools)} 工具, LLM: {'已配置' if not isinstance(llm, SimulatorLLM) else '未配置(模拟模式)'})")
+                _agent_base = {
+                    'llm': llm,
+                    'config': agent_config,
+                    'context_injector': _web_context_injector,
+                    'workspace_dir': workspace_dir,
+                    'is_simulator': isinstance(llm, SimulatorLLM),
+                }
+                logger.info(f"Agent base 已初始化 (LLM: {'已配置' if not _agent_base['is_simulator'] else '未配置(模拟模式)'})")
             except Exception as e:
-                logger.warning(f"Web Agent 初始化失败: {e}")
+                logger.warning(f"Agent base 初始化失败: {e}")
                 import traceback
                 traceback.print_exc()
-                _web_agent = None
-        return _web_agent
+                _agent_base = None
+        return _agent_base
+
+    def _agent_state_of(agent):
+        """统一读取 Agent 状态机的运行状态三元组（口径收口）。
+
+        `_chat_active` 语义反转（is_set()=True 空闲 / False 活跃），
+        `_is_streaming` / `_cancelled` 为布尔字段；三者本应同步，
+        但历史上多处消费点各自 getattr 翻译双标志，口径漂移导致
+        前端 agentStreaming 被覆写（如 cancel 残留 _cancelled 被当成流式中）。
+        此处统一为一处判定，各端点不得再自行 getattr 翻译。
+        返回 (is_streaming, is_active, is_cancelled)
+        """
+        is_streaming = bool(getattr(agent, '_is_streaming', False))
+        is_active = False
+        chat_active = getattr(agent, '_chat_active', None)
+        if chat_active is not None:
+            is_active = not chat_active.is_set()  # clear() = chat 正在运行
+        is_cancelled = bool(getattr(agent, '_cancelled', False))
+        return is_streaming, is_active, is_cancelled
+
+    def _agent_status_name(agent):
+        """会话状态枚举（对齐 kimi-code）：idle / running / streaming / awaiting_approval / aborted。
+
+        由 _agent_state_of 三元组派生（口径收口，不自行翻译标志）：
+          - _cancelled          → aborted
+          - _is_streaming       → streaming
+          - _awaiting_approval  → awaiting_approval（预留：审批机制置位）
+          - chat 正在运行       → running（非流式运行中，如工具执行/思考间隙）
+          - 其余                → idle
+        """
+        is_streaming, is_active, is_cancelled = _agent_state_of(agent)
+        if is_cancelled:
+            return "aborted"
+        if is_streaming:
+            return "streaming"
+        if bool(getattr(agent, "_awaiting_approval", False)):
+            return "awaiting_approval"
+        if is_active:
+            return "running"
+        return "idle"
+
+    def _sync_agent_from_store(agent, session_id: str, store) -> bool:
+        """将 Agent 实例与 SessionStore 双向同步 — 自主状态机的核心
+
+        重要：`_chat_active` 的语义是反的：
+        - `_chat_active.set()` = "无 chat 运行"，`is_set()` = True
+        - `_chat_active.clear()` = "chat 正在运行"，`is_set()` = False
+        - 所以 `is_set()` 返回 True 表示 "chat 处于空闲状态"
+
+        规则（双向合并，避免单向覆盖导致消息回滚丢失）：
+        - chat 正在运行时（_is_streaming=True 或 _chat_active.is_set()=False）不进行同步
+        - Store 消息数 > Agent → 加载到 Agent（store 更新）
+        - Agent 消息数 > Store → 保存到 Store（agent 更新，如 chat 完成未保存）
+        - 数量一致但 Agent 为空 → 从 Store 加载（确保 switch 后内存有历史）
+        """
+        is_streaming, is_active, _ = _agent_state_of(agent)
+        # chat_idle = True 表示"无 chat 在运行"，可以安全同步
+        # （_chat_active.is_set() = True 意味着空闲；is_active 为其取反）
+        chat_idle = not is_active
+
+        if is_streaming or not chat_idle:
+            logger.debug(f"[state-machine] Skipping sync for '{session_id[:12]}': streaming={is_streaming}, chat_idle={chat_idle}")
+            return False
+        
+        # 仲裁只看「真实对话消息」（剔除 system 模板消息）。
+        # system 每次由 _init_messages + context 注入重新生成，内容可能不同；
+        # 若把 [system] 计入仲裁，新 agent（仅 system）会与 store 完整历史前缀失配
+        # → 落入分叉分支 → 新 agent 覆盖 store（只剩 system）→ 切换后历史丢失、空覆盖。
+        def _strip_system(msgs) -> list:
+            return [m for m in (msgs or []) if m.get("role") != "system"]
+
+        agent_real = _strip_system(agent.messages)
+        agent_msg_count = len(agent_real)
+        record = store.get(session_id)
+        
+        if record and record.messages:
+            store_msgs = record.messages
+            store_real = _strip_system(store_msgs)
+            store_msg_count = len(store_real)
+            # 仲裁方向不能只看数量：数量相等但内容分叉（checkpoint 回滚 / 手工清理重生成）
+            # 时新旧无法识别，旧 store 会反向覆盖新 agent（加载旧会话的根因）。
+            # 用「内容前缀一致性」仲裁：谁包含对方完整前缀并更多 → 谁更新。
+            def _is_prefix(prefix, full) -> bool:
+                return len(prefix) <= len(full) and full[:len(prefix)] == prefix
+            if agent_msg_count == 0:
+                # Agent 无真实对话（仅有 system 或为空）→ 从 store 加载历史
+                agent.restore_messages(store_msgs)
+                logger.info(f"[state-machine] Loaded '{session_id[:12]}': {store_msg_count} msgs (empty agent)")
+            elif store_msg_count == 0:
+                # Store 无真实对话 → agent 胜出写回（新对话内容以 agent 为准）
+                store.update(session_id, messages=agent.snapshot_messages())
+                logger.info(f"[state-machine] Saved '{session_id[:12]}': pushed {agent_msg_count} msgs (empty store)")
+            elif _is_prefix(store_real, agent_real) and agent_msg_count > store_msg_count:
+                # Agent 是 store 的追加扩展（如 chat 完成但尚未保存）→ 防止旧 store 覆盖新消息
+                store.update(session_id, messages=agent.snapshot_messages())
+                logger.info(f"[state-machine] Saved '{session_id[:12]}': pushed {agent_msg_count} msgs to store (store had {store_msg_count})")
+            elif _is_prefix(agent_real, store_real) and store_msg_count > agent_msg_count:
+                # Store 是 agent 的追加扩展 → Store 更新，加载到 Agent
+                agent.restore_messages(store_msgs)
+                logger.info(f"[state-machine] Activated '{session_id[:12]}': loaded {store_msg_count} msgs from store (agent had {agent_msg_count})")
+            elif agent_real == store_real:
+                pass  # 真实对话内容完全一致，无需同步
+            else:
+                # 真实对话内容分叉：以 agent（活跃端）为准写回 store，避免旧 store 反向覆盖新 agent
+                store.update(session_id, messages=agent.snapshot_messages())
+                logger.info(f"[state-machine] Reconciled '{session_id[:12]}': content diverged, agent wins ({agent_msg_count} vs store {store_msg_count})")
+            return True
+        elif agent_msg_count > 0:
+            # Agent 有真实对话但 Store 没有 → 创建 Store 记录（标题自动从首条非系统消息生成）
+            store.create_with_id(session_id=session_id,
+                                 name=_extract_session_name(agent.snapshot_messages(), [], session_id))
+            store.update(session_id, messages=agent.snapshot_messages())
+            logger.info(f"[state-machine] Created store record for '{session_id[:12]}' with {agent_msg_count} msgs")
+            return True
+        return False
+
+    # ─── Web 审批联动 ─────────────────────────────────────────
+    # request_id → (ApprovalRequest, agent)，供前端 decide API 决策
+    _web_approval_requests = {}
+    # session_id → 活跃 SSE 流的 _safe_put（审批回调转发到当前前端连接）
+    _web_approval_dispatch = {}
+
+    def _get_agent_for_session(workspace_dir: str, session_id: str = ""):
+        """获取或创建指定会话的 Agent 实例 — 多实例池 + 自主状态机"""
+        base = _get_agent_base(workspace_dir)
+        if not base:
+            return None
+
+        sid = session_id or "default"
+        store = _get_session_store()
+
+        with _agent_pool_lock:
+            if sid in _agent_pool:
+                agent = _agent_pool[sid]
+                # 校正实例↔会话绑定：防止实例被其他路径（chat(session_id=...)）覆写 _active_session_id 后脱节
+                if getattr(agent, '_active_session_id', '') != sid:
+                    old_sid = agent._active_session_id or ''
+                    agent._active_session_id = sid
+                    logger.debug(f"[state-machine] Rebound agent '{sid[:12]}' (was '{old_sid[:12]}')")
+                # 已有实例：同步 SessionStore 状态
+                if store and sid:
+                    _sync_agent_from_store(agent, sid, store)
+                return agent
+            
+            # 创建新 Agent 实例
+            from ..agent import Agent
+            agent = Agent(llm=base['llm'], config=base['config'])
+            agent.register_context_injector(base['context_injector'])
+            agent._active_session_id = sid
+            # per-session 模式恢复：从会话记录 metadata 读取，多会话互不串扰
+            try:
+                if store:
+                    record = store.get(sid)
+                    if record and record.metadata:
+                        _m = record.metadata.get("agent_mode")
+                        if _m in ("act", "plan"):
+                            agent.config.mode = _m
+            except Exception:
+                pass
+
+            # 将 Agent + 工具注册表注入共享 WorkflowEngine 单例
+            # （单例已在模块加载时固定；注入后 workflow 的 AGENT/TOOL 步骤
+            #   通过 WorkflowTool / /api/workflow/* 触发时获得真实执行能力）
+            try:
+                from ..workflow_engine import get_workflow_engine as _gwf
+                _wf_engine = _gwf()  # 返回已固定的单例
+                _wf_engine.set_agent(agent, {t.name: t for t in agent.tools})
+            except Exception as e:
+                logger.debug(f"WorkflowEngine set_agent 注入失败: {e}")
+            
+            # 注册状态回调
+            def _agent_status_callback(agent_instance, event_type, **kwargs):
+                if _push_agent_pool_status_ref[0]:
+                    try:
+                        _push_agent_pool_status_ref[0]()
+                    except Exception:
+                        pass
+            
+            agent.register_status_callback(_agent_status_callback)
+            _agent_pool[sid] = agent
+            
+            # 新创建的 Agent：立即从 SessionStore 加载历史
+            if store and sid:
+                _sync_agent_from_store(agent, sid, store)
+            
+            agent_msg_count = len(agent.messages) if agent.messages else 0
+            logger.info(f"Agent pool: created instance for session '{sid[:12]}' (pool size={len(_agent_pool)}, agent_msgs={agent_msg_count})")
+            return agent
+
+    def _get_web_agent(workspace_dir: str):
+        """向后兼容 — 返回默认 Agent 实例"""
+        return _get_agent_for_session(workspace_dir, "default")
+
+    def _peek_agent_for_session(session_id: str = ""):
+        """只读获取实例：存在则返回，不存在返回 None。
+
+        与 _get_agent_for_session 不同：不创建实例、不触发状态机同步。
+        用于只读接口（getAgentSession 30s 轮询 / checkpoint 查询），
+        避免为不存在的会话反复创建空实例导致 pool 膨胀、实例与会话 id 脱节。
+        """
+        sid = session_id or "default"
+        with _agent_pool_lock:
+            return _agent_pool.get(sid)
+
+    def _get_session_preview(messages_snapshot: list) -> str:
+        """从消息快照中提取适合预览的文本（优先取 user/assistant 消息）"""
+        if not messages_snapshot:
+            return ""
+        # 从后往前找第一条 user 或 assistant 消息
+        for msg in reversed(messages_snapshot):
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                text = content if isinstance(content, str) else str(content)
+                return text[:80]
+        return ""
 
     @app.post("/api/agent/chat")
     async def agent_chat(req: AgentChatRequest):
         """Agent 聊天接口（连接 TS2 MCP 系统）"""
-        agent = _get_web_agent(app.state.workspace_dir)
+        agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
         if agent is None:
             return ok(data={
                 "reply": "Agent 初始化失败，请检查配置文件 (config_dir: ~/.ts2/agent_config)",
@@ -4457,6 +5372,13 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 _run_agent(agent.chat, message, session_id=req.session_id),
                 timeout=300.0
             )
+            # 对话完成后写回 SessionStore（非流式路径此前缺失，导致会话记录滞后）
+            try:
+                store = _get_session_store()
+                if store and req.session_id:
+                    _sync_agent_from_store(agent, req.session_id, store)
+            except Exception as e:
+                logger.warning(f"Auto-save session (non-stream) error: {e}")
             # 自动保存检查点（每5轮对话保存一次）
             try:
                 msg_count = len(agent.messages)
@@ -4479,12 +5401,261 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 "source": "error",
             })
 
+    @app.post("/api/agent/inject-skill")
+    async def agent_inject_skill(req: AgentInjectSkillRequest):
+        """真实注入技能：读取 SKILL.md 全文，作为 user 指令插入 agent 会话上下文。
+
+        与图片附件不同——图片只随单条消息传递；技能注入是持久指令，
+        直接写入 agent.messages（role=user），后续所有对话均感知该技能。
+        """
+        skill_name = (req.skill_name or "").strip()
+        if not skill_name:
+            return err(msg="skill_name 不能为空")
+
+        # 0. direct_text 通用注入（tool/mcp/workflow/plugin 等非技能类型）
+        if (req.direct_text or "").strip():
+            agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
+            if agent is None:
+                return err(msg="Agent 未初始化，无法注入")
+            try:
+                inject_msg = req.direct_text.strip()
+                with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+                    if getattr(agent, "messages", None) is None:
+                        agent.messages = []
+                    agent.messages.append({"role": "user", "content": inject_msg})
+                try:
+                    store = _get_session_store()
+                    if store and req.session_id:
+                        _sync_agent_from_store(agent, req.session_id, store)
+                except Exception as e:
+                    logger.warning(f"inject-skill(direct) session save error: {e}")
+                return ok(data={
+                    "injected": True,
+                    "skill_name": skill_name,
+                    "content_length": len(inject_msg),
+                    "preview": inject_msg[:200],
+                    "message": f"指令已注入当前会话（{len(inject_msg)} 字符）",
+                })
+            except Exception as e:
+                return err(msg=f"注入失败: {e}")
+
+        # 1. 定位 SKILL.md（优先激活 skills/，其次市场 skills_market/）
+        skill_md_path = None
+        project_root = Path(__file__).resolve().parent.parent.parent
+        for base in ("skills", "skills_market"):
+            cand = project_root / base / skill_name / "SKILL.md"
+            if cand.exists():
+                skill_md_path = cand
+                break
+        if skill_md_path is None:
+            # 兼容 discover 返回的 name 与目录名不一致（如 admin→Administrator）
+            for base in ("skills", "skills_market"):
+                base_dir = project_root / base
+                if not base_dir.exists():
+                    continue
+                for sub in base_dir.iterdir():
+                    if sub.is_dir() and (sub / "SKILL.md").exists():
+                        try:
+                            from ..skill_system import Skill as _SK
+                            s = _SK.from_skill_md(sub)
+                            if s and s.name == skill_name:
+                                skill_md_path = sub / "SKILL.md"
+                                break
+                        except Exception:
+                            continue
+                if skill_md_path:
+                    break
+        if skill_md_path is None:
+            return err(msg=f"未找到技能 {skill_name} 的 SKILL.md（skills/ 与 skills_market/ 均已检查）")
+
+        # 2. 读取全文
+        try:
+            content = skill_md_path.read_text(encoding="utf-8")
+        except Exception as e:
+            return err(msg=f"读取技能文件失败: {e}")
+
+        # 3. 注入 agent 会话
+        agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
+        if agent is None:
+            return err(msg="Agent 未初始化，无法注入")
+
+        try:
+            inject_msg = (
+                f"[系统注入技能指令] 用户启用了技能「{skill_name}」，以下为技能完整定义，"
+                f"请遵守其触发条件与执行步骤（如需可调用其依赖工具）：\n\n{content}"
+            )
+            with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+                if hasattr(agent, "messages"):
+                    if getattr(agent, "messages", None) is None:
+                        agent.messages = []
+                    agent.messages.append({"role": "user", "content": inject_msg})
+            # 写回 SessionStore 持久化
+            try:
+                store = _get_session_store()
+                if store and req.session_id:
+                    _sync_agent_from_store(agent, req.session_id, store)
+            except Exception as e:
+                logger.warning(f"inject-skill session save error: {e}")
+        except Exception as e:
+            return err(msg=f"注入失败: {e}")
+
+        return ok(data={
+            "injected": True,
+            "skill_name": skill_name,
+            "content_length": len(content),
+            "preview": content[:200],
+            "message": f"技能「{skill_name}」已注入当前会话（{len(content)} 字符）",
+        })
+
+    class AgentSessionRenameRequest(BaseModel):
+        """会话重命名请求（前端自主命名：根据对话内容提取）"""
+        session_id: str
+        name: str = ""  # 可选：显式名称；留空则由后端从对话提取
+
+    @app.post("/api/agent/session/rename")
+    async def agent_session_rename(req: AgentSessionRenameRequest):
+        """自主重命名会话：显式名称或根据最新对话内容提取"""
+        try:
+            store = _get_session_store()
+            if store is None or not req.session_id:
+                return err(msg="会话存储不可用")
+            record = store.get(req.session_id)
+            if record is None:
+                return err(msg=f"会话不存在: {req.session_id}")
+            # 提取名称：显式优先；否则从会话消息提取
+            name = (req.name or "").strip()
+            if not name:
+                agent = _peek_agent_for_session(req.session_id)
+                msgs = agent.messages if (agent and getattr(agent, "messages", None)) else record.messages
+                name = _extract_session_name(msgs or [], [], req.session_id)
+                if not name or len(name) < 2:
+                    return ok(data={"renamed": False, "name": record.name, "reason": "内容过短"})
+            store.update(req.session_id, name=name)
+            return ok(data={"renamed": True, "session_id": req.session_id, "name": name})
+        except Exception as e:
+            logger.error(f"session rename error: {e}")
+            return err(msg=f"重命名失败: {e}")
+
+    class AgentPluginActivateRequest(BaseModel):
+        """插件激活请求：真正加载插件并注册其工具到 agent"""
+        plugin_name: str
+        session_id: str = ""
+
+    @app.post("/api/agent/plugin/activate")
+    async def agent_plugin_activate(req: AgentPluginActivateRequest):
+        """激活插件：从 PluginManager 真正 load_plugin，把插件工具注册进 agent.tools。
+        与 skill 注入不同——插件是"工具集合"，需加载才有实际能力。
+        """
+        name = (req.plugin_name or "").strip()
+        if not name:
+            return err(msg="plugin_name 不能为空")
+        try:
+            agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
+            if agent is None:
+                return err(msg="Agent 未初始化，无法激活插件")
+            pm = getattr(agent, "_plugin_mgr", None)
+            if pm is None:
+                from ..plugins import PluginManager
+                pm = PluginManager(plugins_dirs=[Path(app.state.workspace_dir or ".") / "plugins"])
+                pm.discover_plugins()
+                agent._plugin_mgr = pm
+            # 检查插件存在性与环境依赖
+            entry = None
+            for e in pm.list_plugins():
+                if e.name == name:
+                    entry = e
+                    break
+            if entry is None:
+                return err(msg=f"插件不存在: {name}（已发现: {[e.name for e in pm.list_plugins()]}）")
+            missing_env = [v for v in (entry.requires_env or []) if not os.environ.get(v)]
+            if missing_env:
+                return err(msg=f"插件 {name} 缺少环境变量: {', '.join(missing_env)}，无法激活")
+            # 加载插件（注册工具）
+            pm.enable_plugin(name)
+            ctx = pm.load_plugin(name)
+            if ctx is None:
+                return err(msg=f"插件 {name} 加载失败（register 未执行或出错）")
+            # 把新工具注册进 agent.tools
+            from ..tools import Tool
+            registered = []
+            for tool_reg in ctx.get_registered_tools():
+                if any(getattr(t, 'name', '') == tool_reg.name for t in agent.tools):
+                    continue
+                class _PluginTool(Tool):
+                    name = tool_reg.name
+                    description = tool_reg.schema.get("description", "")
+                    parameters = tool_reg.schema.get("parameters", {})
+                    def execute(self, **kwargs):
+                        result = tool_reg.handler(**kwargs)
+                        return str(result) if result is not None else ""
+                agent.tools.append(_PluginTool())
+                registered.append(tool_reg.name)
+            agent._instance_tool_schemas = None
+            return ok(data={
+                "activated": True,
+                "plugin_name": name,
+                "registered_tools": registered,
+                "message": f"插件「{name}」已激活，注册工具: {', '.join(registered) or '(无新工具)'}",
+            })
+        except Exception as e:
+            logger.error(f"plugin activate error: {e}")
+            return err(msg=f"插件激活失败: {e}")
+
+    class AgentWorkflowActivateRequest(BaseModel):
+        """工作流激活请求：校验工作流存在并注入其定义"""
+        workflow_id: str
+        session_id: str = ""
+
+    @app.post("/api/agent/workflow/activate")
+    async def agent_workflow_activate(req: AgentWorkflowActivateRequest):
+        """激活工作流：校验定义存在，将其描述作为指令注入会话（供 agent 按需启动）。"""
+        wid = (req.workflow_id or "").strip()
+        if not wid:
+            return err(msg="workflow_id 不能为空")
+        try:
+            engine = _get_workflow_api_engine()
+            wf_def = None
+            for d in engine.persistence.list_definitions():
+                if d.get("workflow_id") == wid or d.get("name") == wid:
+                    wf_def = d
+                    break
+            if wf_def is None:
+                return err(msg=f"工作流不存在: {wid}")
+            name = wf_def.get("name") or wid
+            desc = wf_def.get("description") or ""
+            text = (f"[系统注入工作流指令] 用户引用了工作流「{name}」（workflow_id={wid}）。"
+                    f"描述：{desc}。需要时请使用 workflow 工具启动它（workflow_id={wid}）。")
+            agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
+            if agent is None:
+                return err(msg="Agent 未初始化，无法注入")
+            with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+                if getattr(agent, "messages", None) is None:
+                    agent.messages = []
+                agent.messages.append({"role": "user", "content": text})
+            try:
+                store = _get_session_store()
+                if store and req.session_id:
+                    _sync_agent_from_store(agent, req.session_id, store)
+            except Exception as e:
+                logger.warning(f"workflow activate save error: {e}")
+            return ok(data={
+                "activated": True,
+                "workflow_id": wid,
+                "name": name,
+                "message": f"工作流「{name}」已注入，可按需启动",
+            })
+        except Exception as e:
+            logger.error(f"workflow activate error: {e}")
+            return err(msg=f"工作流激活失败: {e}")
+
+
     # ─── Agent SSE 流式聊天 API ──────────────────────────────
 
     @app.post("/api/agent/chat/stream")
     async def agent_chat_stream(req: AgentChatRequest):
-        """Agent 流式聊天接口（SSE）— 参考 CLine 架构"""
-        agent = _get_web_agent(app.state.workspace_dir)
+        """Agent 流式聊天接口（SSE）— 状态机自动同步"""
+        logger.info(f"[stream] ENTRY session='{(req.session_id or 'default')[:12]}' msg='{(req.message or '')[:40]}'")
+        agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
         if agent is None:
             async def _err():
                 yield f"data: {_json_dumps_compact({'type': 'error', 'content': 'Agent 初始化失败'})}\n\n"
@@ -4492,58 +5663,150 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             return StreamingResponse(_err(), media_type="text/event-stream")
 
         message_queue = asyncio.Queue()
-        main_loop = asyncio.get_event_loop()  # 捕获主事件循环
+        main_loop = asyncio.get_event_loop()
+        _loop_alive = True
+
+        def _is_loop_alive():
+            """检查事件循环是否仍然存活"""
+            return _loop_alive and not main_loop.is_closed()
+
+        def _safe_put(message: dict):
+            """安全地将消息放入队列，处理事件循环关闭的情况"""
+            if not _is_loop_alive():
+                return
+            try:
+                main_loop.call_soon_threadsafe(message_queue.put_nowait, message)
+            except RuntimeError:
+                pass  # 事件循环已关闭，静默忽略
+            except Exception as e:
+                logger.warning(f"_safe_put error: {e}")
+
+        # ── Web 审批联动：工具请求授权 → SSE 推送前端弹窗 ──
+        # 同一 agent 只注册一次回调（agent 为共享实例）；回调按 session_id
+        # 转发到当前活跃 SSE 连接（_web_approval_dispatch 由本流设置）。
+        try:
+            _approval = getattr(agent, 'approval_manager', None)
+            if _approval is not None:
+                _reg_key = id(agent)
+                if getattr(agent, '_web_approval_cb_registered', 0) != _reg_key:
+                    agent._web_approval_cb_registered = _reg_key
+
+                    def _on_web_approval(request):
+                        try:
+                            _web_approval_requests[request.id] = (request, agent)
+                            try:
+                                agent._awaiting_approval = True
+                            except Exception:
+                                pass
+                            put = _web_approval_dispatch.get(req.session_id or 'default')
+                            if put is None:
+                                logger.warning(f"[web审批] 无活跃连接 (sid={req.session_id[:12]})，等待超时默认拒绝")
+                                return
+                            tool_input = getattr(request, 'tool_input', {}) or {}
+                            try:
+                                ti_str = json.dumps(tool_input, ensure_ascii=False)[:800]
+                            except Exception:
+                                ti_str = str(tool_input)[:800]
+                            put({
+                                "type": "approval_request",
+                                "request_id": getattr(request, 'id', ''),
+                                "tool_name": getattr(request, 'tool_name', ''),
+                                "reason": getattr(request, 'reason', ''),
+                                "risk_level": getattr(request, 'risk_level', 'medium'),
+                                "tool_input_preview": ti_str,
+                            })
+                        except Exception as e:
+                            logger.warning(f"Web 审批回调异常: {e}")
+
+                    _approval.on_request(_on_web_approval)
+                    logger.info(f"[web审批] 回调已注册 (agent id={_reg_key})")
+        except Exception as e:
+            logger.warning(f"Web 审批回调注册失败: {e}")
+        _web_approval_dispatch[req.session_id or 'default'] = _safe_put
 
         def _on_token(token: str):
             """LLM 流式 token 回调"""
+            _safe_put({"type": "token", "content": token})
+            # 流式 token 期间也定时持久化真实快照（agent.messages 在 LLM 返回后
+            # 才有完整正文，store 稍滞后无妨：读路径走 agent_pool 内存，流式结束后
+            # 强制落盘补齐）。不再把 token 累积 buffer 追加进 store——那会产生
+            # 半截正文/重复 assistant 消息（2026-08-11 移除）。
+            _persist_snapshot()
+
+        def _persist_snapshot():
+            """节流把 agent 内存消息快照实时写回 SessionStore。
+
+            流式对话进行中（_sync_agent_from_store 会跳过 streaming 状态），
+            这里主动持久化，避免会话管理/刷新读到 store 旧数据导致前后端偏移。
+            """
             try:
-                main_loop.call_soon_threadsafe(
-                    message_queue.put_nowait,
-                    {"type": "token", "content": token}
-                )
+                now = time.time()
+                if now - _last_store_write[0] < _STORE_WRITE_INTERVAL:
+                    return
+                _last_store_write[0] = now
+                store = _get_session_store()
+                if not store or not req.session_id:
+                    return
+                msgs = agent.snapshot_messages()
+                if not msgs:
+                    return
+                record = store.get(req.session_id)
+                # 条件化覆写：store 已有比 agent 更多的消息（如 restore/他页操作落库）
+                # 时不覆盖，避免流式快照丢失 store 独有数据（与 _sync_agent_from_store 仲裁精神一致）
+                if record and record.messages and len(record.messages) > len(msgs):
+                    return
+                if not record:
+                    store.create_with_id(session_id=req.session_id,
+                                         name=_extract_session_name(msgs, [], req.session_id))
+                store.update(req.session_id, messages=msgs)
             except Exception as e:
-                logger.warning(f"_on_token error: {e}")
+                logger.debug(f"[persist] snapshot error: {e}")
+
+        _last_store_write = [0.0]
+        _STORE_WRITE_INTERVAL = 2.0
 
         def _on_tool(name: str, args: dict):
             """工具调用开始回调"""
-            try:
-                main_loop.call_soon_threadsafe(
-                    message_queue.put_nowait,
-                    {"type": "tool_call", "name": name, "args": args}
-                )
-            except Exception as e:
-                logger.warning(f"_on_tool error: {e}")
+            _safe_put({"type": "tool_call", "name": name, "args": args})
 
         def _on_tool_result(name: str, result: str):
             """工具调用结果回调"""
+            if not _is_loop_alive():
+                return
             try:
-                # 获取检查点 hash（从中间件获取，若有变更才返回）
+                # 获取检查点（优先整数 id 与 /diff 接口 int() 主路径匹配，无则回退 git hash）
                 cp_hash = ""
                 try:
                     if hasattr(agent, '_middleware_chain') and agent._middleware_chain:
                         for mw in agent._middleware_chain._middlewares:
                             from ..middleware.shadow_checkpoint import CheckpointMiddleware
                             if isinstance(mw, CheckpointMiddleware):
-                                cp_hash = mw._last_hash
+                                cp_id = getattr(mw, '_last_checkpoint_id', 0)
+                                if cp_id and cp_id > 0:
+                                    cp_hash = str(cp_id)
+                                else:
+                                    cp_hash = getattr(mw, '_last_hash', '') or ''
                                 break
                 except Exception:
                     pass
 
-                main_loop.call_soon_threadsafe(
-                    message_queue.put_nowait,
-                    {
-                        "type": "tool_result",
-                        "name": name,
-                        "result": result[:500],
-                        "checkpoint_hash": cp_hash,
-                    }
-                )
+                _safe_put({
+                    "type": "tool_result",
+                    "name": name,
+                    "result": result,
+                    "checkpoint_hash": cp_hash,
+                })
+                # 工具结果落盘后，实时持久化最新消息（含工具调用与结果）
+                _persist_snapshot()
             except Exception as e:
                 logger.warning(f"_on_tool_result error: {e}")
 
         def _run_agent_stream():
             """在线程池中运行 Agent（流式）"""
             try:
+                # ask/answer 追问闭环：把 SSE 推送函数注入 agent，
+                # 供 ask_followup_question 挂起时推送 ask 事件到前端。
+                agent._current_ask_sender = _safe_put
                 message = _build_multimodal_message(req.message, req.attachments)
                 logger.info(f"Agent stream: starting chat for message: {req.message[:50]}...")
                 reply = agent.chat(
@@ -4552,23 +5815,47 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     on_tool=_on_tool,
                     on_tool_result=_on_tool_result,
                     session_id=req.session_id,
+                    # 子代理执行进度事件 → SSE：前端实时显示工具请求与进程
+                    on_sub_agent_event=lambda e: _safe_put({"type": "sub_agent", **e}),
                 )
                 logger.info(f"Agent stream: chat completed, reply length={len(reply) if reply else 0}")
-                main_loop.call_soon_threadsafe(
-                    message_queue.put_nowait,
-                    {"type": "done", "content": reply}
-                )
+                # 对话完成后，强制持久化一次（覆盖节流，确保最终内容写回）
+                _last_store_write[0] = 0.0
+                _persist_snapshot()
+                # 对话完成后，通过状态机自动保存消息到 SessionStore
+                try:
+                    store = _get_session_store()
+                    if store and req.session_id:
+                        _sync_agent_from_store(agent, req.session_id, store)
+                    # 同时保存到 checkpoint 系统
+                    try:
+                        cp = agent.create_checkpoint(
+                            summary=req.message[:80] if req.message else req.session_id[:12]
+                        )
+                        if cp:
+                            logger.info(f"Auto-checkpoint saved for session '{req.session_id[:12]}'")
+                    except Exception as cpe:
+                        logger.warning(f"Auto-checkpoint error: {cpe}")
+                except Exception as e:
+                    logger.warning(f"Auto-save session error: {e}")
+                try:
+                    agent._current_ask_sender = None
+                except Exception:
+                    pass
+                _safe_put({"type": "done", "content": reply})
             except Exception as e:
+                try:
+                    agent._current_ask_sender = None
+                except Exception:
+                    pass
                 logger.error(f"Agent stream error: {e}")
                 import traceback
                 traceback.print_exc()
-                main_loop.call_soon_threadsafe(
-                    message_queue.put_nowait,
-                    {"type": "error", "content": str(e)}
-                )
+                _safe_put({"type": "error", "content": str(e)})
 
         async def _stream():
             """SSE 事件生成器"""
+            nonlocal _loop_alive
             agent_future = main_loop.run_in_executor(_agent_executor, _run_agent_stream)
 
             try:
@@ -4590,11 +5877,27 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     else:
                         yield f"data: {_json_dumps_compact(msg)}\n\n"
             except asyncio.CancelledError:
-                if hasattr(agent, 'cancel'):
-                    agent.cancel()
+                # 客户端断开（如前端刷新/关闭标签页）：【不中断】Agent 生成。
+                # 生成任务运行在 ThreadPoolExecutor，取消 async 响应不会停掉线程；
+                # 让其继续跑完 → _run_agent_stream 完成后自动落盘 SessionStore，
+                # 前端刷新回来即可通过恢复路径看到完整结果。
+                # （若这里调用 agent.cancel() 会立即打断 LLM 流式 → 刷新即中断）
+                logger.info(f"[stream] client disconnected, agent keeps running (session='{(req.session_id or '')[:12]}')")
             finally:
-                if not agent_future.done():
-                    agent_future.cancel()
+                _loop_alive = False  # 标记事件循环不再接受新消息（done/error 不再入队，跑完落盘即可）
+                # 不取消 agent_future：任务可能仍在线程池排队/运行，cancel() 会阻止其执行或中断，
+                # 导致生成不完整；让其自然完成并持久化。
+                # 清理审批联动的本流转发与状态
+                try:
+                    _sid = req.session_id or 'default'
+                    if _web_approval_dispatch.get(_sid) is _safe_put:
+                        _web_approval_dispatch.pop(_sid, None)
+                    try:
+                        agent._awaiting_approval = False
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
         return StreamingResponse(
             _stream(),
@@ -4607,33 +5910,100 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             }
         )
 
+    # ─── Agent 审批决策 ──────────────────────────────────────
+
+    @app.post("/api/agent/approval/decide")
+    async def agent_approval_decide(req: Request):
+        """前端审批决策：approve / deny / always_approve
+
+        由 SSE approval_request 事件携带 request_id，前端弹窗后调用本接口，
+        解除 harness ApprovalManager.request_approval 的阻塞等待。
+        """
+        body = {}
+        try:
+            body = await req.json()
+        except Exception:
+            pass
+        request_id = body.get("request_id", "")
+        decision_str = body.get("decision", "deny")
+        if not request_id:
+            return err(msg="缺少 request_id")
+        item = _web_approval_requests.get(request_id)
+        if not item:
+            return err(msg=f"审批请求不存在或已过期: {request_id}")
+        request, agent = item
+        from ..harness import ApprovalDecision
+        decision_map = {
+            "approve": ApprovalDecision.APPROVE,
+            "deny": ApprovalDecision.DENY,
+            "always_approve": ApprovalDecision.ALWAYS_APPROVE,
+        }
+        decision = decision_map.get(decision_str)
+        if decision is None:
+            return err(msg="无效的决策类型")
+        try:
+            request.decide(decision)
+        except Exception as e:
+            return err(msg=f"决策失败: {e}")
+        _web_approval_requests.pop(request_id, None)
+        try:
+            agent._awaiting_approval = False
+        except Exception:
+            pass
+        return ok(data={"decided": True, "request_id": request_id, "decision": decision_str})
+
     # ─── Agent 控制接口 ──────────────────────────────────────
 
     @app.post("/api/agent/cancel")
-    async def agent_cancel():
-        """取消当前 Agent 对话"""
-        agent = _get_web_agent(app.state.workspace_dir)
+    async def agent_cancel(req: Request):
+        """取消指定会话的 Agent 对话"""
+        session_id = ""
+        try:
+            body = await req.json()
+            session_id = body.get("session_id", "")
+        except Exception:
+            pass
+        agent = _get_agent_for_session(app.state.workspace_dir, session_id)
         if agent and hasattr(agent, 'cancel'):
             agent.cancel()
             return ok(data={"cancelled": True})
         return ok(data={"cancelled": False})
 
     @app.post("/api/agent/reset")
-    async def agent_reset():
-        """重置 Agent 对话历史"""
-        agent = _get_web_agent(app.state.workspace_dir)
+    async def agent_reset(req: Request):
+        """重置指定会话的 Agent 对话历史"""
+        session_id = ""
+        try:
+            body = await req.json()
+            session_id = body.get("session_id", "")
+        except Exception:
+            pass
+        agent = _get_agent_for_session(app.state.workspace_dir, session_id)
         if agent:
-            # reset() 内部已包含 cancel + wait 逻辑，放到线程池避免阻塞事件循环
             await asyncio.get_event_loop().run_in_executor(None, agent.reset)
             return ok(data={"reset": True})
         return ok(data={"reset": False})
 
     @app.get("/api/agent/status")
-    async def agent_status():
-        """获取 Agent 状态"""
-        agent = _get_web_agent(app.state.workspace_dir)
+    async def agent_status(session_id: str = ""):
+        """获取 Agent 状态（只读：不创建实例，避免 pool 膨胀）"""
+        agent = _peek_agent_for_session(session_id)
         if agent is None:
             return ok(data={"available": False, "tools": 0})
+        # 模式 / 审批模式 / 工具组 / 上下文使用量
+        from ..harness import get_global_approval_manager
+        am = get_global_approval_manager()
+        try:
+            from ..prompt.context_window import estimate_messages_tokens
+            est = estimate_messages_tokens(agent.messages)
+        except Exception:
+            est = 0
+        ctx_window = getattr(agent, "model_context_window", 0) or 0
+        mgr = getattr(agent, "_tool_group_mgr", None)
+        try:
+            active_groups = sorted(list(getattr(mgr, "_activated_groups", set()))) if mgr else []
+        except Exception:
+            active_groups = []
         return ok(data={
             "available": True,
             "tools": len(agent.tools),
@@ -4643,7 +6013,221 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 "message_count": len(agent.messages),
                 "has_context": bool(agent.messages and len(agent.messages) > 1),
             },
+            "mode": getattr(agent, "get_mode", lambda: "act")(),
+            "approval_mode": (am.get_mode().value if am else "suggest"),
+            "active_tool_groups": active_groups,
+            "context_usage": {
+                "estimated_tokens": est,
+                "context_window": ctx_window,
+                "ratio": round(est / ctx_window, 3) if ctx_window else 0.0,
+            },
         })
+
+    def _iter_all_agents():
+        with _agent_pool_lock:
+            return list(_agent_pool.values())
+
+    @app.get("/api/agent/mode")
+    async def agent_get_mode(session_id: str = ""):
+        # per-session：优先返回当前会话实例的模式，无实例则从会话记录读取
+        sid = session_id or "default"
+        agent = _peek_agent_for_session(sid)
+        if agent is not None:
+            return ok(data={"mode": getattr(agent, "get_mode", lambda: "act")()})
+        mode = "act"
+        try:
+            store = _get_session_store()
+            record = store.get(sid) if store else None
+            if record and record.metadata:
+                m = record.metadata.get("agent_mode")
+                if m in ("act", "plan"):
+                    mode = m
+        except Exception:
+            pass
+        return ok(data={"mode": mode})
+
+    @app.post("/api/agent/mode")
+    async def agent_set_mode(req: Request):
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        new_mode = str(body.get("mode", "act")).lower()
+        if new_mode not in ("act", "plan"):
+            return ok(data={"error": "invalid mode"})
+        # 只作用当前会话实例，不串扰其它会话
+        sid = str(body.get("session_id", "")).strip() or "default"
+        agent = _peek_agent_for_session(sid)
+        if agent is not None:
+            try:
+                agent.set_mode(new_mode)
+            except Exception:
+                pass
+        # per-session 持久化（会话记录 metadata），刷新/重建后恢复
+        try:
+            store = _get_session_store()
+            if store:
+                record = store.get(sid)
+                if record is None:
+                    # 记录不存在则先创建（避免 update 对缺失记录静默失败）
+                    store.create_with_id(session_id=sid, name=sid[:12])
+                    record = store.get(sid)
+                meta = dict(record.metadata) if record else {}
+                meta["agent_mode"] = new_mode
+                store.update(sid, metadata=meta)
+        except Exception:
+            pass
+        return ok(data={"mode": new_mode})
+
+    @app.get("/api/agent/approval/mode")
+    async def agent_get_approval_mode():
+        from ..harness import get_global_approval_manager
+        am = get_global_approval_manager()
+        return ok(data={"mode": am.get_mode().value})
+
+    @app.post("/api/agent/approval/mode")
+    async def agent_set_approval_mode(req: Request):
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        m = str(body.get("mode", "suggest")).lower()
+        from ..harness import get_global_approval_manager, ApprovalMode
+        from ..config import get_config_manager
+        try:
+            mode_enum = ApprovalMode(m)
+        except Exception:
+            return ok(data={"error": "invalid mode"})
+        am = get_global_approval_manager()
+        am.set_mode(mode_enum)
+        get_config_manager().set_approval_mode(m)
+        return ok(data={"mode": m})
+
+    @app.get("/api/agent/approval/tools")
+    async def agent_list_approval_tools():
+        from ..harness import get_global_approval_manager
+        am = get_global_approval_manager()
+        return ok(data={"tools": sorted(am.get_approved_tools())})
+
+    @app.post("/api/agent/approval/tools")
+    async def agent_add_approval_tool(req: Request):
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        tool = str(body.get("tool", "")).strip()
+        if not tool:
+            return ok(data={"error": "tool required"})
+        from ..harness import get_global_approval_manager
+        from ..config import get_config_manager
+        am = get_global_approval_manager()
+        am.add_approved_tool(tool)
+        try:
+            get_config_manager().add_always_approved_tool(tool)
+        except Exception:
+            pass
+        return ok(data={"tools": sorted(am.get_approved_tools())})
+
+    @app.delete("/api/agent/approval/tools")
+    async def agent_remove_approval_tool(req: Request):
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        tool = str(body.get("tool", "")).strip()
+        if not tool:
+            return ok(data={"error": "tool required"})
+        from ..harness import get_global_approval_manager
+        from ..config import get_config_manager
+        am = get_global_approval_manager()
+        am.remove_approved_tool(tool)
+        try:
+            get_config_manager().remove_always_approved_tool(tool)
+        except Exception:
+            pass
+        return ok(data={"tools": sorted(am.get_approved_tools())})
+
+    @app.post("/api/agent/approval/reset")
+    async def agent_reset_approval():
+        from ..harness import get_global_approval_manager
+        from ..config import get_config_manager
+        am = get_global_approval_manager()
+        am.reset_permissions()
+        try:
+            get_config_manager().clear_always_approved_tools()
+        except Exception:
+            pass
+        return ok(data={"tools": []})
+
+    @app.get("/api/agent/approval/pending")
+    async def agent_pending_approvals():
+        from ..harness import get_global_approval_manager
+        am = get_global_approval_manager()
+        items = []
+        for r in am.get_pending():
+            items.append({
+                "id": r.id, "tool_name": r.tool_name, "tool_input": r.tool_input,
+                "reason": r.reason, "risk_level": r.risk_level,
+            })
+        return ok(data={"pending": items})
+
+    @app.get("/api/agent/toolgroups")
+    async def agent_list_toolgroups(sid: str = ""):
+        # 优先返回当前会话对应 agent 的工具组状态，避免切换会话后显示错位
+        if sid and sid in _agent_pool:
+            targets = [_agent_pool[sid]]
+        else:
+            targets = _iter_all_agents()
+        for ag in targets:
+            mgr = getattr(ag, "_tool_group_mgr", None)
+            if mgr is not None:
+                try:
+                    return ok(data=mgr.get_group_status())
+                except Exception:
+                    pass
+        return ok(data={})
+
+    @app.post("/api/agent/toolgroups/activate")
+    async def agent_activate_toolgroup(req: Request):
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        group = str(body.get("group", "")).strip()
+        if not group:
+            return ok(data={"error": "group required"})
+        sid = str(body.get("session_id", "")).strip()
+        if sid and sid in _agent_pool:
+            targets = [_agent_pool[sid]]
+        else:
+            targets = _iter_all_agents()
+        for ag in targets:
+            mgr = getattr(ag, "_tool_group_mgr", None)
+            if mgr is not None:
+                try:
+                    res = mgr.activate_group(group)
+                    return ok(data=res)
+                except Exception as e:
+                    return ok(data={"error": str(e)})
+        return ok(data={"error": "no active agent"})
+
+    @app.post("/api/agent/ask/answer")
+    async def agent_ask_answer(req: Request):
+        """ask 追问闭环：用户答案注入 agent，恢复执行。"""
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        request_id = str(body.get("request_id", "")).strip()
+        answer = str(body.get("answer", ""))
+        if not request_id:
+            return ok(data={"error": "request_id required"})
+        for ag in _iter_all_agents():
+            if getattr(ag, "get_pending_ask", lambda: None)() == request_id:
+                ag._last_ask_answer = answer or "（用户未输入）"
+                ag.clear_pending_ask()
+                return ok(data={"accepted": True})
+        return ok(data={"accepted": False, "error": "no matching pending ask"})
 
     @app.get("/api/agent/model-info")
     async def agent_model_info():
@@ -4710,6 +6294,71 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         except Exception as e:
             return ok(data={"models": [], "providers": {}, "error": str(e)})
 
+    @app.get("/api/models/status")
+    async def model_status(session_id: str = ""):
+        """查询当前模型选择状态（mode / 全局默认 / 会话覆盖）"""
+        try:
+            sel = _get_model_selector()
+            return ok(data=sel.get_status(session_id=session_id or None))
+        except Exception as e:
+            return err(msg=f"获取状态失败: {e}")
+
+    class ModelSelectRequest(BaseModel):
+        mode: Optional[str] = None
+        default_model: Optional[str] = None
+
+    @app.post("/api/models/select")
+    async def model_select(req: ModelSelectRequest):
+        """设置全局默认模型与 mode（route/fixed）"""
+        try:
+            sel = _get_model_selector()
+            if req.mode:
+                sel.set_mode(req.mode)
+            if req.default_model:
+                sel.set_default_model(req.default_model)
+            return ok(data=sel.get_status())
+        except Exception as e:
+            return err(msg=f"设置失败: {e}")
+
+    class SessionSelectRequest(BaseModel):
+        session_id: str
+        model_key: Optional[str] = None
+
+    @app.post("/api/models/session-select")
+    async def model_session_select(req: SessionSelectRequest):
+        """设置会话级模型覆盖"""
+        try:
+            sel = _get_model_selector()
+            if req.model_key:
+                sel.set_session_model(req.session_id, req.model_key)
+            else:
+                sel.clear_session_model(req.session_id)
+            return ok(data=sel.get_status(session_id=req.session_id))
+        except Exception as e:
+            return err(msg=f"设置会话模型失败: {e}")
+
+    class ModelRefreshRequest(BaseModel):
+        provider: Optional[str] = None
+
+    @app.post("/api/models/refresh")
+    async def model_refresh(req: ModelRefreshRequest):
+        """从 provider /v1/models 刷新模型目录"""
+        try:
+            sel = _get_model_selector()
+            results = sel.refresh_catalog(provider_value=req.provider)
+            return ok(data=results)
+        except Exception as e:
+            return err(msg=f"刷新失败: {e}")
+
+    @app.post("/api/models/import-opencode")
+    async def model_import_opencode():
+        """单向导入 opencode 配置到 providers.json"""
+        try:
+            from ..opencode_adapter import import_opencode_config
+            return ok(data=import_opencode_config())
+        except Exception as e:
+            return err(msg=f"导入失败: {e}")
+
     class RegisterModelRequest(BaseModel):
         name: str
         provider: str = "custom"
@@ -4743,115 +6392,506 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
     # ─── Agent 会话管理 API ──────────────────────────────────
 
-    @app.get("/api/agent/sessions")
-    async def agent_sessions():
-        """列出所有会话"""
-        agent = _get_web_agent(app.state.workspace_dir)
-        if not agent:
-            return ok(data=[])
-        try:
-            from ..cache import get_context_reloader
-            reloader = get_context_reloader()
-            # 获取所有检查点作为会话列表
-            checkpoint_ids = reloader.list_checkpoints()
-            sessions = []
-            for cp_id in checkpoint_ids[:20]:  # 最多返回20个
-                cp = reloader.restore_checkpoint(cp_id)
-                if cp:
-                    sessions.append({
-                        "id": cp.checkpoint_id,
-                        "timestamp": cp.timestamp,
-                        "message_count": cp.total_messages,
-                        "token_count": cp.total_tokens,
-                        "summary": cp.summary or "",
-                        "preview": _get_session_preview(cp.messages_snapshot),
-                    })
-            return ok(data=sessions)
-        except Exception as e:
-            logger.warning(f"List sessions error: {e}")
-            return ok(data=[])
+    def _build_agent_pool_snapshot() -> list:
+        """Agent 池实例快照统一构建（三处共用：sessions 合并 / pool-status 端点 / WS 推送）。
 
-    @app.post("/api/agent/sessions/create")
-    async def agent_session_create():
-        """保存当前会话并创建新会话"""
-        agent = _get_web_agent(app.state.workspace_dir)
-        if not agent:
-            return ok(data={"created": False})
-        try:
-            # 整个操作放到线程池，避免阻塞事件循环
-            def _create_session():
-                # 保存当前会话为检查点
-                summary = ""
-                messages = agent.snapshot_messages()
-                if messages:
-                    for msg in reversed(messages):
-                        if msg.get("role") == "user":
-                            content = msg.get("content", "")
-                            summary = content[:100] if isinstance(content, str) else str(content)[:100]
+        统一口径：_agent_state_of（is_streaming 为流式权威，is_active 兼容 _chat_active）；
+        字段含 last_active_time，消除原三处同构代码的字段漂移（pool-status 端点曾有额外字段）。
+        """
+        snapshot = []
+        with _agent_pool_lock:
+            for sid, agent in list(_agent_pool.items()):
+                msg_count = len(agent.messages) if agent.messages else 0
+                user_count = sum(1 for m in agent.messages if m.get('role') == 'user') if agent.messages else 0
+                assistant_count = sum(1 for m in agent.messages if m.get('role') == 'assistant') if agent.messages else 0
+                tool_count = sum(1 for m in agent.messages if m.get('role') == 'tool') if agent.messages else 0
+
+                # 获取最后活跃时间（优先显式标记，回退最近消息时间戳）
+                last_active = None
+                if hasattr(agent, '_last_active_time') and agent._last_active_time:
+                    last_active = agent._last_active_time
+                elif agent.messages:
+                    for m in reversed(agent.messages):
+                        if m.get('role') in ('user', 'assistant'):
+                            last_active = m.get('_timestamp', time.time())
                             break
-                checkpoint = agent.create_checkpoint(summary=summary)
-                # 重置对话（内部包含 cancel + wait）
-                agent.reset()
-                return checkpoint, summary
+                if last_active is None:
+                    last_active = time.time()
 
-            checkpoint, summary = await asyncio.get_event_loop().run_in_executor(None, _create_session)
-            if checkpoint:
-                return ok(data={
-                    "created": True,
-                    "session_id": checkpoint.checkpoint_id,
-                    "summary": summary,
+                # 统一口径：_agent_state_of（is_streaming 为流式权威）
+                is_streaming, is_active, _ = _agent_state_of(agent)
+
+                snapshot.append({
+                    "session_id": sid,
+                    "status": _agent_status_name(agent),
+                    "is_active": is_active,
+                    "is_streaming": is_streaming,
+                    "message_count": msg_count,
+                    "user_message_count": user_count,
+                    "assistant_message_count": assistant_count,
+                    "tool_message_count": tool_count,
+                    "last_active": last_active,
+                    "last_active_time": agent._last_active_time if hasattr(agent, '_last_active_time') else None,
                 })
-            return ok(data={"created": True, "summary": summary})
-        except Exception as e:
-            logger.error(f"Create session error: {e}")
-            return ok(data={"created": False, "error": str(e)})
+        return snapshot
 
-    @app.post("/api/agent/sessions/switch")
-    async def agent_session_switch(req: AgentSessionSwitchRequest):
-        """切换到指定会话"""
-        agent = _get_web_agent(app.state.workspace_dir)
-        if not agent:
-            return ok(data={"switched": False})
+    @app.get("/api/agent/sessions")
+    async def agent_sessions(include_checkpoint: bool = False):
+        """列出所有会话 — 统一状态容器，每个ID只出现一次
+        
+        Args:
+            include_checkpoint: 是否包含检查点会话（默认 False）
+        """
+        # 使用字典按 session_id 存储，确保唯一性
+        session_map = {}
+        agent_pool_status = _build_agent_pool_snapshot()
+
+        # 1. 从 SessionStore 获取已保存的会话
+        store = _get_session_store()
+        if store:
+            try:
+                # 清理孤立会话（无用户消息的空会话）
+                store.cleanup_orphaned_sessions()
+                
+                # 列出会话（include_checkpoint=True 时包含检查点会话）
+                records = store.list_sessions(limit=100, include_checkpoint=include_checkpoint)
+                for r in records:
+                    user_msgs = [m for m in r.messages if m.get('role') == 'user']
+                    if len(user_msgs) == 0:
+                        continue
+                        
+                    session_map[r.id] = {
+                        "id": r.id,
+                        "timestamp": r.updated_at,
+                        "last_accessed": r.last_accessed_at,
+                        "message_count": len(r.messages),
+                        "user_message_count": len(user_msgs),
+                        "token_count": r.total_tokens,
+                        "turn_count": r.turn_count,
+                        "summary": r.name or "",
+                        "preview": _get_session_preview(r.messages),
+                        "session_type": r.session_type,
+                        "source": "session_store",
+                        "is_active": False,
+                        "is_streaming": False,
+                    }
+            except Exception as e:
+                logger.warning(f"SessionStore list error: {e}")
+
+        # 2. Agent 池活跃实例快照 → 合并/更新会话数据（快照字段来自 _build_agent_pool_snapshot）
+        pool_map = {it["session_id"]: it for it in agent_pool_status}
+        with _agent_pool_lock:
+            for sid, agent in list(_agent_pool.items()):
+                item = pool_map.get(sid)
+                if item is None:
+                    continue
+                msg_count = item["message_count"]
+                user_count = item["user_message_count"]
+                assistant_count = item["assistant_message_count"]
+                tool_count = item["tool_message_count"]
+                last_active = item["last_active"]
+                is_active = item["is_active"]
+                is_streaming = item["is_streaming"]
+
+                # 合并逻辑：如果 SessionStore 已有此会话，更新它；否则添加新的
+                if msg_count > 0 or is_active or is_streaming:
+                    if sid in session_map:
+                        # 更新已存在的会话（来自 Agent Pool 的数据更新）
+                        existing = session_map[sid]
+                        existing.update({
+                            "message_count": max(existing["message_count"], msg_count),
+                            "user_message_count": max(existing["user_message_count"], user_count),
+                            "timestamp": max(existing["timestamp"], last_active),
+                            "last_accessed": last_active,
+                            "is_active": is_active,
+                            "is_streaming": is_streaming,
+                            "source": "agent_pool",  # 标记为活跃实例
+                        })
+                        # 如果 Agent Pool 有消息，更新预览
+                        if msg_count > 0:
+                            existing["preview"] = _get_session_preview(agent.messages) if agent.messages else existing.get("preview", "")
+                    else:
+                        # 添加新的活跃会话
+                        summary = ""
+                        if agent.messages:
+                            for m in reversed(agent.messages):
+                                if m.get("role") == "user":
+                                    content = m.get("content", "")
+                                    summary = content[:100] if isinstance(content, str) else str(content)[:100]
+                                    break
+                        session_map[sid] = {
+                            "id": sid,
+                            "timestamp": last_active,
+                            "last_accessed": last_active,
+                            "message_count": msg_count,
+                            "user_message_count": user_count,
+                            "assistant_message_count": assistant_count,
+                            "tool_message_count": tool_count,
+                            "token_count": 0,
+                            "turn_count": user_count + assistant_count,
+                            "summary": summary or f"会话 {sid[:8]}",
+                            "preview": _get_session_preview(agent.messages) if agent.messages else "",
+                            "session_type": "chat",
+                            "source": "agent_pool",
+                            "is_active": is_active,
+                            "is_streaming": is_streaming,
+                        }
+
+        # 3. 转换为列表并排序
+        sessions = list(session_map.values())
+        sessions.sort(key=lambda s: s.get("last_accessed") or s.get("timestamp", 0), reverse=True)
+        
+        return ok(data={
+            "sessions": sessions[:50],
+            "total": len(sessions),
+            "agent_pool": agent_pool_status,
+            "pool_size": len(agent_pool_status),
+        })
+
+    @app.get("/api/agent/pool/status")
+    async def agent_pool_status():
+        """获取 Agent 池状态 — 所有活跃实例（快照字段统一来自 _build_agent_pool_snapshot）"""
+        status = _build_agent_pool_snapshot()
+        return ok(data={
+            "pool_size": len(status),
+            "instances": status,
+        })
+
+    # Agent 池状态推送 — 供后台线程调用
+    def _push_agent_pool_status():
+        """推送 Agent 池状态到 WebSocket — 线程安全"""
         try:
-            # 整个操作放到线程池，避免阻塞事件循环
-            def _switch_session():
-                # 保存当前会话
-                current_messages = agent.snapshot_messages()
-                if current_messages:
-                    summary = ""
-                    for msg in reversed(current_messages):
-                        if msg.get("role") == "user":
-                            content = msg.get("content", "")
-                            summary = content[:100] if isinstance(content, str) else str(content)[:100]
-                            break
-                    agent.create_checkpoint(summary=summary)
+            ws_mgr = app.state.ws_manager
+            if not ws_mgr:
+                return
+            
+            # 构建状态数据（快照字段与 pool-status 端点/会话列表同源，无字段漂移）
+            status_data = {
+                "pool_size": len(_agent_pool),
+                "timestamp": time.time(),
+                "instances": _build_agent_pool_snapshot(),
+            }
+            
+            # 在事件循环中发送
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(ws_mgr.broadcast("agent_pool_status", 0, "", status_data))
+        except Exception as e:
+            logger.debug(f"Push agent pool status error: {e}")
 
-                # 恢复目标会话
-                success = agent.restore_checkpoint(req.session_id)
-                if not success:
+    # 设置全局引用，供 Agent 状态回调使用
+    _push_agent_pool_status_ref[0] = _push_agent_pool_status
+
+    @app.get("/api/agent/sessions/{session_id}")
+    async def agent_session_get(session_id: str):
+        """获取单个会话的完整状态 — 状态机驱动"""
+        store = _get_session_store()
+        try:
+            def _get_session():
+                messages_source = None
+                source_type = "session_store"
+                is_streaming = False
+                streaming_status = "idle"
+                agent_present = False  # 实例在池中 = 活跃会话（流式/刚发送过）
+                
+                # 1. 只读获取已有实例（不创建，避免只读轮询导致 pool 膨胀 / 实例脱节）
+                try:
+                    sid = session_id or "default"
+                    # 【诊断】打印池中所有实例的 key 与消息数，确认请求的 sid 是否命中活跃实例
+                    try:
+                        _pool_keys = [f"{k[:12]}({len(a.messages) if a.messages else 0})" for k, a in list(_agent_pool.items())]
+                        logger.info(f"[session-get] req sid='{sid[:12]}' pool={_pool_keys}")
+                    except Exception:
+                        pass
+                    agent = _peek_agent_for_session(sid)
+                    if agent:
+                        agent_present = True
+                        messages_source = agent.snapshot_messages()
+                        logger.info(f"[session-get] HIT agent '{sid[:12]}': snapshot={len(messages_source) if messages_source else 0} msgs")
+                        is_streaming, _is_active, is_cancelled = _agent_state_of(agent)
+                        # 统一口径：_agent_status_name（idle/running/streaming/awaiting_approval/aborted），
+                        # 替代原局部 idle/streaming/error 三分支，避免与快照状态漂移
+                        streaming_status = _agent_status_name(agent)
+                        if messages_source:
+                            # agent_live 只表示「此刻真正在流式」；_cancelled 残留（cancel 后
+                            # 到下次 chat/reset 之间）不得再映射 agent_live，否则前端轮询会把
+                            # 已停止的会话反向打回"流式中"（source='agent_live' → agentStreaming=true）
+                            source_type = "agent_live" if is_streaming else "agent_pool"
+                except Exception as e:
+                    logger.warning(f"Error getting agent for session '{session_id[:12]}': {e}")
+                
+                # 2. 如果 Agent 没有消息，从 SessionStore 读取作为 fallback
+                if not messages_source and store:
+                    target = store.get(session_id)
+                    if target and target.messages:
+                        messages_source = target.messages
+                        source_type = "session_store"
+                        logger.info(f"[session-get] MISS agent, fallback session_store: {len(messages_source)} msgs (sid='{session_id[:12]}')")
+                
+                # 3. 检查点兜底仅用于「实例不存在且 store 无」的冷启动/旧数据迁移场景。
+                #    活跃会话（agent_present=True，实例在池中）即使消息暂为空也绝不回退检查点——
+                #    否则流式进行中 token 未落盘时会读到检查点里的冻结快照，前端渲染旧历史、
+                #    跟不上流式而卡死（2026-08-10 修复）。
+                if not messages_source and not agent_present:
+                    try:
+                        fdb = _get_fdb_for_workspace(app.state.workspace_dir)
+                        if fdb:
+                            checkpoints = fdb.get_checkpoints(session_id, count=100)
+                            if checkpoints:
+                                messages_source = _build_messages_from_checkpoints(checkpoints)
+                                source_type = "checkpoint"
+                    except Exception as ce:
+                        logger.debug(f"Checkpoint restore for {session_id}: {ce}")
+                
+                if not messages_source:
                     return None
-                # 返回恢复后的消息列表（包含 tool 消息细节）
-                restored_messages = agent.snapshot_messages()
+                
+                # 构造 UI 消息列表
                 ui_messages = []
-                for msg in restored_messages:
+                for msg in messages_source:
                     role = msg.get("role", "")
                     content = msg.get("content", "")
+                    # 【诚实渲染】系统消息不再剔除，原样返回给前端展示。
+                    # 此前直接 continue 跳过 system，前端永远看不到 system，
+                    # 会话 UI 与后端 agent.messages 不一致，掩盖真实状态。
                     if role == "system":
-                        continue
-                    if role == "tool":
-                        # tool 消息：提取工具名和结果摘要
+                        ui_messages.append({
+                            "role": "system",
+                            "content": content if isinstance(content, str) else str(content),
+                        })
+                    elif role == "tool":
                         tool_call_id = msg.get("tool_call_id", "")
                         tool_content = content if isinstance(content, str) else str(content)
-                        # 尝试解析 JSON 结果
                         tool_name = ""
+                        checkpoint_hash = msg.get("checkpoint_hash", "")
                         try:
-                            # 从前一条 assistant 消息的 tool_calls 中找工具名
                             for prev in reversed(ui_messages):
                                 if prev.get("role") == "assistant" and prev.get("tool_calls"):
                                     for tc in prev["tool_calls"]:
                                         tc_dict = tc if isinstance(tc, dict) else {}
                                         if tc_dict.get("id") == tool_call_id:
                                             tool_name = tc_dict.get("function", {}).get("name", "")
+                                            if not checkpoint_hash:
+                                                checkpoint_hash = tc_dict.get("checkpoint_hash", "")
+                                            break
+                                break
+                        except Exception:
+                            pass
+                        ui_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "content": tool_content,
+                            "checkpoint_hash": checkpoint_hash,
+                        })
+                    elif role == "assistant":
+                        entry = {
+                            "role": "assistant",
+                            "content": content if isinstance(content, str) else str(content),
+                        }
+                        # 【诚实渲染】思考过程与内容分开透传，前端在同一气泡内按
+                        # "思考 → 内容 → 工具卡" 顺序渲染，保持与 agent.messages 一致。
+                        if msg.get("reasoning_content"):
+                            entry["reasoning_content"] = msg["reasoning_content"]
+                        if msg.get("tool_calls"):
+                            entry["tool_calls"] = msg["tool_calls"]
+                        ui_messages.append(entry)
+                    elif role == "user" and content:
+                        ui_messages.append({
+                            "role": "user",
+                            "content": content if isinstance(content, str) else str(content),
+                        })
+                
+                return {
+                    "messages": ui_messages,
+                    "status": streaming_status,
+                    "is_streaming": is_streaming,
+                    "source": source_type,
+                    "message_count": len(ui_messages),
+                }
+            
+            result = await asyncio.get_event_loop().run_in_executor(None, _get_session)
+            if result is None:
+                logger.info(f"[session-get] RETURN empty (sid='{session_id[:12]}')")
+                return ok(data={
+                    "messages": [],
+                    "status": "not_found",
+                    "is_streaming": False,
+                    "source": "none",
+                    "message_count": 0,
+                })
+            logger.info(f"[session-get] RETURN {len(result['messages'])} ui msgs (source={result.get('source')}) sid='{session_id[:12]}'")
+            return ok(data=result)
+        except Exception as e:
+            logger.error(f"Get session error: {e}")
+            return ok(data={
+                "messages": [],
+                "status": "error",
+                "is_streaming": False,
+                "error": str(e),
+            })
+
+    @app.post("/api/agent/sessions/create")
+    async def agent_session_create():
+        """保存当前会话并创建新会话 — 避免创建空会话"""
+        store = _get_session_store()
+        try:
+            def _create_session():
+                summary = ""
+                saved_any = False
+                
+                # 处理 default agent（当前会话）
+                current_agent = _agent_pool.get("default")
+                if current_agent:
+                    messages = current_agent.snapshot_messages()
+                    # 只有当有用户消息时才保存
+                    user_msgs = [m for m in messages if m.get('role') == 'user']
+                    if len(user_msgs) >= 1:
+                        # 提取摘要（跳过 system-reminder 伪消息，如 <current_date> 包装）
+                        summary = None
+                        for msg in reversed(messages):
+                            if msg.get("role") == "user":
+                                content = msg.get("content", "")
+                                if not isinstance(content, str):
+                                    continue
+                                stripped = content.strip()
+                                if stripped.startswith("<system-reminder>") and stripped.endswith("</system-reminder>"):
+                                    continue
+                                summary = content[:100]
+                                break
+                        # 保存到 SessionStore
+                        if store:
+                            current_sid = current_agent._active_session_id or "default"
+                            existing = store.get(current_sid)
+                            if existing:
+                                store.update(current_sid, messages=messages)
+                            else:
+                                store.create_with_id(session_id=current_sid,
+                                                     name=_extract_session_name(messages, [], current_sid) or summary or "会话")
+                                store.update(current_sid, messages=messages)
+                        # 同时保存到 checkpoint
+                        try:
+                            cp = current_agent.create_checkpoint(summary=summary or "会话")
+                            if cp:
+                                logger.info(f"Session create: checkpoint saved for '{current_sid[:12]}'")
+                                saved_any = True
+                        except Exception as ce:
+                            logger.warning(f"Checkpoint save error: {current_sid}: {ce}")
+                
+                # 重置当前 agent（清空消息，准备新对话）
+                if current_agent:
+                    current_agent.reset()
+                
+                # 生成新会话 ID（标准 sess_* 格式）
+                new_id = f"sess_{uuid.uuid4().hex[:12]}"
+                # 用新 ID 创建新的 agent 实例
+                new_agent = _get_agent_for_session(app.state.workspace_dir, new_id)
+                if new_agent:
+                    new_agent.reset()  # 确保干净状态
+                
+                return new_id, summary
+
+            session_id, summary = await asyncio.get_event_loop().run_in_executor(None, _create_session)
+            return ok(data={
+                "created": True,
+                "session_id": session_id,
+                "summary": summary,
+                "saved_previous": True,
+            })
+        except Exception as e:
+            logger.error(f"Create session error: {e}")
+            return ok(data={"created": False, "error": str(e)})
+
+    @app.post("/api/agent/sessions/switch")
+    async def agent_session_switch(req: AgentSessionSwitchRequest):
+        """切换到指定会话 — 主动激活状态机"""
+        store = _get_session_store()
+        try:
+            def _switch_session():
+                # 0. 记录目标会话是否原本就在池中（活跃会话）：是则后续绝不回退检查点，
+                #    否则流式进行中切换会读到检查点冻结快照，污染活跃实例（2026-08-10 修复）
+                was_in_pool = False
+                with _agent_pool_lock:
+                    was_in_pool = req.session_id in _agent_pool
+
+                # 1. 保存所有非目标会话的 Agent 状态到 SessionStore
+                if store:
+                    with _agent_pool_lock:
+                        for sid, ag in _agent_pool.items():
+                            if sid != req.session_id and ag.messages:
+                                _sync_agent_from_store(ag, sid, store)
+
+                # 2. 主动激活目标 Agent — 状态机会自动从 Store 加载
+                logger.info(f"[switch] Activating session '{req.session_id[:12]}'")
+                target_agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
+                if not target_agent:
+                    logger.warning(f"[switch] Failed to get agent for '{req.session_id[:12]}'")
+                    return None
+                
+                # 3. 再次强制同步（确保从 Store 加载到内存）
+                if store:
+                    _sync_agent_from_store(target_agent, req.session_id, store)
+                
+                # 4. 检查目标会话状态（统一口径：_agent_state_of）
+                target_is_streaming, target_is_active, _ = _agent_state_of(target_agent)
+                
+                # 5. 从目标 Agent 获取消息
+                messages_source = target_agent.snapshot_messages()
+                source_type = "agent_live" if (target_is_streaming or target_is_active) else "agent_pool"
+                
+                # 6. 如果 Agent 仍然没有消息，尝试从 SessionStore 直接读取（最后兜底）
+                if not messages_source and store:
+                    target = store.get(req.session_id)
+                    if target and target.messages:
+                        messages_source = target.messages
+                        source_type = "session_store"
+                        # 同步到 Agent
+                        target_agent.restore_messages(messages_source)
+                        logger.info(f"[switch] Loaded {len(messages_source)} msgs from SessionStore (fallback)")
+                
+                # 7. 最后兜底：从 FileVersionDB 检查点恢复（旧数据迁移兜底）。
+                #    仅当目标会话原本不在池中（was_in_pool=False，冷启动/迁移场景）才允许；
+                #    活跃会话即使消息为空也不回退检查点，避免读到冻结快照卡死流式（2026-08-10 修复）
+                if not messages_source and not was_in_pool:
+                    try:
+                        fdb = _get_fdb_for_workspace(app.state.workspace_dir)
+                        if fdb:
+                            checkpoints = fdb.get_checkpoints(req.session_id, count=100)
+                            if checkpoints:
+                                messages_source = _build_messages_from_checkpoints(checkpoints)
+                                source_type = "checkpoint"
+                                target_agent.restore_messages(messages_source)
+                                logger.info(f"[switch] Loaded {len(messages_source)} msgs from FileVersionDB checkpoints (fallback)")
+                    except Exception as ce:
+                        logger.warning(f"Checkpoint restore error: {ce}")
+                
+                if not messages_source:
+                    logger.warning(f"[switch] No messages found for session '{req.session_id[:12]}'")
+                    return None
+                
+                logger.info(f"[switch] Session '{req.session_id[:12]}' activated: {len(messages_source)} msgs (source={source_type})")
+                
+                # 构造 UI 消息列表
+                ui_messages = []
+                for msg in messages_source:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if role == "system":
+                        continue
+                    if role == "tool":
+                        tool_call_id = msg.get("tool_call_id", "")
+                        tool_content = content if isinstance(content, str) else str(content)
+                        tool_name = ""
+                        checkpoint_hash = msg.get("checkpoint_hash", "")
+                        try:
+                            for prev in reversed(ui_messages):
+                                if prev.get("role") == "assistant" and prev.get("tool_calls"):
+                                    for tc in prev["tool_calls"]:
+                                        tc_dict = tc if isinstance(tc, dict) else {}
+                                        if tc_dict.get("id") == tool_call_id:
+                                            tool_name = tc_dict.get("function", {}).get("name", "")
+                                            if not checkpoint_hash:
+                                                checkpoint_hash = tc_dict.get("checkpoint_hash", "")
                                             break
                                     break
                         except Exception:
@@ -4860,14 +6900,14 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                             "role": "tool",
                             "tool_call_id": tool_call_id,
                             "tool_name": tool_name,
-                            "content": tool_content[:500],  # 限制长度
+                            "content": tool_content,
+                            "checkpoint_hash": checkpoint_hash,
                         })
                     elif role == "assistant":
                         entry = {
                             "role": "assistant",
                             "content": content if isinstance(content, str) else str(content),
                         }
-                        # 保留 tool_calls 信息
                         if msg.get("tool_calls"):
                             entry["tool_calls"] = msg["tool_calls"]
                         ui_messages.append(entry)
@@ -4878,12 +6918,23 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                         })
                 return ui_messages
 
+            # 获取会话状态信息（在 _switch_session 外部获取，统一口径：_agent_state_of）
+            session_is_streaming = False
+            session_is_active = False
+            with _agent_pool_lock:
+                agent = _agent_pool.get(req.session_id)
+                if agent:
+                    session_is_streaming, session_is_active, _ = _agent_state_of(agent)
+            
             ui_messages = await asyncio.get_event_loop().run_in_executor(None, _switch_session)
             if ui_messages is not None:
                 return ok(data={
                     "switched": True,
                     "session_id": req.session_id,
                     "messages": ui_messages,
+                    "is_streaming": session_is_streaming,
+                    "is_active": session_is_active,
+                    "source": "agent_live" if (session_is_streaming or session_is_active) else "session_store",
                 })
             else:
                 return ok(data={"switched": False, "error": "会话不存在"})
@@ -4893,14 +6944,38 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
     @app.post("/api/agent/sessions/delete")
     async def agent_session_delete(req: AgentSessionSwitchRequest):
-        """删除指定会话"""
+        """删除指定会话 — 同时清理 SessionStore、checkpoint 和 Agent 实例池"""
+        deleted = False
+        # 1. 从 SessionStore 删除
+        store = _get_session_store()
+        if store:
+            try:
+                deleted = store.delete(req.session_id) or deleted
+            except Exception as e:
+                logger.warning(f"SessionStore delete error: {e}")
+
+        # 2. 清理 FileVersionDB 中该会话的检查点（检查点按 session_id 字段关联）
         try:
-            from ..cache import get_context_reloader
-            reloader = get_context_reloader()
-            reloader.delete_checkpoint(req.session_id)
-            return ok(data={"deleted": True})
+            fdb = _get_fdb_for_workspace(app.state.workspace_dir)
+            if fdb:
+                n = fdb.delete_checkpoints_by_session(req.session_id)
+                if n:
+                    deleted = True
+                    logger.info(f"Session delete: removed {n} checkpoints for '{req.session_id[:12]}'")
         except Exception as e:
-            return ok(data={"deleted": False, "error": str(e)})
+            logger.warning(f"Checkpoint delete error: {e}")
+
+        # 3. 清理 Agent 实例池
+        with _agent_pool_lock:
+            agent = _agent_pool.pop(req.session_id, None)
+        if agent:
+            try:
+                agent.cancel()
+            except Exception:
+                pass
+            logger.info(f"Agent pool: removed session '{req.session_id[:12]}' (pool size={len(_agent_pool)})")
+
+        return ok(data={"deleted": deleted})
 
     # ─── Swarm 子 Agent API ──────────────────────────────────
 
@@ -4956,7 +7031,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             "denied_tools": spec.denied_tools, "is_busy": sa.is_busy if sa else False,
             "status": result.status.value if result else "idle",
             "last_result": {
-                "content": result.content[:500] if result and result.content else "",
+                "content": result.content if result and result.content else "",
                 "error": result.error if result else None,
                 "duration_ms": result.duration_ms if result else 0,
                 "tool_calls_count": result.tool_calls_count if result else 0,
@@ -5103,142 +7178,506 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         agent._coordinator.disable_swarm()
         return ok(data={"swarm_enabled": False, "message": "Swarm 集群模式已禁用（单次调用和≤4并行仍可用）"})
 
+    # ─── 发现 API（Skill/Tool/MCP/Workflow 聚合）──────────
+
+    @app.get("/api/discover")
+    async def discover():
+        """聚合发现：返回可用的技能/工具组/MCP工具/工作流定义，供前端输入栏菜单引用"""
+        result = {"skills": [], "tools": {}, "mcp": [], "workflows": [], "plugins": []}
+
+        # 1. Skill — 配置注册表 + skills_market/ 动态扫描合并（市场技能无需写 config 也可引用）
+        try:
+            from ..config import get_config_manager
+            config_mgr = get_config_manager()
+            seen = set()
+            result["skills"] = []
+            for s in config_mgr.get_enabled_skills():
+                result["skills"].append({"name": s.name, "description": s.description, "type": getattr(s, "type", "")})
+                seen.add(s.name)
+            # 合并 skills_market/ 第三方技能仓库（未注册 config 也能被发现）
+            try:
+                from ..skill_system import Skill
+                from pathlib import Path
+                market_dir = Path(__file__).resolve().parent.parent.parent / "skills_market"
+                if market_dir.exists():
+                    for skill_subdir in sorted(market_dir.iterdir()):
+                        if not skill_subdir.is_dir() or skill_subdir.name.startswith((".", "_")):
+                            continue
+                        try:
+                            skill_obj = Skill.from_skill_md(skill_subdir)
+                            if skill_obj and skill_obj.name and skill_obj.name not in seen:
+                                result["skills"].append({
+                                    "name": skill_obj.name,
+                                    "description": skill_obj.description,
+                                    "type": skill_obj.category.value if hasattr(skill_obj.category, "value") else str(skill_obj.category),
+                                })
+                                seen.add(skill_obj.name)
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.debug(f"discover market skills error: {e}")
+        except Exception as e:
+            logger.warning(f"discover skills error: {e}")
+
+        # 2. Tool — 从工具组加载追踪器取实际加载的工具组
+        try:
+            from ..tools import get_loaded_tool_groups
+            result["tools"] = get_loaded_tool_groups()
+        except Exception as e:
+            logger.warning(f"discover tools error: {e}")
+
+        # 3. MCP — 标准 MCP 客户端已连接工具 + 远程 MCP 服务组
+        try:
+            from ..mcp_client.client import MCPClientManager
+            mgr = MCPClientManager()
+            for t in mgr.list_tools():
+                result["mcp"].append({
+                    "name": t.get("name", ""),
+                    "description": t.get("description", ""),
+                    "client": "mcp_client",
+                })
+            for name, info in mgr.list_clients().items():
+                if getattr(info, "state", None) and str(info.state) not in ("ClientState.CONNECTED", "CONNECTED"):
+                    continue
+                result["mcp"].append({
+                    "name": name,
+                    "description": f"MCP 服务（{getattr(info, 'tool_count', 0)} 工具）",
+                    "client": name,
+                })
+        except Exception as e:
+            logger.warning(f"discover mcp error: {e}")
+
+        # 4. Workflow — 从 WorkflowEngine 持久化层取定义（list_definitions 返回 dict 列表）
+        try:
+            engine = _get_workflow_api_engine()
+            for d in engine.persistence.list_definitions():
+                result["workflows"].append({
+                    "workflow_id": d.get("workflow_id", ""),
+                    "name": d.get("name", "") or d.get("workflow_id", ""),
+                    "description": d.get("description", ""),
+                    "version": d.get("version", ""),
+                    "created_at": d.get("created_at", ""),
+                })
+        except Exception as e:
+            logger.warning(f"discover workflows error: {e}")
+
+        # 5. Plugin — 从 PluginManager 动态发现的插件（含 mcp/plugins/ 内置）
+        try:
+            from ..plugins import PluginManager
+            pm = PluginManager()
+            entries = pm.discover_plugins()
+            result["plugins"] = [
+                {
+                    "name": e.name,
+                    "description": f"{e.kind.value} 插件 · {len(e.provides_tools or [])} 工具",
+                    "kind": e.kind.value,
+                    "tools": e.provides_tools or [],
+                }
+                for e in entries
+            ]
+        except Exception as e:
+            logger.debug(f"discover plugins error: {e}")
+
+        return ok(data=result)
+
+    # ─── Workflow 引擎 API ──────────────────────────────────
+
+    def _get_workflow_api_engine():
+        """获取进程内 WorkflowEngine 单例（模块加载时已固定并注入 agent/tools）"""
+        engine = getattr(app.state, "workflow_engine", None)
+        if engine is None:
+            from ..workflow_engine import get_workflow_engine as _gwf
+            engine = _gwf()
+            app.state.workflow_engine = engine
+        return engine
+
+    @app.get("/api/workflow/definitions")
+    async def workflow_list_definitions():
+        """列出所有工作流定义"""
+        try:
+            engine = _get_workflow_api_engine()
+            defs = engine.persistence.list_definitions()
+            return ok(data={"definitions": defs, "count": len(defs)})
+        except Exception as e:
+            logger.warning(f"workflow_list_definitions error: {e}")
+            return err(msg=f"获取工作流定义失败: {e}")
+
+    class WorkflowStartRequest(BaseModel):
+        workflow_id: str
+        input_data: Optional[Dict[str, Any]] = None
+
+    @app.post("/api/workflow/start")
+    async def workflow_start(req: WorkflowStartRequest):
+        """启动一个工作流"""
+        try:
+            engine = _get_workflow_api_engine()
+            wf_def = engine.persistence.get_definition(req.workflow_id)
+            if not wf_def:
+                return err(msg=f"工作流不存在: {req.workflow_id}")
+            instance_id = engine.start_workflow(wf_def, req.input_data or {})
+            return ok(data={"instance_id": instance_id, "workflow_id": req.workflow_id})
+        except Exception as e:
+            logger.warning(f"workflow_start error: {e}")
+            return err(msg=f"启动工作流失败: {e}")
+
+    @app.get("/api/workflow/instances")
+    async def workflow_list_instances():
+        """列出运行实例（含状态/进度/当前步骤）"""
+        try:
+            engine = _get_workflow_api_engine()
+            instances = engine.persistence.list_instances(limit=50)
+            return ok(data={"instances": instances, "count": len(instances)})
+        except Exception as e:
+            logger.warning(f"workflow_list_instances error: {e}")
+            return err(msg=f"获取实例失败: {e}")
+
+    @app.post("/api/workflow/pause/{instance_id}")
+    async def workflow_pause(instance_id: str):
+        engine = _get_workflow_api_engine()
+        return ok(data={"paused": engine.pause_workflow(instance_id), "instance_id": instance_id})
+
+    @app.post("/api/workflow/resume/{instance_id}")
+    async def workflow_resume(instance_id: str):
+        engine = _get_workflow_api_engine()
+        return ok(data={"resumed": engine.resume_workflow(instance_id), "instance_id": instance_id})
+
+    @app.post("/api/workflow/cancel/{instance_id}")
+    async def workflow_cancel(instance_id: str):
+        engine = _get_workflow_api_engine()
+        return ok(data={"cancelled": engine.cancel_workflow(instance_id), "instance_id": instance_id})
+
+    @app.get("/api/workflow/status/{instance_id}")
+    async def workflow_status(instance_id: str):
+        engine = _get_workflow_api_engine()
+        status = engine.get_status(instance_id)
+        if not status:
+            return err(msg=f"实例不存在: {instance_id}")
+        return ok(data=status)
+
+    @app.get("/api/workflow/step_results/{instance_id}")
+    async def workflow_step_results(instance_id: str):
+        engine = _get_workflow_api_engine()
+        return ok(data={"instance_id": instance_id, "steps": engine.get_step_results(instance_id)})
+
+    @app.get("/api/workflow/logs/{instance_id}")
+    async def workflow_logs(instance_id: str, limit: int = 100):
+        engine = _get_workflow_api_engine()
+        return ok(data={"instance_id": instance_id, "logs": engine.get_logs(instance_id, limit=min(limit, 500))})
+
     # ─── Agent 检查点 API ────────────────────────────────────
+
+    def _get_fdb_for_workspace(workspace_dir: str) -> Optional[Any]:
+        """获取 FileVersionDB 实例（独立于 agent，可直接查询检查点）"""
+        try:
+            from ..middleware.file_version_db import FileVersionDB
+            db_path = os.path.join(workspace_dir, ".ts2_data", "file_versions.db")
+            if os.path.exists(db_path):
+                return FileVersionDB(db_path)
+        except Exception as e:
+            logger.debug(f"Failed to get FileVersionDB: {e}")
+        return None
+
+    def _build_messages_from_checkpoints(checkpoints: list, fallback_content: str = "历史会话") -> list:
+        """从 FileVersionDB 检查点记录构建 UI 消息列表（会话兜底 / 迁移恢复复用）
+
+        注意：这里的 checkpoints 是「按 session_id 关联」的文件快照记录，
+        与会话 ID（sess_*）绑定，而非 ContextReloader 的 cp-* 对话检查点。
+        """
+        messages = []
+        for cp in reversed(checkpoints):
+            tool_name = cp.get("tool", "")
+            step = cp.get("step", 0)
+            file_count = cp.get("file_count", 0)
+            if tool_name:
+                cp_id = cp.get("id", "")
+                messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": f"restore-{cp_id}",
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": "{}"
+                        }
+                    }]
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": f"restore-{cp_id}",
+                    "content": f"检查点 #{step}: {file_count} 个文件变更",
+                    "checkpoint_hash": cp.get("checkpoint_hash", ""),
+                })
+        if not messages:
+            messages.append({
+                "role": "user",
+                "content": fallback_content,
+            })
+        return messages
+
+    def _find_conversation_cp_by_ref(reloader, commit_hash: str) -> str:
+        """反查 commit_hash 对应的 ContextReloader 对话快照 id（cp-*）
+
+        用于 conversation_checkpoint_id 回填缺失/旧数据的兜底：
+        - SQLite 数字 id：cp-* 快照 summary 带 '#<sqlite_id> ' 前缀（_auto_conversation_checkpoint 写入）
+        - git hash：cp-* 快照 git_commit_hash 字段匹配
+        """
+        try:
+            commit = str(commit_hash or "")
+            if not commit:
+                return ""
+            for key in reloader.list_checkpoints():
+                cp = reloader.restore_checkpoint(key)
+                if cp is None:
+                    continue
+                if commit.isdigit():
+                    if ((getattr(cp, "summary", "") or "").startswith(f"#{commit} ")):
+                        return key
+                else:
+                    if getattr(cp, "git_commit_hash", "") == commit:
+                        return key
+        except Exception:
+            pass
+        return ""
+
+    def _message_key(msg: dict) -> tuple:
+        """消息同一性 key（用于判断检查点快照间的新增/保留消息）"""
+        role = msg.get("role", "")
+        if role == "tool":
+            return ("tool", str(msg.get("tool_call_id", "")))
+        tcs = msg.get("tool_calls")
+        if tcs:
+            ids = tuple(
+                str(tc.get("id", "")) if isinstance(tc, dict) else ""
+                for tc in tcs
+            )
+            return ("assistant", ids)
+        return (role, str(msg.get("content", "")))
+
+    def _is_compact_summary_msg(msg: dict) -> bool:
+        return (
+            msg.get("role") == "system"
+            and str(msg.get("content", "")).startswith("[对话历史摘要")
+        )
+
+    def _has_compact_summary(messages: list) -> bool:
+        return any(_is_compact_summary_msg(m) for m in messages)
+
+    def _expand_compact_checkpoint(reloader, cp_id: str, snapshot_msgs: list) -> Optional[list]:
+        """压缩视图展开（日志式）：回退到含摘要的检查点时，向上合并最近的完整基底快照，
+        找回被压缩的具体历史消息。多次压缩时基底为最早的完整快照，后续新增消息全部保留，
+        天然支持多次压缩还原。
+        """
+        try:
+            cur = reloader.restore_checkpoint(cp_id)
+            if cur is None:
+                return None
+            cur_ts = getattr(cur, "timestamp", 0) or 0
+            base_msgs = None
+            for key in reloader.list_checkpoints():
+                cp = reloader.restore_checkpoint(key)
+                if cp is None:
+                    continue
+                if (getattr(cp, "timestamp", 0) or 0) >= cur_ts:
+                    continue  # 只取比当前检查点更早的快照
+                msgs = getattr(cp, "messages_snapshot", None) or []
+                if not msgs or _has_compact_summary(msgs):
+                    continue  # 跳过同样被压缩的快照，找到最早的完整基底
+                base_msgs = msgs
+                break
+            if not base_msgs:
+                return None
+            base_keys = set(_message_key(m) for m in base_msgs)
+            expanded = list(base_msgs)
+            for m in snapshot_msgs:
+                if _is_compact_summary_msg(m):
+                    continue  # 摘要 system 消息不并入（前端诚实渲染不再出现摘要块）
+                if _message_key(m) not in base_keys:
+                    expanded.append(m)  # 压缩点之后新增的具体消息
+            return expanded
+        except Exception:
+            pass
+        return None
+
+    def _format_checkpoint_row(c: dict) -> dict:
+        """格式化检查点记录为前端需要的格式"""
+        # 映射 created_at → timestamp（前端统一用 timestamp）
+        if "created_at" in c and "timestamp" not in c:
+            c["timestamp"] = c["created_at"]
+        if "file_count" in c and "diff_count" not in c:
+            c["diff_count"] = c["file_count"]
+        # SQLite 的 id → hash（兼容前端）
+        if "id" in c and "hash" not in c:
+            c["hash"] = c.get("checkpoint_hash", "") or str(c["id"])
+        if "meta" not in c:
+            c["meta"] = {
+                "source": c.get("source", "auto"),
+                "step": c.get("step", 0),
+                "tool": c.get("tool", ""),
+                "instance": c.get("session_id", "")[:8],
+                "duration_ms": c.get("duration_ms"),
+            }
+        return c
 
     @app.get("/api/agent/checkpoints")
     async def agent_checkpoints(session_id: str = ""):
-        """列出当前会话的检查点列表（优先从 SQLite，回退到 Shadow Git）
+        """列出当前会话的检查点列表（优先从 agent，回退到独立 FileVersionDB）
 
         Args:
             session_id: 前端持久化的会话 ID（query parameter），用于查询正确的检查点
-        """
-        agent = _get_web_agent(app.state.workspace_dir)
-        if agent is None:
-            return ok(data={"checkpoints": [], "available": False, "version": 0})
-        try:
-            if hasattr(agent, '_middleware_chain') and agent._middleware_chain:
-                for mw in agent._middleware_chain._middlewares:
-                    from ..middleware.shadow_checkpoint import CheckpointMiddleware
-                    if isinstance(mw, CheckpointMiddleware):
-                        # 如果前端传了 session_id，先更新中间件的 instance_id
-                        if session_id and session_id != mw.instance_id:
-                            mw._instance_id = session_id
 
-                        # 优先从 SQLite 获取（~1ms）
-                        commits = mw.get_checkpoints(count=50)
-                        if commits:
-                            # SQLite 返回的检查点已含 file_count
-                            # 统一前端字段名
-                            for c in commits:
-                                # 映射 created_at → timestamp（前端统一用 timestamp）
-                                if "created_at" in c and "timestamp" not in c:
-                                    c["timestamp"] = c["created_at"]
-                                if "file_count" in c and "diff_count" not in c:
-                                    c["diff_count"] = c["file_count"]
-                                # SQLite 的 id → hash（兼容前端）
-                                if "id" in c and "hash" not in c:
-                                    c["hash"] = c.get("checkpoint_hash", "") or str(c["id"])
-                                if "meta" not in c:
-                                    c["meta"] = {
-                                        "source": c.get("source", "auto"),
-                                        "step": c.get("step", 0),
-                                        "tool": c.get("tool", ""),
-                                        "instance": c.get("session_id", "")[:8],
-                                        "duration_ms": c.get("duration_ms"),
-                                    }
-                            return ok(data={
-                                "checkpoints": commits,
-                                "available": True,
-                                "instance_id": getattr(mw, 'instance_id', ''),
-                                "version": mw.global_version,
-                            })
-                        # 回退到 Shadow Git
-                        if mw.checkpointer:
-                            cp = mw.checkpointer
-                            git_commits = cp.get_commits(count=50)
-                            for i, c in enumerate(git_commits):
-                                if i < len(git_commits) - 1:
-                                    # git_commits 是 DESC 排序，git_commits[i+1] 更旧
-                                    c["diff_count"] = cp.get_diff_count(git_commits[i + 1]["hash"], c["hash"])
-                                else:
-                                    c["diff_count"] = 0
-                            return ok(data={
-                                "checkpoints": git_commits,
-                                "available": True,
-                                "instance_id": getattr(mw, 'instance_id', ''),
-                                "version": 0,
-                            })
-        except Exception as e:
-            logger.warning(f"获取检查点列表失败: {e}")
+        支持两种模式：
+        1. 有活跃 agent 实例：通过 CheckpointMiddleware 获取（更快）
+        2. 无活跃 agent 实例：直接从 FileVersionDB 查询（独立读取）
+        """
+        # 优先尝试通过 agent 实例获取
+        agent = _get_agent_for_session(app.state.workspace_dir, session_id)
+        if agent is not None:
+            try:
+                if hasattr(agent, '_middleware_chain') and agent._middleware_chain:
+                    for mw in agent._middleware_chain._middlewares:
+                        from ..middleware.shadow_checkpoint import CheckpointMiddleware
+                        if isinstance(mw, CheckpointMiddleware):
+                            # 不再改写 mw._instance_id（会污染中间件、清空 _last_hash）。
+                            # 仅当实例已绑定该会话时才用中间件，否则走 FileVersionDB 独立查询。
+                            bound = (not session_id) or (getattr(agent, '_active_session_id', '') == session_id)
+                            if not bound:
+                                logger.debug(f"[checkpoints] instance not bound to '{session_id[:12]}' (bound={getattr(agent, '_active_session_id', '')[:12] or 'none'}), using FileVersionDB")
+                                break
+
+                            # 优先从 SQLite 获取
+                            commits = mw.get_checkpoints(count=50)
+                            if commits:
+                                for c in commits:
+                                    _format_checkpoint_row(c)
+                                return ok(data={
+                                    "checkpoints": commits,
+                                    "available": True,
+                                    "instance_id": getattr(mw, 'instance_id', ''),
+                                    "version": mw.global_version,
+                                })
+                            # 回退到 Shadow Git
+                            if mw.checkpointer:
+                                cp = mw.checkpointer
+                                git_commits = cp.get_commits(count=50)
+                                for i, c in enumerate(git_commits):
+                                    if i < len(git_commits) - 1:
+                                        c["diff_count"] = cp.get_diff_count(git_commits[i + 1]["hash"], c["hash"])
+                                    else:
+                                        c["diff_count"] = 0
+                                return ok(data={
+                                    "checkpoints": git_commits,
+                                    "available": True,
+                                    "instance_id": getattr(mw, 'instance_id', ''),
+                                    "version": 0,
+                                })
+            except Exception as e:
+                logger.warning(f"通过 agent 获取检查点失败: {e}")
+
+        # 回退：直接从 FileVersionDB 查询（独立于 agent）
+        if session_id:
+            try:
+                fdb = _get_fdb_for_workspace(app.state.workspace_dir)
+                if fdb:
+                    commits = fdb.get_checkpoints(session_id, count=50)
+                    if commits:
+                        for c in commits:
+                            _format_checkpoint_row(c)
+                        version = fdb.global_version()
+                        return ok(data={
+                            "checkpoints": commits,
+                            "available": True,
+                            "instance_id": session_id,
+                            "version": version,
+                        })
+            except Exception as e:
+                logger.warning(f"独立获取检查点失败: {e}")
+
         return ok(data={"checkpoints": [], "available": False, "version": 0})
 
     @app.get("/api/agent/checkpoints/{commit_hash}/diff")
-    async def agent_checkpoint_diff(commit_hash: str):
+    async def agent_checkpoint_diff(commit_hash: str, session_id: str = ""):
         """获取指定检查点自身的增量差异（该工具调用实际修改的文件）
 
-        优先从 SQLite 快速查询，回退到 Shadow Git diff。
+        优先从 agent 实例获取，回退到独立 FileVersionDB 查询。
         """
-        agent = _get_web_agent(app.state.workspace_dir)
-        if agent is None:
-            return ok(data={"diff": [], "summary": {"additions": 0, "deletions": 0, "files_changed": 0}, "error": "Agent 未就绪"})
-        try:
-            if hasattr(agent, '_middleware_chain') and agent._middleware_chain:
-                for mw in agent._middleware_chain._middlewares:
-                    from ..middleware.shadow_checkpoint import CheckpointMiddleware
-                    if isinstance(mw, CheckpointMiddleware):
-                        # 尝试从 SQLite 快速查询（commit_hash 可能是数字 id 或 git hash）
-                        fdb = mw.fdb
-                        if fdb:
-                            try:
-                                cp_id = int(commit_hash)
-                                # 增量 diff：只返回该检查点自身的变更文件
-                                diff_files = fdb.get_checkpoint_diff_files(cp_id)
-                                if diff_files:
-                                    # 从 Shadow Git 补充 diff 内容
-                                    if mw.checkpointer:
-                                        cp_git = mw.checkpointer
-                                        # 获取该检查点的 git hash
-                                        cp_row = fdb.get_checkpoint(cp_id)
-                                        git_hash = cp_row.get("checkpoint_hash", "") if cp_row else ""
-                                        for f in diff_files:
-                                            if not f.get("diff"):
-                                                try:
-                                                    if git_hash:
-                                                        f["diff"] = cp_git.get_incremental_diff_content(git_hash, f["path"], max_lines=80)
-                                                    else:
-                                                        # 没有 git hash，用文件当前内容生成简易 diff
-                                                        import difflib
-                                                        full_path = os.path.join(mw._workspace_root, f["path"]) if not os.path.isabs(f["path"]) else f["path"]
-                                                        if os.path.isfile(full_path):
-                                                            new_lines = open(full_path, encoding="utf-8", errors="replace").readlines()
-                                                            diff = difflib.unified_diff([], new_lines, fromfile="/dev/null", tofile=f["path"])
-                                                            f["diff"] = "".join(diff)
-                                                except Exception:
-                                                    pass
-                                    total_adds = sum(f.get("additions", 0) for f in diff_files)
-                                    total_dels = sum(f.get("deletions", 0) for f in diff_files)
-                                    return ok(data={
-                                        "diff": diff_files,
-                                        "summary": {
-                                            "additions": total_adds,
-                                            "deletions": total_dels,
-                                            "files_changed": len(diff_files),
-                                        },
-                                    })
-                            except (ValueError, TypeError):
-                                pass
+        # 优先尝试通过 agent 实例获取
+        agent = _get_agent_for_session(app.state.workspace_dir, session_id)
+        if agent is not None:
+            try:
+                if hasattr(agent, '_middleware_chain') and agent._middleware_chain:
+                    for mw in agent._middleware_chain._middlewares:
+                        from ..middleware.shadow_checkpoint import CheckpointMiddleware
+                        if isinstance(mw, CheckpointMiddleware):
+                            fdb = mw.fdb
+                            if fdb:
+                                try:
+                                    cp_id = int(commit_hash)
+                                    diff_files = fdb.get_checkpoint_diff_files(cp_id)
+                                    if diff_files:
+                                        if mw.checkpointer:
+                                            cp_git = mw.checkpointer
+                                            cp_row = fdb.get_checkpoint(cp_id)
+                                            git_hash = cp_row.get("checkpoint_hash", "") if cp_row else ""
+                                            for f in diff_files:
+                                                if not f.get("diff"):
+                                                    try:
+                                                        if git_hash:
+                                                            f["diff"] = cp_git.get_incremental_diff_content(git_hash, f["path"], max_lines=80)
+                                                        else:
+                                                            import difflib
+                                                            full_path = os.path.join(mw._workspace_root, f["path"]) if not os.path.isabs(f["path"]) else f["path"]
+                                                            if os.path.isfile(full_path):
+                                                                new_lines = open(full_path, encoding="utf-8", errors="replace").readlines()
+                                                                diff = difflib.unified_diff([], new_lines, fromfile="/dev/null", tofile=f["path"])
+                                                                f["diff"] = "".join(diff)
+                                                    except Exception:
+                                                        pass
+                                        total_adds = sum(f.get("additions", 0) for f in diff_files)
+                                        total_dels = sum(f.get("deletions", 0) for f in diff_files)
+                                        return ok(data={
+                                            "diff": diff_files,
+                                            "summary": {
+                                                "additions": total_adds,
+                                                "deletions": total_dels,
+                                                "files_changed": len(diff_files),
+                                            },
+                                        })
+                                except (ValueError, TypeError):
+                                    pass
 
-                        # 回退到 Shadow Git：增量 diff（与父 commit 比较）
-                        if mw.checkpointer:
-                            cp = mw.checkpointer
-                            diff_files = cp.get_incremental_diff(commit_hash)
-                            total_adds = 0
-                            total_dels = 0
-                            for f in diff_files:
-                                content = cp.get_incremental_diff_content(commit_hash, f["path"], max_lines=80)
-                                f["diff"] = content
-                                total_adds += f.get("additions", 0)
-                                total_dels += f.get("deletions", 0)
+                            if mw.checkpointer:
+                                cp = mw.checkpointer
+                                diff_files = cp.get_incremental_diff(commit_hash)
+                                total_adds = 0
+                                total_dels = 0
+                                for f in diff_files:
+                                    content = cp.get_incremental_diff_content(commit_hash, f["path"], max_lines=80)
+                                    f["diff"] = content
+                                    total_adds += f.get("additions", 0)
+                                    total_dels += f.get("deletions", 0)
+                                return ok(data={
+                                    "diff": diff_files,
+                                    "summary": {
+                                        "additions": total_adds,
+                                        "deletions": total_dels,
+                                        "files_changed": len(diff_files),
+                                    },
+                                })
+            except Exception as e:
+                logger.warning(f"通过 agent 获取 diff 失败: {e}")
+
+        # 回退：直接从 FileVersionDB 查询
+        if session_id:
+            try:
+                fdb = _get_fdb_for_workspace(app.state.workspace_dir)
+                if fdb:
+                    try:
+                        cp_id = int(commit_hash)
+                        diff_files = fdb.get_checkpoint_diff_files(cp_id)
+                        if diff_files:
+                            total_adds = sum(f.get("additions", 0) for f in diff_files)
+                            total_dels = sum(f.get("deletions", 0) for f in diff_files)
                             return ok(data={
                                 "diff": diff_files,
                                 "summary": {
@@ -5247,14 +7686,17 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                                     "files_changed": len(diff_files),
                                 },
                             })
-        except Exception as e:
-            logger.warning(f"获取 diff 失败: {e}")
+                    except (ValueError, TypeError):
+                        pass
+            except Exception as e:
+                logger.warning(f"独立获取 diff 失败: {e}")
+
         return ok(data={"diff": [], "summary": {"additions": 0, "deletions": 0, "files_changed": 0}, "error": "无差异数据"})
 
     @app.get("/api/agent/checkpoints/{commit_hash}/diff-count")
-    async def agent_checkpoint_diff_count(commit_hash: str):
+    async def agent_checkpoint_diff_count(commit_hash: str, session_id: str = ""):
         """快速获取指定检查点的变更文件数（优先 SQLite）"""
-        agent = _get_web_agent(app.state.workspace_dir)
+        agent = _get_agent_for_session(app.state.workspace_dir, session_id)
         if agent is None:
             return ok(data={"count": 0})
         try:
@@ -5288,7 +7730,8 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         except Exception:
             pass
         restore_type = body.get("restore_type", "files")
-        agent = _get_web_agent(app.state.workspace_dir)
+        session_id = body.get("session_id", "")
+        agent = _get_agent_for_session(app.state.workspace_dir, session_id)
         if agent is None:
             return ok(data={"restored": False, "error": "Agent 未就绪"})
         try:
@@ -5302,19 +7745,52 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             for mw in agent._middleware_chain._middlewares:
                 if isinstance(mw, CheckpointMiddleware) and mw.checkpointer:
                     cp = mw.checkpointer
-                    # 恢复文件
+
+                    # 解析前端传的 commit_hash：
+                    # - SQLite 整数 id → 查该记录关联的 git hash（文件恢复）与 cp-* 对话快照（对话恢复）
+                    # - git hash / cp-* 直接使用
+                    fdb = getattr(mw, 'fdb', None)
+                    git_hash = commit_hash
+                    conversation_cp_id = ""
+                    if str(commit_hash).isdigit():
+                        try:
+                            row = fdb.get_checkpoint(int(commit_hash)) if fdb else None
+                            if row:
+                                git_hash = row.get("checkpoint_hash", "") or ""
+                                conversation_cp_id = row.get("conversation_checkpoint_id", "") or ""
+                        except Exception:
+                            pass
+                    elif str(commit_hash).startswith("cp-"):
+                        conversation_cp_id = commit_hash
+
+                    # 恢复文件（用 git hash，仅当解析出有效 hash 时执行）
                     if restore_type in ("files", "taskAndFiles"):
                         try:
-                            cp.restore_files(commit_hash)
+                            if git_hash:
+                                cp.restore_files(git_hash)
+                            else:
+                                logger.warning(f"恢复文件快照失败: 无 git hash (commit_hash={commit_hash})")
                         except Exception as e:
                             logger.warning(f"恢复文件快照失败: {e}")
 
-                    # 恢复对话历史
+                    # 恢复对话历史（用 ContextReloader 的 cp-* 对话快照 id）
                     restored_msgs = None
                     if restore_type in ("task", "taskAndFiles"):
                         try:
-                            restored_msgs = reloader.rollback_to_checkpoint(commit_hash)
+                            if conversation_cp_id:
+                                restored_msgs = reloader.rollback_to_checkpoint(conversation_cp_id)
+                            else:
+                                # 兜底反查（回填缺失 / 旧数据）：按 summary '#<sqlite_id>' 或 git_commit_hash 匹配
+                                conversation_cp_id = _find_conversation_cp_by_ref(reloader, commit_hash)
+                                if conversation_cp_id:
+                                    restored_msgs = reloader.rollback_to_checkpoint(conversation_cp_id)
                             if restored_msgs:
+                                # 压缩视图展开：找回被压缩的具体历史（日志式，多次压缩可还原）
+                                if conversation_cp_id and _has_compact_summary(restored_msgs):
+                                    expanded = _expand_compact_checkpoint(reloader, conversation_cp_id, restored_msgs)
+                                    if expanded:
+                                        restored_msgs = expanded
+                                        logger.info(f"检查点对话已展开为完整历史: {len(restored_msgs)} 条 (cp={conversation_cp_id})")
                                 restored_msgs = sanitize_messages(restored_msgs)
                                 with agent._messages_lock:
                                     agent.messages = restored_msgs
@@ -5322,7 +7798,15 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                                 if mgr:
                                     mgr.reset_session()
                                 agent._instance_tool_schemas = None
-                                logger.info(f"检查点消息已恢复到 agent: {len(restored_msgs)} 条")
+                                logger.info(f"检查点消息已恢复到 agent: {len(restored_msgs)} 条 (cp={conversation_cp_id or commit_hash})")
+
+                                # 关键：同步到 SessionStore，确保状态机一致性
+                                store = _get_session_store()
+                                if store:
+                                    store.update(session_id, messages=agent.snapshot_messages())
+                                    logger.info(f"检查点消息已同步到 SessionStore: {session_id[:12]}")
+                            else:
+                                logger.warning(f"恢复对话失败: 无对话快照 (commit_hash={commit_hash}, cp={conversation_cp_id or '无'})")
                         except Exception as e:
                             logger.warning(f"恢复对话失败: {e}")
 
@@ -5338,19 +7822,23 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                                 tool_call_id = msg.get("tool_call_id", "")
                                 tool_content = content if isinstance(content, str) else str(content)
                                 tool_name = ""
+                                checkpoint_hash = msg.get("checkpoint_hash", "")
                                 for prev in reversed(ui_messages):
                                     if prev.get("role") == "assistant" and prev.get("tool_calls"):
                                         for tc in prev["tool_calls"]:
                                             tc_dict = tc if isinstance(tc, dict) else {}
                                             if tc_dict.get("id") == tool_call_id:
                                                 tool_name = tc_dict.get("function", {}).get("name", "")
+                                                if not checkpoint_hash:
+                                                    checkpoint_hash = tc_dict.get("checkpoint_hash", "")
                                                 break
                                         break
                                 ui_messages.append({
                                     "role": "tool",
                                     "tool_call_id": tool_call_id,
                                     "tool_name": tool_name,
-                                    "content": tool_content[:500],
+                                    "content": tool_content,
+                                    "checkpoint_hash": checkpoint_hash,
                                 })
                             elif role == "assistant":
                                 entry = {
@@ -5376,6 +7864,265 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         except Exception as e:
             logger.warning(f"恢复检查点失败: {e}")
         return ok(data={"restored": False, "error": str(e)})
+
+    @app.post("/api/agent/migrate-checkpoint-sessions")
+    async def agent_migrate_checkpoint_sessions(force: bool = False, session_id: str = ""):
+        """一次性迁移旧的检查点会话到标准格式
+        
+        迁移策略：
+        1. 如果旧 cp- 会话在 SessionStore 中有完整消息 → 重命名文件为 sess_* 格式
+        2. 如果只有 FileVersionDB 中的检查点 → 从检查点重建消息，创建新会话
+        3. 不删除旧文件（安全起见），迁移后旧文件保留为备份
+        """
+        store = _get_session_store()
+        if not store:
+            return err(msg="SessionStore 不可用")
+        
+        fdb = _get_fdb_for_workspace(app.state.workspace_dir)
+        if not fdb:
+            return ok(data={"migrated": 0, "skipped": 0, "filtered": 0, "message": "无检查点数据"})
+        
+        import re
+        import uuid
+        import json
+        import shutil
+        from pathlib import Path
+        
+        try:
+            conn = fdb._connect()
+            if session_id:
+                rows = conn.execute(
+                    "SELECT DISTINCT session_id FROM checkpoints WHERE session_id = ?",
+                    (session_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT DISTINCT session_id FROM checkpoints WHERE session_id != ''"
+                ).fetchall()
+            
+            migrated = 0
+            skipped = 0
+            filtered = 0
+            migration_map = {}
+            
+            store_dir = Path(store.store_dir)
+            
+            for row in rows:
+                old_sid = row["session_id"]
+                
+                # 过滤异常会话 ID
+                if re.match(r'^[0-9a-f]{8}$', old_sid):
+                    filtered += 1
+                    continue
+                
+                # 确定新的会话 ID
+                if old_sid.startswith("cp-"):
+                    new_sid = f"sess_{uuid.uuid4().hex[:12]}"
+                elif old_sid.startswith("sess_") or re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', old_sid):
+                    # 已经是标准格式，跳过
+                    skipped += 1
+                    continue
+                else:
+                    new_sid = old_sid
+                
+                # 检查旧文件是否存在
+                old_file = store_dir / f"{old_sid}.json"
+                new_file = store_dir / f"{new_sid}.json"
+                
+                if new_file.exists():
+                    skipped += 1
+                    continue
+                
+                # 如果旧文件存在，直接重命名并修改 ID
+                if old_file.exists():
+                    try:
+                        # 读取旧文件
+                        with open(old_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        
+                        # 更新 ID
+                        data["id"] = new_sid
+                        # 更新 metadata
+                        if "metadata" not in data:
+                            data["metadata"] = {}
+                        data["metadata"]["source"] = "checkpoint_migrated"
+                        data["metadata"]["original_id"] = old_sid
+                        data["metadata"]["migration_type"] = "one_time"
+                        
+                        # 写入新文件
+                        with open(new_file, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        
+                        # 删除旧文件
+                        old_file.unlink()
+                        
+                        # 更新缓存
+                        if old_sid in store._cache:
+                            record = store._cache.pop(old_sid)
+                            record.id = new_sid
+                            record.metadata = data["metadata"]
+                            store._cache[new_sid] = record
+                        
+                        migration_map[old_sid] = new_sid
+                        migrated += 1
+                        logger.info(f"[迁移] 重命名会话 {old_sid[:12]} → {new_sid[:12]}")
+                    except Exception as e:
+                        logger.warning(f"[迁移] 重命名失败 {old_sid[:12]}: {e}")
+                        skipped += 1
+                else:
+                    # 旧文件不存在，从检查点重建
+                    checkpoints = fdb.get_checkpoints(old_sid, count=100)
+                    
+                    # 从检查点构建消息
+                    messages = []
+                    for cp in reversed(checkpoints):
+                        tool_name = cp.get("tool", "")
+                        step = cp.get("step", 0)
+                        if tool_name:
+                            messages.append({
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{
+                                    "id": f"cp-{cp.get('id', '')}",
+                                    "type": "function",
+                                    "function": {"name": tool_name, "arguments": "{}"}
+                                }]
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": f"cp-{cp.get('id', '')}",
+                                "content": f"检查点 #{step}: {cp.get('file_count', 0)} 个文件变更",
+                                "checkpoint_hash": cp.get("checkpoint_hash", ""),
+                            })
+                    
+                    if not messages:
+                        messages.append({"role": "user", "content": "历史会话"})
+                    
+                    # 生成会话名称
+                    name = _extract_session_name(messages, checkpoints, old_sid)
+                    
+                    # 创建新会话
+                    try:
+                        record = store.create_with_id(
+                            session_id=new_sid,
+                            name=name,
+                            metadata={
+                                "source": "checkpoint_migrated",
+                                "original_id": old_sid,
+                                "migration_type": "one_time"
+                            }
+                        )
+                        store.update(record.id, messages=messages)
+                        migration_map[old_sid] = new_sid
+                        migrated += 1
+                        logger.info(f"[迁移] 重建会话 {old_sid[:12]} → {new_sid[:12]}")
+                    except Exception as e:
+                        logger.warning(f"[迁移] 重建失败 {old_sid[:12]}: {e}")
+                        skipped += 1
+            
+            return ok(data={
+                "migrated": migrated,
+                "skipped": skipped,
+                "filtered": filtered,
+                "total": len(rows),
+                "migration_map": migration_map,
+                "message": f"已迁移 {migrated} 个会话，跳过 {skipped} 个已存在，过滤 {filtered} 个异常会话。",
+            })
+        except Exception as e:
+            logger.error(f"Migration failed: {e}")
+            return err(msg=f"迁移失败: {str(e)}")
+
+    @app.get("/api/agent/checkpoint-sessions")
+    async def agent_list_checkpoint_sessions():
+        """列出 FileVersionDB 中所有唯一的 session_id（用于迁移参考）"""
+        fdb = _get_fdb_for_workspace(app.state.workspace_dir)
+        if not fdb:
+            return ok(data={"sessions": [], "total": 0})
+        
+        try:
+            conn = fdb._connect()
+            rows = conn.execute(
+                "SELECT session_id, COUNT(*) as cp_count FROM checkpoints WHERE session_id != '' GROUP BY session_id ORDER BY cp_count DESC"
+            ).fetchall()
+            
+            sessions = []
+            store = _get_session_store()
+            
+            for row in rows:
+                session_id = row["session_id"]
+                cp_count = row["cp_count"]
+                
+                # 检查是否已在 SessionStore 中
+                in_session_store = False
+                if store:
+                    existing = store.get(session_id)
+                    in_session_store = existing is not None
+                
+                sessions.append({
+                    "session_id": session_id,
+                    "checkpoint_count": cp_count,
+                    "in_session_store": in_session_store,
+                })
+            
+            return ok(data={
+                "sessions": sessions,
+                "total": len(sessions),
+                "migrated_count": sum(1 for s in sessions if s["in_session_store"]),
+                "pending_count": sum(1 for s in sessions if not s["in_session_store"]),
+            })
+        except Exception as e:
+            return err(msg=f"查询失败: {str(e)}")
+
+    @app.post("/api/agent/restore-checkpoint-session/{session_id}")
+    async def agent_restore_checkpoint_session(session_id: str):
+        """恢复单个检查点会话到 SessionStore
+        
+        将旧的 cp-* 会话或其他格式的检查点会话恢复为可用会话，
+        保留其检查点数据作为对话历史。
+        """
+        store = _get_session_store()
+        if not store:
+            return err(msg="SessionStore 不可用")
+        
+        fdb = _get_fdb_for_workspace(app.state.workspace_dir)
+        if not fdb:
+            return err(msg="无检查点数据")
+        
+        try:
+            # 检查是否已在 SessionStore 中
+            existing = store.get(session_id)
+            if existing:
+                return ok(data={"restored": False, "reason": "already_exists", "session_id": session_id})
+            
+            # 从 FileVersionDB 获取该会话的检查点
+            checkpoints = fdb.get_checkpoints(session_id, count=100)
+            if not checkpoints:
+                return err(msg=f"会话 {session_id} 无检查点数据")
+            
+            # 构建消息列表
+            messages = _build_messages_from_checkpoints(checkpoints, fallback_content=f"历史会话 {session_id[:8]}")
+            
+            # 使用 _extract_session_name 生成会话名称
+            name = _extract_session_name(messages, checkpoints, session_id)
+            
+            # 创建 SessionStore 记录
+            record = store.create_with_id(
+                session_id=session_id,
+                name=name,
+                metadata={"source": "checkpoint_restored", "original_id": session_id}
+            )
+            store.update(record.id, messages=messages)
+            
+            return ok(data={
+                "restored": True,
+                "session_id": session_id,
+                "name": name,
+                "checkpoint_count": len(checkpoints),
+                "message_count": len(messages),
+            })
+        except Exception as e:
+            logger.error(f"Restore checkpoint session failed: {e}")
+            return err(msg=f"恢复失败: {str(e)}")
 
     # ─── 多实例集群 API ──────────────────────────────────────
 
@@ -5647,10 +8394,14 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         _data_executor.shutdown(wait=False)
         _agent_executor.shutdown(wait=False)
         _push_executor.shutdown(wait=False)
-        # 清理 Web Agent（释放 LLM 连接等资源）
-        nonlocal _web_agent
-        if _web_agent is not None:
-            _web_agent = None
+        # 清理 Agent 实例池（释放 LLM 连接等资源）
+        with _agent_pool_lock:
+            for sid, agent in list(_agent_pool.items()):
+                try:
+                    agent.cancel()
+                except Exception:
+                    pass
+            _agent_pool.clear()
         logger.info("TS2 Server shutdown complete")
 
     # ─── PDF 智能阅读 API ──────────────────────────────────────
@@ -6346,6 +9097,18 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         if index_file.exists():
             return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
         return HTMLResponse(content="", status_code=404)
+
+    # ─── Agent 并行预初始化（方案 A）───────────────────────────
+    # 服务器启动时后台线程构建 Agent，与 uvicorn 启动、静态资源加载并行
+    # 首次 HTTP 请求到来时 Agent 大概率已就绪，避免阻塞
+    def _preinit_web_agent():
+        try:
+            _get_web_agent(workspace_dir)
+        except Exception as _e:
+            logger.warning(f"Agent 预初始化失败（不影响启动，首次请求时重试）: {_e}")
+
+    threading.Thread(target=_preinit_web_agent, daemon=True, name="AgentPreInit").start()
+    logger.info("[预初始化] Agent 后台构建已启动")
 
     return app
 

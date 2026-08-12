@@ -16,14 +16,6 @@ from collections import defaultdict
 from .document_loader import Document
 
 
-try:
-    # 尝试导入 sentence-transformers 用于向量编码
-    from sentence_transformers import SentenceTransformer
-    HAS_SENTENCE_TRANSFORMERS = True
-except ImportError:
-    HAS_SENTENCE_TRANSFORMERS = False
-
-
 @dataclass
 class VectorEntry:
     """向量条目"""
@@ -108,23 +100,15 @@ class SimpleVectorStore(VectorStore):
     ):
         self.entries: Dict[str, VectorEntry] = {}
         self.persist_directory = Path(persist_directory) if persist_directory else None
-        self._embedding_model = None
-        self._embedding_model_name = embedding_model or "paraphrase-multilingual-MiniLM-L12-v2"
-        
-        # 如果没有 sentence-transformers，使用简单的 TF-IDF 或字符哈希
-        if not HAS_SENTENCE_TRANSFORMERS:
-            print("警告: sentence-transformers 未安装，使用简单向量编码")
-        
+        # 无外部依赖的内置字符哈希编码（sentence-transformers 已移除：numpy 版本冲突）
+        self._embedding_model_name = "simple-char-hash-v1"
+
         if self.persist_directory:
             self.persist_directory.mkdir(parents=True, exist_ok=True)
             self._load_from_disk()
-    
+
     def _get_embedding(self, text: str) -> List[float]:
-        """获取文本的向量表示"""
-        if HAS_SENTENCE_TRANSFORMERS and self._embedding_model:
-            return self._embedding_model.encode(text).tolist()
-        
-        # 回退方案：简单的字符级向量
+        """获取文本的向量表示（始终使用内置字符哈希编码）"""
         return self._simple_embedding(text)
     
     def _simple_embedding(self, text: str) -> List[float]:
@@ -146,14 +130,6 @@ class SimpleVectorStore(VectorStore):
         
         return vector
     
-    def _load_embedding_model(self) -> None:
-        """加载嵌入模型"""
-        if HAS_SENTENCE_TRANSFORMERS and self._embedding_model is None:
-            try:
-                self._embedding_model = SentenceTransformer(self._embedding_model_name)
-            except Exception as e:
-                print(f"加载嵌入模型失败: {e}，使用简单编码")
-    
     def _cosine_similarity(self, v1: List[float], v2: List[float]) -> float:
         """计算余弦相似度"""
         np_v1 = np.array(v1)
@@ -167,7 +143,6 @@ class SimpleVectorStore(VectorStore):
     
     def add_documents(self, documents: List[Document]) -> List[str]:
         """添加文档"""
-        self._load_embedding_model()
         ids = []
         
         for doc in documents:
@@ -221,7 +196,6 @@ class SimpleVectorStore(VectorStore):
         filter_metadata: Optional[Dict[str, Any]] = None
     ) -> List[Tuple[Document, float]]:
         """相似度搜索并返回分数"""
-        self._load_embedding_model()
         query_vector = self._get_embedding(query)
         
         # 计算所有条目的相似度
@@ -331,13 +305,11 @@ class ChromaVectorStore(VectorStore):
             metadata={"hnsw:space": "cosine"}
         )
 
-        self._embedding_fn = None
-        if HAS_SENTENCE_TRANSFORMERS:
-            self._embedding_fn = SentenceTransformer("all-MiniLM-L6-v2")
+        # 不注入外部嵌入模型（sentence-transformers 已移除：numpy 版本冲突），
+        # 使用 ChromaDB 默认 embedding function
 
     def _embed(self, texts: List[str]) -> Optional[List[List[float]]]:
-        if self._embedding_fn:
-            return self._embedding_fn.encode(texts, show_progress_bar=False).tolist()
+        # 返回 None → ChromaDB 使用其内置默认 embedding function
         return None
 
     def add_documents(self, documents: List[Document]) -> List[str]:

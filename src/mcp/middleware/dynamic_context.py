@@ -1,69 +1,28 @@
-import datetime
 import logging
 from typing import Any, Dict, List, Optional
 
-from .base import AgentMiddleware, MiddlewareContext, MiddlewareResult, MiddlewareAction
+from .base import AgentMiddleware, MiddlewareContext, MiddlewareResult
 
 logger = logging.getLogger(__name__)
 
 
 class DynamicContextMiddleware(AgentMiddleware):
+    """动态上下文中间件（不再注入伪消息）
+
+    历史版本会把 `<system-reminder>`（日期/记忆）包装成 role=user 伪消息插入
+    消息流，污染真实用户消息——这是前端收到 `[7] role=user content='<system-reminder>...'`
+    的根源。
+
+    该能力已迁移到 system 消息注入：
+    - 日期 → ContextProvider Others 层（context_provider.py collect_others 环境信息段落）
+    - 记忆 → agent.py MEMORY_CONTEXT 段落
+
+    before_agent 保持空实现仅作占位，不修改消息，避免破坏 middleware 链注册结构。
+    """
+
     name = "dynamic_context"
     order = 9
 
-    def __init__(self, memory_provider: Optional[Any] = None):
-        self.memory_provider = memory_provider
-        self._last_injection_date: Dict[str, str] = {}
-
     def before_agent(self, messages: List[Dict[str, Any]], context: MiddlewareContext) -> MiddlewareResult:
-        session_key = context.session_id or "default"
-        today = datetime.date.today().isoformat()
-        day_name = datetime.date.today().strftime("%A")
-        date_str = f"{today}, {day_name}"
-
-        parts = []
-
-        memory_content = self._get_memory_content(session_key)
-        if memory_content:
-            parts.append(f"<memory>\n{memory_content}\n</memory>")
-
-        last_date = self._last_injection_date.get(session_key)
-        if last_date != today:
-            parts.append(f"<current_date>{date_str}</current_date>")
-            self._last_injection_date[session_key] = today
-
-        if not parts:
-            return MiddlewareResult()
-
-        reminder = "<system-reminder>\n" + "\n".join(parts) + "\n</system-reminder>"
-
-        current = list(messages)
-        for i, msg in enumerate(current):
-            if msg.get("role") == "user" and msg.get("content"):
-                original_id = msg.get("id", f"msg_{i}")
-                reminder_msg = {"role": "user", "content": reminder, "id": original_id}
-                user_msg = {
-                    "role": "user",
-                    "content": msg["content"],
-                    "id": f"{original_id}__user",
-                }
-                current[i] = reminder_msg
-                current.insert(i + 1, user_msg)
-                break
-
-        return MiddlewareResult(
-            action=MiddlewareAction.MODIFY,
-            modified_messages=current,
-        )
-
-    def _get_memory_content(self, session_key: str) -> str:
-        if self.memory_provider is None:
-            return ""
-        try:
-            if hasattr(self.memory_provider, "get_relevant"):
-                return self.memory_provider.get_relevant(session_key)
-            if hasattr(self.memory_provider, "get"):
-                return str(self.memory_provider.get(session_key, ""))
-        except Exception as e:
-            logger.error(f"DynamicContext: memory error: {e}")
-        return ""
+        # 不再生成 role=user 伪消息：日期/记忆均由 system 消息注入（见类注释）
+        return MiddlewareResult()

@@ -92,13 +92,23 @@ class WS2BaseTool(Tool):
         return paths
 
     def _get_courses_file_path(self) -> Path:
-        """获取课程JSON文件路径 - 用于写操作，优先系统目录"""
+        """获取课程JSON文件路径 - 优先用户目录，回退程序目录（与 course_tracker.py 一致）
+
+        - 读操作：返回真实存在的文件（用户目录优先，否则程序目录）
+        - 写操作：用户目录有文件则写用户目录；用户目录无文件但程序目录有，
+          回退到程序目录（避免写入空文件导致数据脱节）；两者都没有时返回
+          用户目录路径（由调用方的 p.exists() 判断报错或创建）
+        """
         ts2_dir = Path.home() / ".ts2"
         ts2_dir.mkdir(parents=True, exist_ok=True)
         user_path = ts2_dir / "courses_structured.json"
         program_path = Path(__file__).parent.parent / "courses_structured.json"
-        
-        # 优先返回系统目录路径（写操作应写入用户目录）
+
+        if user_path.exists():
+            return user_path
+        if program_path.exists():
+            return program_path
+        # 都不存在：默认用户目录（写时可创建，读时由调用方报"文件不存在"）
         return user_path
 
     def _get_all_file_paths(self, filename: str) -> List[Path]:
@@ -642,7 +652,7 @@ class MarkLessonCompleteTool(WS2BaseTool):
             if not course:
                 return self._make_result(False, {}, error=f"未找到课程：{course_id}")
 
-            self.ws2_system.mark_lesson_complete(course_id, lesson_number)
+            self.ws2_system.complete_lesson(course_id, lesson_number)
             self.ws2_system.update_review_schedule(course_id, lesson_number, workload)
 
             title = course.get("course_title", "")

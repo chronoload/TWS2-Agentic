@@ -11,7 +11,7 @@ import re
 import logging
 from typing import List, Dict, Any, Optional, Set
 
-from .tools import Tool
+from .tools import Tool, get_loaded_tool_groups
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +19,7 @@ logger = logging.getLogger(__name__)
 # ── 前缀 → 分组规则 ────────────────────────────────────
 # 工具名前缀匹配，自动将工具归入对应组
 PREFIX_GROUP_RULES: List[Dict[str, Any]] = [
-    # WS2 基本工具
-    {
-        "prefix": "ws2_",
-        "group": "ws2",
-        "label": "WS2 基本组",
-        "always_active": True,
-        "keywords": [],
-    },
-    # DataHub 工具
+    # DataHub 工具（须在 ws2_ 之前：ws2_hub_* 同时匹配 ws2_ 前缀，先匹配更具体的）
     {
         "prefix": "ws2_hub_",
         "group": "datahub",
@@ -35,6 +27,14 @@ PREFIX_GROUP_RULES: List[Dict[str, Any]] = [
         "always_active": False,
         "keywords": ["hub", "rss", "爬取", "爬虫", "数据枢纽", "数据收集",
                       "crawl", "scrape", "订阅", "collection", "管道", "pipeline"],
+    },
+    # WS2 基本工具
+    {
+        "prefix": "ws2_",
+        "group": "ws2",
+        "label": "WS2 基本组",
+        "always_active": True,
+        "keywords": [],
     },
     # Scholar 工具
     {
@@ -226,6 +226,33 @@ PREFIX_GROUP_RULES: List[Dict[str, Any]] = [
     },
 ]
 
+# ── 工具组可用性检查 ──────────────────────────────────
+# 根据 _LOADED_TOOL_GROUPS 检查哪些组实际有工具加载
+# 组名别名：_classify_tool 产生的组名 → _LOADED_TOOL_GROUPS 记录名
+GROUP_ALIASES = {
+    "datahub_pro": "datahub",
+    "datahub_core": "datahub",
+    "mcp_service": "mcp_service",
+}
+
+
+def _has_loaded_tools(group_name: str) -> bool:
+    """检查组是否有实际加载的工具"""
+    groups = get_loaded_tool_groups()
+    # 解析别名（如 datahub_pro → datahub）
+    lookup = GROUP_ALIASES.get(group_name, group_name)
+    info = groups.get(lookup)
+    if info is None:
+        # 未在 get_tools() 中注册的组（如 ws2），默认认为有工具
+        return True
+    return info.get("count", 0) > 0
+
+
+def _get_available_prefix_rules() -> List[Dict[str, Any]]:
+    """返回有实际工具加载的前缀规则列表"""
+    return [rule for rule in PREFIX_GROUP_RULES if _has_loaded_tools(rule["group"])]
+
+
 # 核心工具名（始终发送）— 不依赖前缀，显式列出
 CORE_TOOL_NAMES = {
     # 文件操作
@@ -250,11 +277,15 @@ CORE_TOOL_NAMES = {
     "session_manage",
     # 子Agent
     "sub_agent",
+    # 工作流（声明式多步骤编排：define/start/status/pause/resume/cancel/list/logs/step_results）
+    "workflow",
     # 工具组激活（LLM 主动激活专业工具组）
     "activate_tool_group",
     # 服务端工具（操作 Web 前端，全端可用）
     "ensure_server", "open_in_editor", "list_server_files", "read_server_file",
     "write_server_file", "switch_panel", "navigate_source",
+    # macdev 机器驱动开发库（audit/plan/log/requirement/dev/project/patch/doc，取代 plan_cli）
+    "macdev",
 }
 
 # DataHub 高频工具（始终发送）
@@ -298,17 +329,19 @@ def _classify_tool(tool_name: str) -> str:
 
 
 def _get_group_keywords(group_name: str) -> List[str]:
-    """获取组的激活关键词"""
+    """获取组的激活关键词（支持别名，如 datahub_pro → datahub）"""
+    lookup = GROUP_ALIASES.get(group_name, group_name)
     for rule in PREFIX_GROUP_RULES:
-        if rule["group"] == group_name:
+        if rule["group"] == lookup:
             return rule.get("keywords", [])
     return []
 
 
 def _get_group_label(group_name: str) -> str:
-    """获取组的显示标签"""
+    """获取组的显示标签（支持别名）"""
+    lookup = GROUP_ALIASES.get(group_name, group_name)
     for rule in PREFIX_GROUP_RULES:
-        if rule["group"] == group_name:
+        if rule["group"] == lookup:
             return rule.get("label", group_name)
     labels = {
         "core": "核心工具",
@@ -382,6 +415,8 @@ class ToolGroupManager:
                 continue
             if group_name in ("core", "ws2", "datahub_core", "other"):
                 continue  # 始终活跃的组无需激活
+            if not _has_loaded_tools(group_name):
+                continue  # 无实际工具的组不参与意图激活
 
             keywords = _get_group_keywords(group_name)
             for kw in keywords:
@@ -412,8 +447,13 @@ class ToolGroupManager:
                     matched = existing_group
                     break
             if matched is None:
+                # 只列出实际有加载工具的组（不广告空组）
+                available_groups = [
+                    g for g in sorted(self._group_tools)
+                    if g in ("core", "ws2", "datahub_core", "other") or _has_loaded_tools(g)
+                ]
                 available = ", ".join(
-                    f"{g}({_get_group_label(g)})" for g in sorted(self._group_tools)
+                    f"{g}({_get_group_label(g)})" for g in available_groups
                 )
                 return {
                     "success": False,
@@ -433,6 +473,17 @@ class ToolGroupManager:
             name for name in self._group_tools.get(group_name, set())
             if name in self._all_tools
         ]
+
+        # 组存在但没有任何实际加载的工具（依赖缺失）→ 明确失败反馈
+        if not available_tools and not _has_loaded_tools(group_name):
+            return {
+                "success": False,
+                "error": f"工具组 {group_name} ({_get_group_label(group_name)}) 当前不可用：依赖未安装或加载失败",
+                "group": group_name,
+                "label": _get_group_label(group_name),
+                "tools_count": 0,
+                "tools": [],
+            }
 
         return {
             "success": True,
@@ -464,8 +515,8 @@ class ToolGroupManager:
         # 3. DataHub 高频组（始终发送）
         active_names.update(self._group_tools.get("datahub_core", set()))
 
-        # 3.5 始终活跃的组（always_active=True 的前缀规则）
-        for rule in PREFIX_GROUP_RULES:
+        # 3.5 始终活跃的组（always_active=True 的前缀规则，仅包含有实际工具的组）
+        for rule in _get_available_prefix_rules():
             if rule.get("always_active"):
                 group = rule["group"]
                 active_names.update(self._group_tools.get(group, set()))
@@ -491,8 +542,8 @@ class ToolGroupManager:
         active_names.update(self._group_tools.get("core", set()))
         active_names.update(self._group_tools.get("ws2", set()))
         active_names.update(self._group_tools.get("datahub_core", set()))
-        # 始终活跃的组
-        for rule in PREFIX_GROUP_RULES:
+        # 始终活跃的组（仅包含有实际工具的组）
+        for rule in _get_available_prefix_rules():
             if rule.get("always_active"):
                 active_names.update(self._group_tools.get(rule["group"], set()))
         for group_name in self._activated_groups:
@@ -516,11 +567,13 @@ class ToolGroupManager:
 
         for group_name, tool_names in self._group_tools.items():
             existing = [n for n in tool_names if n in self._all_tools]
+            has_tools = _has_loaded_tools(group_name) if group_name not in ("core", "ws2", "datahub_core", "other") else True
             status[group_name] = {
                 "label": _get_group_label(group_name),
                 "activated": group_name in self._activated_groups or group_name in ("core", "ws2", "datahub_core", "other"),
                 "total": len(existing),
                 "tools": existing,
+                "has_loaded_tools": has_tools,
             }
 
         # 统计

@@ -93,6 +93,7 @@
       </div>
     </template>
 
+    <ExtractionDebug :data="rawResult" />
     <div v-if="error" class="error-panel">
       <div class="error-header" @click="showRaw = !showRaw">
         <span class="err-icon">⚠️</span>
@@ -122,9 +123,10 @@ import { useSubscriptionsStore } from '../stores/subscriptions'
 import { usePlayQueueStore } from '../stores/playQueue'
 import { debugToast } from '../utils/error'
 import { pushDebugLog } from '../api'
-import PipePipe, { api, extractNextPage } from '../plugins/bridge'
-import type { ChannelInfoResult, ChannelTabInfoResult, StreamInfoItem, Page } from '../plugins/bridge'
+import { api, extractNextPage } from '../plugins/bridge'
+import type { ChannelInfoResult, ChannelTabInfoResult, StreamInfoItem, Page } from '../types/extraction'
 import VideoCard from '../components/VideoCard.vue'
+import ExtractionDebug from '../components/debug/ExtractionDebug.vue'
 import { proxyImageUrl } from '../extractor/BilibiliImageProxy'
 
 function proxied(url: string | undefined | null): string { return proxyImageUrl(url || '') }

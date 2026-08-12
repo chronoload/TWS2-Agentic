@@ -52,7 +52,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
-import type { StreamInfoResult, VideoStreamInfo, AudioStreamInfo, SubtitlesStreamInfo } from '../plugins/bridge'
+import type { StreamInfoResult, VideoStreamInfo, AudioStreamInfo, SubtitlesStreamInfo } from '../types/extraction'
 import { getDefaultVideoIndex, getDefaultAudioIndex, getStreamLabel as selectorLabel } from '../utils/streamSelector'
 
 const props = defineProps<{

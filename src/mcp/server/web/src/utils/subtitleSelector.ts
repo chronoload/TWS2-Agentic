@@ -1,4 +1,4 @@
-import type { SubtitlesStreamInfo } from '../plugins/bridge'
+import type { SubtitlesStreamInfo } from '../types/extraction'
 
 export function getSubtitleIndexBy(
   subtitles: SubtitlesStreamInfo[],

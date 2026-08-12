@@ -15,6 +15,15 @@ import json
 
 logger = logging.getLogger(__name__)
 
+from ..event_stream import emit as _emit_event
+
+try:
+    from ..skill_system import Skill, SkillCategory, SecurityScanner, ScanResult, Curator, SkillStatus
+    from ..skill_system import filter_tools_by_skill_allowed_tools
+    HAS_SKILL_SYSTEM = True
+except ImportError:
+    HAS_SKILL_SYSTEM = False
+
 
 @dataclass
 class SkillParameter:
@@ -49,58 +58,33 @@ class SkillRegistry:
     def __init__(self):
         self._skills: Dict[str, SkillDefinition] = {}
         self._loaded_modules = set()
-        self._skill_directory = Path(__file__).parent.parent.parent / "custom_skills"
+        self._skill_directory = Path(__file__).parent.parent / "custom_skills"
         self._skill_directory.mkdir(exist_ok=True)
-        self._load_builtin_skills()
 
-    def _load_builtin_skills(self):
-        """加载内置技能"""
-        # 基础示例技能
-        self.register_skill(SkillDefinition(
-            name="hello_world",
-            description="向世界问好的简单技能",
-            parameters=[
-                SkillParameter(name="name", description="名字", default="World")
-            ],
-            category="example",
-            handler=lambda **kwargs: f"Hello, {kwargs.get('name', 'World')}!"
-        ))
+        self._security_scanner = SecurityScanner() if HAS_SKILL_SYSTEM else None
+        self._curator = None
+        if HAS_SKILL_SYSTEM:
+            try:
+                skills_dir = Path(__file__).parent.parent / "skills"
+                self._curator = Curator(skills_dir)
+            except Exception as e:
+                logger.warning(f"Curator初始化失败: {e}")
 
-        self.register_skill(SkillDefinition(
-            name="calculate",
-            description="简单的数学计算",
-            parameters=[
-                SkillParameter(name="expression", description="数学表达式", required=True)
-            ],
-            category="math",
-            handler=self._calculate_handler
-        ))
-
-        logger.info("Loaded built-in skills")
-
-    def _calculate_handler(self, **kwargs):
-        """计算处理函数"""
-        try:
-            expression = kwargs.get('expression', '')
-            # 安全的计算，只允许基本操作
-            allowed_chars = set("0123456789+-*/(). ")
-            if not all(c in allowed_chars for c in expression):
-                return "错误：表达式包含不允许的字符"
-            result = eval(expression, {"__builtins__": {}}, {})
-            return str(result)
-        except Exception as e:
-            return f"计算错误：{str(e)}"
+        # B 类硬编码技能（hello_world/calculate）已迁移至 mcp/tools.py 工具体系
+        # （calculate 即 CalculateTool）；本注册表只面向 A 类文本技能（SKILL.md）。
 
     def register_skill(self, skill: SkillDefinition):
         """注册技能"""
         self._skills[skill.name] = skill
         logger.debug(f"Registered skill: {skill.name}")
+        _emit_event("skill.registry.changed", {"action": "register", "name": skill.name})
 
     def unregister_skill(self, name: str):
         """取消注册技能"""
         if name in self._skills:
             del self._skills[name]
             logger.debug(f"Unregistered skill: {name}")
+            _emit_event("skill.registry.changed", {"action": "unregister", "name": name})
 
     def get_skill(self, name: str) -> Optional[SkillDefinition]:
         """获取技能"""
@@ -136,10 +120,24 @@ class SkillRegistry:
             return skill.handler(**kwargs)
 
     def load_skill_from_file(self, file_path: Path) -> bool:
-        """从文件加载技能"""
         if not file_path.exists():
             logger.error(f"File not found: {file_path}")
             return False
+
+        if self._security_scanner:
+            try:
+                scan_result = self._security_scanner.scan_content(
+                    file_path.read_text(encoding="utf-8", errors="ignore"),
+                    name=file_path.name,
+                )
+                if not scan_result.passed:
+                    logger.warning(f"Skill安全扫描未通过: {file_path.name}")
+                    for finding in scan_result.findings:
+                        if finding.severity.value == "critical":
+                            logger.error(f"  CRITICAL: {finding.message} (L{finding.line_number})")
+                    return False
+            except Exception as e:
+                logger.warning(f"Skill安全扫描异常: {e}")
         
         try:
             # 动态加载模块
@@ -196,15 +194,70 @@ class SkillRegistry:
             except Exception as e:
                 logger.error(f"Failed to load skill from {py_file}: {e}")
 
+    def create_custom_skill(
+        self, name: str, description: str, parameters: List[SkillParameter],
+        code: str, category: str = "custom", version: str = "1.0.0",
+        tags: List[str] = None,
+    ) -> Optional[SkillDefinition]:
+        """创建自定义技能（B 类脚本式：动态生成 skill_xxx Python 文件并加载）。"""
+        skill_code = f'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+{description}
+"""
+
+def skill_{name}(**kwargs):
+    """{description}"""
+    try:
+        {code}
+    except Exception as e:
+        return f"错误: {{str(e)}}"
+
+SKILL_NAME = "{name}"
+SKILL_DESCRIPTION = "{description}"
+SKILL_VERSION = "{version}"
+SKILL_CATEGORY = "{category}"
+SKILL_TAGS = {tags or []}
+'''
+        skill_dir = Path(__file__).resolve().parent.parent / "custom_skills"
+        skill_dir.mkdir(exist_ok=True)
+        skill_file = skill_dir / f"{name}.py"
+        skill_file.write_text(skill_code, encoding="utf-8")
+        if not self.load_skill_from_file(skill_file):
+            logger.error(f"自定义技能加载失败: {name}")
+            return None
+        return self.get_skill(name)
+
+    def import_skill(self, import_path: Path) -> Optional[SkillDefinition]:
+        """从 JSON 文件导入技能定义（仅元数据，无执行代码）。"""
+        try:
+            if not import_path.exists():
+                logger.error(f"导入文件不存在: {import_path}")
+                return None
+            data = json.loads(import_path.read_text(encoding="utf-8"))
+            parameters = [SkillParameter(
+                name=p.get("name", ""), type=p.get("type", "str"),
+                description=p.get("description", ""), required=p.get("required", True),
+                default=p.get("default"), enum=p.get("enum"))
+                for p in data.get("parameters", [])]
+            skill = SkillDefinition(
+                name=data.get("name", ""), description=data.get("description", ""),
+                parameters=parameters, category=data.get("category", "custom"),
+                version=data.get("version", "1.0.0"), tags=data.get("tags", []),
+                handler=None)
+            self.register_skill(skill)
+            logger.info(f"已导入技能: {skill.name}")
+            return skill
+        except Exception as e:
+            logger.error(f"导入技能失败: {e}")
+            return None
+
     def export_skill(self, name: str, export_path: Path) -> bool:
-        """导出技能到文件"""
         skill = self.get_skill(name)
         if not skill:
             logger.error(f"Skill not found: {name}")
             return False
-        
         try:
-            # 导出基本信息
             export_data = {
                 'name': skill.name,
                 'description': skill.description,
@@ -230,6 +283,33 @@ class SkillRegistry:
         except Exception as e:
             logger.error(f"Failed to export skill: {e}")
         return False
+
+    def scan_skill_dir(self, skill_dir: Path) -> Optional[Any]:
+        if not HAS_SKILL_SYSTEM:
+            return None
+        try:
+            skill = Skill.from_skill_md(skill_dir)
+            if skill and self._security_scanner:
+                scan_result = self._security_scanner.scan_skill(skill_dir)
+                return scan_result
+        except Exception as e:
+            logger.error(f"Skill扫描失败: {e}")
+        return None
+
+    def run_curator(self) -> List[Any]:
+        if self._curator:
+            return self._curator.maybe_run_curator()
+        return []
+
+    def record_skill_access(self, skill_name: str):
+        if self._curator:
+            self._curator.record_access(skill_name)
+
+    def filter_tools(self, tools: List[Dict[str, Any]], active_skills: List[str] = None) -> List[Dict[str, Any]]:
+        if not HAS_SKILL_SYSTEM or not active_skills:
+            return tools
+        skill_objs = [self._skills.get(s) for s in active_skills if s in self._skills]
+        return filter_tools_by_skill_allowed_tools(tools, skill_objs)
 
 
 # 全局注册表
