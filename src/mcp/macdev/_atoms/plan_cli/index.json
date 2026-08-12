@@ -1,0 +1,310 @@
+{
+  "source": "mcp\\plan_cli.py",
+  "atoms": [
+    {
+      "name": "_connect",
+      "line": 47,
+      "file": "0047__connect.py"
+    },
+    {
+      "name": "_migrate",
+      "line": 90,
+      "file": "0090__migrate.py"
+    },
+    {
+      "name": "_req_status_map",
+      "line": 109,
+      "file": "0109__req_status_map.py"
+    },
+    {
+      "name": "_load_defects",
+      "line": 126,
+      "file": "0126__load_defects.py"
+    },
+    {
+      "name": "cmd_defect_list",
+      "line": 185,
+      "file": "0185_cmd_defect_list.py"
+    },
+    {
+      "name": "_resolve_req",
+      "line": 200,
+      "file": "0200__resolve_req.py"
+    },
+    {
+      "name": "_status_icon",
+      "line": 217,
+      "file": "0217__status_icon.py"
+    },
+    {
+      "name": "_unescape",
+      "line": 221,
+      "file": "0221__unescape.py"
+    },
+    {
+      "name": "cmd_create",
+      "line": 228,
+      "file": "0228_cmd_create.py"
+    },
+    {
+      "name": "cmd_list",
+      "line": 240,
+      "file": "0240_cmd_list.py"
+    },
+    {
+      "name": "cmd_update",
+      "line": 254,
+      "file": "0254_cmd_update.py"
+    },
+    {
+      "name": "cmd_task_add",
+      "line": 275,
+      "file": "0275_cmd_task_add.py"
+    },
+    {
+      "name": "cmd_task_list",
+      "line": 289,
+      "file": "0289_cmd_task_list.py"
+    },
+    {
+      "name": "cmd_task_update",
+      "line": 307,
+      "file": "0307_cmd_task_update.py"
+    },
+    {
+      "name": "cmd_task_delete",
+      "line": 329,
+      "file": "0329_cmd_task_delete.py"
+    },
+    {
+      "name": "cmd_step_add",
+      "line": 340,
+      "file": "0340_cmd_step_add.py"
+    },
+    {
+      "name": "cmd_step_list",
+      "line": 355,
+      "file": "0355_cmd_step_list.py"
+    },
+    {
+      "name": "cmd_step_update",
+      "line": 369,
+      "file": "0369_cmd_step_update.py"
+    },
+    {
+      "name": "cmd_step_delete",
+      "line": 390,
+      "file": "0390_cmd_step_delete.py"
+    },
+    {
+      "name": "cmd_delete",
+      "line": 400,
+      "file": "0400_cmd_delete.py"
+    },
+    {
+      "name": "cmd_defect_gen_test",
+      "line": 413,
+      "file": "0413_cmd_defect_gen_test.py"
+    },
+    {
+      "name": "_chain_connect",
+      "line": 488,
+      "file": "0488__chain_connect.py"
+    },
+    {
+      "name": "_chain_product_hint",
+      "line": 498,
+      "file": "0498__chain_product_hint.py"
+    },
+    {
+      "name": "cmd_chain_stats",
+      "line": 507,
+      "file": "0507_cmd_chain_stats.py"
+    },
+    {
+      "name": "cmd_chain_issues",
+      "line": 524,
+      "file": "0524_cmd_chain_issues.py"
+    },
+    {
+      "name": "cmd_chain_endpoints",
+      "line": 592,
+      "file": "0592_cmd_chain_endpoints.py"
+    },
+    {
+      "name": "cmd_chain_models",
+      "line": 634,
+      "file": "0634_cmd_chain_models.py"
+    },
+    {
+      "name": "cmd_chain_drifts",
+      "line": 669,
+      "file": "0669_cmd_chain_drifts.py"
+    },
+    {
+      "name": "cmd_chain_tables",
+      "line": 688,
+      "file": "0688_cmd_chain_tables.py"
+    },
+    {
+      "name": "_openspec_exe",
+      "line": 715,
+      "file": "0715__openspec_exe.py"
+    },
+    {
+      "name": "_run_openspec",
+      "line": 720,
+      "file": "0720__run_openspec.py"
+    },
+    {
+      "name": "_parse_openspec_json",
+      "line": 730,
+      "file": "0730__parse_openspec_json.py"
+    },
+    {
+      "name": "_openspec_change_root",
+      "line": 737,
+      "file": "0737__openspec_change_root.py"
+    },
+    {
+      "name": "cmd_openspec_list",
+      "line": 745,
+      "file": "0745_cmd_openspec_list.py"
+    },
+    {
+      "name": "cmd_openspec_status",
+      "line": 763,
+      "file": "0763_cmd_openspec_status.py"
+    },
+    {
+      "name": "cmd_openspec_import",
+      "line": 794,
+      "file": "0794_cmd_openspec_import.py"
+    },
+    {
+      "name": "cmd_openspec_export",
+      "line": 848,
+      "file": "0848_cmd_openspec_export.py"
+    },
+    {
+      "name": "cmd_openspec_sync_specs",
+      "line": 892,
+      "file": "0892_cmd_openspec_sync_specs.py"
+    },
+    {
+      "name": "cmd_tdd_check",
+      "line": 944,
+      "file": "0944_cmd_tdd_check.py"
+    },
+    {
+      "name": "cmd_verify",
+      "line": 1004,
+      "file": "1004_cmd_verify.py"
+    },
+    {
+      "name": "cmd_ledger",
+      "line": 1081,
+      "file": "1081_cmd_ledger.py"
+    },
+    {
+      "name": "cmd_review",
+      "line": 1143,
+      "file": "1143_cmd_review.py"
+    },
+    {
+      "name": "cmd_dispatch",
+      "line": 1198,
+      "file": "1198_cmd_dispatch.py"
+    },
+    {
+      "name": "_defect_status_map",
+      "line": 1307,
+      "file": "1307__defect_status_map.py"
+    },
+    {
+      "name": "_render_table",
+      "line": 1313,
+      "file": "1313__render_table.py"
+    },
+    {
+      "name": "_resolve_defect",
+      "line": 1337,
+      "file": "1337__resolve_defect.py"
+    },
+    {
+      "name": "_render_writing_plans",
+      "line": 1348,
+      "file": "1348__render_writing_plans.py"
+    },
+    {
+      "name": "cmd_export",
+      "line": 1431,
+      "file": "1431_cmd_export.py"
+    },
+    {
+      "name": "_build_parser",
+      "line": 1483,
+      "file": "1483__build_parser.py"
+    },
+    {
+      "name": "_arg_help",
+      "line": 1647,
+      "file": "1647__arg_help.py"
+    },
+    {
+      "name": "_choice_help",
+      "line": 1663,
+      "file": "1663__choice_help.py"
+    },
+    {
+      "name": "_doc_walk",
+      "line": 1671,
+      "file": "1671__doc_walk.py"
+    },
+    {
+      "name": "_reflect_db_schema",
+      "line": 1694,
+      "file": "1694__reflect_db_schema.py"
+    },
+    {
+      "name": "_reflect_dispatch_map",
+      "line": 1717,
+      "file": "1717__reflect_dispatch_map.py"
+    },
+    {
+      "name": "_reflect_tdd_rules",
+      "line": 1743,
+      "file": "1743__reflect_tdd_rules.py"
+    },
+    {
+      "name": "_reflect_constants",
+      "line": 1756,
+      "file": "1756__reflect_constants.py"
+    },
+    {
+      "name": "cmd_doc",
+      "line": 1767,
+      "file": "1767_cmd_doc.py"
+    },
+    {
+      "name": "_dispatch",
+      "line": 1883,
+      "file": "1883__dispatch.py"
+    },
+    {
+      "name": "_publish_plan_cli_doc",
+      "line": 1932,
+      "file": "1932__publish_plan_cli_doc.py"
+    },
+    {
+      "name": "_auto_refresh_docs",
+      "line": 1960,
+      "file": "1960__auto_refresh_docs.py"
+    },
+    {
+      "name": "main",
+      "line": 1989,
+      "file": "1989_main.py"
+    }
+  ]
+}
