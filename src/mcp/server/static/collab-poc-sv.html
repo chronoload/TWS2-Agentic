@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SV 协同试验 · Vditor + Loro</title>
+<link rel="stylesheet" href="/static/vditor/index.css">
+<style>
+  body { margin:0; font-family: system-ui, -apple-system, sans-serif; background:#0f1115; color:#e6e6e6; }
+  #bar { display:flex; align-items:center; gap:14px; padding:8px 14px; border-bottom:1px solid #333; font-size:13px; background:#16181d; }
+  #bar button { background:#2b2f36; color:#e6e6e6; border:1px solid #444; border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
+  #bar button:hover { background:#3a3f47; }
+  .net-dot { width:9px; height:9px; border-radius:50%; background:#22c55e; display:inline-block; }
+  .net-dot.off { background:#ef4444; }
+  .cols { display:flex; height:calc(100vh - 168px); }
+  .col { flex:1; display:flex; flex-direction:column; min-width:0; border-right:1px solid #333; }
+  .col:last-child { border-right:none; }
+  .col-head { padding:6px 12px; font-size:12px; color:#aaa; border-bottom:1px solid #333; background:#16181d; display:flex; gap:10px; align-items:center; }
+  .col-head b { color:#7dd3fc; }
+  .peer-dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+  .col-body { flex:1; overflow:hidden; }
+  #log { height:110px; overflow:auto; border-top:1px solid #333; padding:6px 12px; font:12px/1.6 Consolas, Menlo, monospace; color:#9ca3af; background:#0b0d10; white-space:pre-wrap; word-break:break-all; }
+  .lg-ok { color:#6ee7b7; }
+  .lg-warn { color:#fcd34d; }
+  .lg-err { color:#fca5a5; }
+  .hint { margin-left:auto; color:#667; font-size:12px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span class="net-dot" id="netDot"></span>
+  <span>虚拟网络 A ⇄ B</span>
+  <span>update 转发：<b id="updCount">0</b></span>
+  <span>远端应用：<b id="appCount">0</b></span>
+  <button id="btnReset">重置初始文本</button>
+  <button id="btnClearLog">清日志</button>
+  <span class="hint">左右两边是同一文件的"两个副本"，各绑一个 LoroDoc。任意一边输入，另一边应实时同步。</span>
+</div>
+<div class="cols">
+  <div class="col">
+    <div class="col-head"><span class="peer-dot" style="background:#7dd3fc"></span>实例 <b>A</b> — Loro docA</div>
+    <div class="col-body"><div id="vdA"></div></div>
+  </div>
+  <div class="col">
+    <div class="col-head"><span class="peer-dot" style="background:#f0abfc"></span>实例 <b>B</b> — Loro docB</div>
+    <div class="col-body"><div id="vdB"></div></div>
+  </div>
+</div>
+<div id="log"></div>
+
+<script src="/static/vditor/js/katex/katex.min.js"></script>
+<script src="/static/vditor/index.min.js"></script>
+<script type="module" src="/static/collab/collab-poc-sv.js"></script>
+</body>
+</html>
