@@ -1,0 +1,7 @@
+name: summarize-tool
+version: 1.0.0
+description: "文本摘要工具 — 统计分析、关键词提取、结构化摘要"
+author: TS2
+kind: backend
+provides_tools:
+  - summarize_tool

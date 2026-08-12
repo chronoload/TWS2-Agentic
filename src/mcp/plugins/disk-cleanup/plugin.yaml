@@ -1,0 +1,8 @@
+name: disk-cleanup
+version: 2.0.0
+description: "自动追踪和清理临时文件（测试脚本、临时输出、日志）。通过插件钩子运行，无需Agent操作。"
+author: TS2 (adapted from Hermes)
+kind: standalone
+hooks:
+  - post_tool_call
+  - on_session_end
