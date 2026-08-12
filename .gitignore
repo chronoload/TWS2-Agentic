@@ -46,6 +46,15 @@ temp/
 logs/
 *.db
 
+# TRAE HTML 分享包
+.trae-html-share-packages/
+
+# 参考项目 (克隆的第三方仓库)
+references/
+
+# 导出补丁
+export_patch/
+
 # 数据文件
 *.jsonl
 *.checkpoint

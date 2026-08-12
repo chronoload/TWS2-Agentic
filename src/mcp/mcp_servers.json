@@ -1,0 +1,103 @@
+{
+  "servers": {
+    "bocha-search": {
+      "service_type": "rest",
+      "url": "https://api.bocha.cn/v1/web-search",
+      "method": "POST",
+      "headers": {
+        "Authorization": "Bearer ${BOCHA_API_KEY}",
+        "Content-Type": "application/json"
+      },
+      "enabled": true,
+      "description": "博查AI搜索 - 从全网搜索网页信息和链接，结果准确、摘要完整，兼容Bing Search API格式",
+      "request_transform": "bocha_search",
+      "tools": [
+        {
+          "name": "bocha_search",
+          "description": "Search the web via Bocha AI Web Search API. Returns search results with titles, URLs, snippets and summaries. Compatible with Bing Search API format.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "搜索查询关键词或短语"
+              },
+              "count": {
+                "type": "integer",
+                "description": "搜索返回结果数量，范围1-50",
+                "default": 10
+              },
+              "freshness": {
+                "type": "string",
+                "description": "时间范围过滤：noLimit(不限)/oneDay/oneWeek/oneMonth/oneYear，或 YYYY-MM-DD..YYYY-MM-DD"
+              },
+              "summary": {
+                "type": "boolean",
+                "description": "是否显示文本摘要",
+                "default": true
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "api_key_env": "BOCHA_API_KEY",
+      "api_key_doc": "https://open.bocha.cn"
+    },
+    "baidu-search": {
+      "service_type": "rest",
+      "url": "https://qianfan.baidubce.com/v2/ai_search/web_search",
+      "method": "POST",
+      "headers": {
+        "Authorization": "Bearer ${BAIDU_API_KEY}",
+        "Content-Type": "application/json",
+        "X-Appbuilder-From": "openclaw"
+      },
+      "enabled": true,
+      "description": "百度千帆 AI 搜索 - 通过百度 AI Search API 搜索网络",
+      "request_transform": "baidu_search",
+      "tools": [
+        {
+          "name": "baidu_search",
+          "description": "Search the web via Baidu AI Search API. Returns search results with titles, URLs, and content snippets.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "搜索查询关键词或短语"
+              },
+              "count": {
+                "type": "integer",
+                "description": "搜索返回结果数量，范围1-50",
+                "default": 10
+              },
+              "freshness": {
+                "type": "string",
+                "description": "指定搜索日期范围。格式一：YYYY-MM-DDtoYYYY-MM-DD；格式二：pd(24h)/pw(7d)/pm(31d)/py(365d)"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "api_key_env": "BAIDU_API_KEY",
+      "api_key_doc": "https://console.bce.baidu.com/ai-search/qianfan/ais/console/apiKey"
+    },
+    "lexiang": {
+      "service_type": "mcp",
+      "url": "https://mcp.lexiang-app.com/mcp?company_from=${COMPANY_FROM}",
+      "transport": "http",
+      "headers": {
+        "Authorization": "Bearer ${LEXIANG_TOKEN}"
+      },
+      "enabled": true,
+      "description": "乐享知识库 MCP 服务（原 mcp/skills/lexiang-knowledge-base 与 tencent-yunzhi 技能目录内 mcp.json 统一注册，技能包内 mcp.json 保留为外部客户端配置模板）",
+      "tools": []
+    }
+  }
+}

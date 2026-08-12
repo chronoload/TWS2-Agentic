@@ -538,10 +538,40 @@
             <div style="border-bottom:1px solid var(--border);padding-bottom:6px">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
                 <span style="font-size:10px;font-weight:600;color:var(--fg-muted)">运行实例</span>
-                <button onclick="workflowRefreshInstances()" style="background:transparent;color:var(--fg-muted);border:none;font-size:9px;cursor:pointer;padding:1px 4px">刷新</button>
+                <div style="display:flex;gap:3px;align-items:center">
+                  <button onclick="workflowRefreshInstances()" style="background:transparent;color:var(--fg-muted);border:none;font-size:9px;cursor:pointer;padding:1px 4px">刷新</button>
+                  <button id="workflowViewToggle" onclick="toggleWorkflowView()" style="background:var(--bg-tertiary);color:var(--fg);border:1px solid var(--border);border-radius:3px;padding:1px 6px;font-size:9px;cursor:pointer">看板</button>
+                </div>
               </div>
               <div id="workflowInstList" style="display:flex;flex-direction:column;gap:3px">
                 <div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:6px">暂无实例</div>
+              </div>
+              <!-- 工作流实例看板视图（列表/看板可切换） -->
+              <div id="workflowKanban" class="kanban" style="display:none">
+                <div class="kanban-column" data-col="pending">
+                  <div class="kanban-column-header">
+                    <span style="color:var(--cyan)">●</span> 未开始 <span class="count">0</span>
+                  </div>
+                  <div class="kanban-column-body" data-col="pending"></div>
+                </div>
+                <div class="kanban-column" data-col="running">
+                  <div class="kanban-column-header">
+                    <span style="color:var(--yellow)">●</span> 进行中 <span class="count">0</span>
+                  </div>
+                  <div class="kanban-column-body" data-col="running"></div>
+                </div>
+                <div class="kanban-column" data-col="paused">
+                  <div class="kanban-column-header">
+                    <span style="color:var(--yellow)">●</span> 已暂停 <span class="count">0</span>
+                  </div>
+                  <div class="kanban-column-body" data-col="paused"></div>
+                </div>
+                <div class="kanban-column" data-col="archived">
+                  <div class="kanban-column-header">
+                    <span style="color:var(--green)">●</span> 归档 <span class="count">0</span>
+                  </div>
+                  <div class="kanban-column-body" data-col="archived"></div>
+                </div>
               </div>
             </div>
             <!-- 步骤详情 -->

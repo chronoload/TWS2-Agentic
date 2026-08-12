@@ -1,0 +1,718 @@
+{
+  "source": "C:\\Users\\qu\\Desktop\\物理科学与技术论题\\TS2\\mcp\\interface_chain_extractor.py",
+  "atoms": [
+    {
+      "name": "load_task",
+      "line": 48,
+      "group": "cli",
+      "file": "0048_load_task.py"
+    },
+    {
+      "name": "_apply_task",
+      "line": 56,
+      "group": "cli",
+      "file": "0056__apply_task.py"
+    },
+    {
+      "name": "_task_dir_files",
+      "line": 79,
+      "group": "cli",
+      "file": "0079__task_dir_files.py"
+    },
+    {
+      "name": "ModelField",
+      "line": 103,
+      "group": "core",
+      "file": "0103_ModelField.py"
+    },
+    {
+      "name": "RequestModel",
+      "line": 111,
+      "group": "core",
+      "file": "0111_RequestModel.py"
+    },
+    {
+      "name": "Endpoint",
+      "line": 120,
+      "group": "core",
+      "file": "0120_Endpoint.py"
+    },
+    {
+      "name": "ClientMethod",
+      "line": 134,
+      "group": "core",
+      "file": "0134_ClientMethod.py"
+    },
+    {
+      "name": "DataclassDef",
+      "line": 143,
+      "group": "core",
+      "file": "0143_DataclassDef.py"
+    },
+    {
+      "name": "Drift",
+      "line": 152,
+      "group": "core",
+      "file": "0152_Drift.py"
+    },
+    {
+      "name": "DefUseRead",
+      "line": 164,
+      "group": "core",
+      "file": "0164_DefUseRead.py"
+    },
+    {
+      "name": "DefUseWrite",
+      "line": 173,
+      "group": "core",
+      "file": "0173_DefUseWrite.py"
+    },
+    {
+      "name": "DefUseIssue",
+      "line": 182,
+      "group": "core",
+      "file": "0182_DefUseIssue.py"
+    },
+    {
+      "name": "BehaviorIssue",
+      "line": 199,
+      "group": "core",
+      "file": "0199_BehaviorIssue.py"
+    },
+    {
+      "name": "ChainBreakIssue",
+      "line": 214,
+      "group": "core",
+      "file": "0214_ChainBreakIssue.py"
+    },
+    {
+      "name": "HardcodedItem",
+      "line": 253,
+      "group": "core",
+      "file": "0253_HardcodedItem.py"
+    },
+    {
+      "name": "EnvVarItem",
+      "line": 262,
+      "group": "core",
+      "file": "0262_EnvVarItem.py"
+    },
+    {
+      "name": "DataPoolItem",
+      "line": 271,
+      "group": "core",
+      "file": "0271_DataPoolItem.py"
+    },
+    {
+      "name": "StaticResourceItem",
+      "line": 281,
+      "group": "core",
+      "file": "0281_StaticResourceItem.py"
+    },
+    {
+      "name": "_art",
+      "line": 323,
+      "group": "misc",
+      "file": "0323__art.py"
+    },
+    {
+      "name": "_unparse",
+      "line": 332,
+      "group": "misc",
+      "file": "0332__unparse.py"
+    },
+    {
+      "name": "_get_doc",
+      "line": 339,
+      "group": "misc",
+      "file": "0339__get_doc.py"
+    },
+    {
+      "name": "_extract_model_class",
+      "line": 346,
+      "group": "misc",
+      "file": "0346__extract_model_class.py"
+    },
+    {
+      "name": "_collect_response_keys",
+      "line": 367,
+      "group": "misc",
+      "file": "0367__collect_response_keys.py"
+    },
+    {
+      "name": "extract_python_models",
+      "line": 396,
+      "group": "parse",
+      "file": "0396_extract_python_models.py"
+    },
+    {
+      "name": "extract_endpoints",
+      "line": 405,
+      "group": "parse",
+      "file": "0405_extract_endpoints.py"
+    },
+    {
+      "name": "extract_dataclasses",
+      "line": 452,
+      "group": "parse",
+      "file": "0452_extract_dataclasses.py"
+    },
+    {
+      "name": "extract_agent_methods",
+      "line": 484,
+      "group": "parse",
+      "file": "0484_extract_agent_methods.py"
+    },
+    {
+      "name": "extract_client_methods",
+      "line": 512,
+      "group": "parse",
+      "file": "0512_extract_client_methods.py"
+    },
+    {
+      "name": "ChainNode",
+      "line": 560,
+      "group": "core",
+      "file": "0560_ChainNode.py"
+    },
+    {
+      "name": "extract_imports",
+      "line": 573,
+      "group": "parse",
+      "file": "0573_extract_imports.py"
+    },
+    {
+      "name": "extract_func_map",
+      "line": 593,
+      "group": "parse",
+      "file": "0593_extract_func_map.py"
+    },
+    {
+      "name": "build_global_symbol_index",
+      "line": 608,
+      "group": "chain",
+      "file": "0608_build_global_symbol_index.py"
+    },
+    {
+      "name": "extract_var_bindings",
+      "line": 644,
+      "group": "parse",
+      "file": "0644_extract_var_bindings.py"
+    },
+    {
+      "name": "_strip_args",
+      "line": 665,
+      "group": "chain",
+      "file": "0665__strip_args.py"
+    },
+    {
+      "name": "_walk_own",
+      "line": 686,
+      "group": "misc",
+      "file": "0686__walk_own.py"
+    },
+    {
+      "name": "collect_call_targets",
+      "line": 695,
+      "group": "parse",
+      "file": "0695_collect_call_targets.py"
+    },
+    {
+      "name": "_method_calls_of",
+      "line": 742,
+      "group": "chain",
+      "file": "0742__method_calls_of.py"
+    },
+    {
+      "name": "trace_chain",
+      "line": 761,
+      "group": "chain",
+      "file": "0761_trace_chain.py"
+    },
+    {
+      "name": "chain_text",
+      "line": 866,
+      "group": "chain",
+      "file": "0866_chain_text.py"
+    },
+    {
+      "name": "chain_mermaid",
+      "line": 881,
+      "group": "chain",
+      "file": "0881_chain_mermaid.py"
+    },
+    {
+      "name": "collect_broken_refs",
+      "line": 901,
+      "group": "chain",
+      "file": "0901_collect_broken_refs.py"
+    },
+    {
+      "name": "build_dep_sections_generic",
+      "line": 910,
+      "group": "chain",
+      "file": "0910_build_dep_sections_generic.py"
+    },
+    {
+      "name": "build_dep_sections",
+      "line": 970,
+      "group": "chain",
+      "file": "0970_build_dep_sections.py"
+    },
+    {
+      "name": "_normalize_path",
+      "line": 1070,
+      "group": "audit",
+      "file": "1070__normalize_path.py"
+    },
+    {
+      "name": "detect_drift",
+      "line": 1074,
+      "group": "audit",
+      "file": "1074_detect_drift.py"
+    },
+    {
+      "name": "_falsy_literal_text",
+      "line": 1115,
+      "group": "misc",
+      "file": "1115__falsy_literal_text.py"
+    },
+    {
+      "name": "_obj_root",
+      "line": 1127,
+      "group": "misc",
+      "file": "1127__obj_root.py"
+    },
+    {
+      "name": "_extract_defuse_one",
+      "line": 1136,
+      "group": "misc",
+      "file": "1136__extract_defuse_one.py"
+    },
+    {
+      "name": "_is_external_obj",
+      "line": 1199,
+      "group": "audit",
+      "file": "1199__is_external_obj.py"
+    },
+    {
+      "name": "_verify_module_attr",
+      "line": 1208,
+      "group": "misc",
+      "file": "1208__verify_module_attr.py"
+    },
+    {
+      "name": "analyze_defuse",
+      "line": 1234,
+      "group": "audit",
+      "file": "1234_analyze_defuse.py"
+    },
+    {
+      "name": "_call_repr",
+      "line": 1300,
+      "group": "misc",
+      "file": "1300__call_repr.py"
+    },
+    {
+      "name": "_collect_entry_call_reprs",
+      "line": 1313,
+      "group": "misc",
+      "file": "1313__collect_entry_call_reprs.py"
+    },
+    {
+      "name": "_iter_ancestor_ifs",
+      "line": 1328,
+      "group": "misc",
+      "file": "1328__iter_ancestor_ifs.py"
+    },
+    {
+      "name": "analyze_chain_break",
+      "line": 1341,
+      "group": "audit",
+      "file": "1341_analyze_chain_break.py"
+    },
+    {
+      "name": "analyze_behavior",
+      "line": 1397,
+      "group": "audit",
+      "file": "1397_analyze_behavior.py"
+    },
+    {
+      "name": "_is_behavior_defect",
+      "line": 1454,
+      "group": "audit",
+      "file": "1454__is_behavior_defect.py"
+    },
+    {
+      "name": "FlagLifecycleIssue",
+      "line": 1468,
+      "group": "core",
+      "file": "1468_FlagLifecycleIssue.py"
+    },
+    {
+      "name": "_flag_attr_of",
+      "line": 1476,
+      "group": "misc",
+      "file": "1476__flag_attr_of.py"
+    },
+    {
+      "name": "_event_flag_attrs",
+      "line": 1488,
+      "group": "misc",
+      "file": "1488__event_flag_attrs.py"
+    },
+    {
+      "name": "analyze_flag_lifecycle",
+      "line": 1520,
+      "group": "audit",
+      "file": "1520_analyze_flag_lifecycle.py"
+    },
+    {
+      "name": "MergeDirectionIssue",
+      "line": 1594,
+      "group": "core",
+      "file": "1594_MergeDirectionIssue.py"
+    },
+    {
+      "name": "_collect_len_compares",
+      "line": 1602,
+      "group": "misc",
+      "file": "1602__collect_len_compares.py"
+    },
+    {
+      "name": "_collect_version_attrs",
+      "line": 1630,
+      "group": "misc",
+      "file": "1630__collect_version_attrs.py"
+    },
+    {
+      "name": "_has_content_arbitration",
+      "line": 1650,
+      "group": "misc",
+      "file": "1650__has_content_arbitration.py"
+    },
+    {
+      "name": "analyze_merge_direction",
+      "line": 1673,
+      "group": "audit",
+      "file": "1673_analyze_merge_direction.py"
+    },
+    {
+      "name": "IdSourceIssue",
+      "line": 1757,
+      "group": "core",
+      "file": "1757_IdSourceIssue.py"
+    },
+    {
+      "name": "_call_fn_name",
+      "line": 1766,
+      "group": "audit",
+      "file": "1766__call_fn_name.py"
+    },
+    {
+      "name": "_key_arg_expr",
+      "line": 1775,
+      "group": "audit",
+      "file": "1775__key_arg_expr.py"
+    },
+    {
+      "name": "_expr_sig",
+      "line": 1785,
+      "group": "audit",
+      "file": "1785__expr_sig.py"
+    },
+    {
+      "name": "analyze_id_source_contract",
+      "line": 1798,
+      "group": "audit",
+      "file": "1798_analyze_id_source_contract.py"
+    },
+    {
+      "name": "_py_collect_hardcoded",
+      "line": 1914,
+      "group": "misc",
+      "file": "1914__py_collect_hardcoded.py"
+    },
+    {
+      "name": "_ts_collect_hardcoded",
+      "line": 1974,
+      "group": "misc",
+      "file": "1974__ts_collect_hardcoded.py"
+    },
+    {
+      "name": "scan_hardcoded",
+      "line": 2003,
+      "group": "scan",
+      "file": "2003_scan_hardcoded.py"
+    },
+    {
+      "name": "_py_collect_env_vars",
+      "line": 2036,
+      "group": "misc",
+      "file": "2036__py_collect_env_vars.py"
+    },
+    {
+      "name": "_ts_collect_env_vars",
+      "line": 2083,
+      "group": "misc",
+      "file": "2083__ts_collect_env_vars.py"
+    },
+    {
+      "name": "scan_env_vars",
+      "line": 2093,
+      "group": "scan",
+      "file": "2093_scan_env_vars.py"
+    },
+    {
+      "name": "_py_collect_data_pools",
+      "line": 2140,
+      "group": "misc",
+      "file": "2140__py_collect_data_pools.py"
+    },
+    {
+      "name": "_ts_collect_data_pools",
+      "line": 2196,
+      "group": "misc",
+      "file": "2196__ts_collect_data_pools.py"
+    },
+    {
+      "name": "scan_data_pools",
+      "line": 2215,
+      "group": "scan",
+      "file": "2215_scan_data_pools.py"
+    },
+    {
+      "name": "_py_collect_static_resources",
+      "line": 2256,
+      "group": "misc",
+      "file": "2256__py_collect_static_resources.py"
+    },
+    {
+      "name": "_ts_collect_static_resources",
+      "line": 2305,
+      "group": "misc",
+      "file": "2305__ts_collect_static_resources.py"
+    },
+    {
+      "name": "scan_static_resources",
+      "line": 2329,
+      "group": "scan",
+      "file": "2329_scan_static_resources.py"
+    },
+    {
+      "name": "FuncInfo",
+      "line": 2368,
+      "group": "core",
+      "file": "2368_FuncInfo.py"
+    },
+    {
+      "name": "CallEdge",
+      "line": 2381,
+      "group": "core",
+      "file": "2381_CallEdge.py"
+    },
+    {
+      "name": "ModuleSummary",
+      "line": 2391,
+      "group": "core",
+      "file": "2391_ModuleSummary.py"
+    },
+    {
+      "name": "_load_presets",
+      "line": 2433,
+      "group": "misc",
+      "file": "2433__load_presets.py"
+    },
+    {
+      "name": "_rel_module",
+      "line": 2445,
+      "group": "misc",
+      "file": "2445__rel_module.py"
+    },
+    {
+      "name": "_import_aliases",
+      "line": 2452,
+      "group": "misc",
+      "file": "2452__import_aliases.py"
+    },
+    {
+      "name": "_call_target",
+      "line": 2468,
+      "group": "misc",
+      "file": "2468__call_target.py"
+    },
+    {
+      "name": "_strip_comments",
+      "line": 2509,
+      "group": "misc",
+      "file": "2509__strip_comments.py"
+    },
+    {
+      "name": "_resolve_ts_module",
+      "line": 2514,
+      "group": "misc",
+      "file": "2514__resolve_ts_module.py"
+    },
+    {
+      "name": "_extract_ts_api",
+      "line": 2539,
+      "group": "misc",
+      "file": "2539__extract_ts_api.py"
+    },
+    {
+      "name": "_scan_ts_file",
+      "line": 2555,
+      "group": "misc",
+      "file": "2555__scan_ts_file.py"
+    },
+    {
+      "name": "analyze_project",
+      "line": 2644,
+      "group": "audit",
+      "file": "2644_analyze_project.py"
+    },
+    {
+      "name": "_project_md",
+      "line": 2798,
+      "group": "misc",
+      "file": "2798__project_md.py"
+    },
+    {
+      "name": "_gen_data_resources_trace",
+      "line": 2909,
+      "group": "misc",
+      "file": "2909__gen_data_resources_trace.py"
+    },
+    {
+      "name": "_run_frontend_trace",
+      "line": 3177,
+      "group": "misc",
+      "file": "3177__run_frontend_trace.py"
+    },
+    {
+      "name": "_frontend_script",
+      "line": 3201,
+      "group": "misc",
+      "file": "3201__frontend_script.py"
+    },
+    {
+      "name": "_resolve_plugin",
+      "line": 3224,
+      "group": "misc",
+      "file": "3224__resolve_plugin.py"
+    },
+    {
+      "name": "run_plugins",
+      "line": 3243,
+      "group": "misc",
+      "file": "3243_run_plugins.py"
+    },
+    {
+      "name": "_merge_plugin_results",
+      "line": 3293,
+      "group": "misc",
+      "file": "3293__merge_plugin_results.py"
+    },
+    {
+      "name": "cmd_project",
+      "line": 3307,
+      "group": "cli",
+      "file": "3307_cmd_project.py"
+    },
+    {
+      "name": "_type_short",
+      "line": 3470,
+      "group": "output",
+      "file": "3470__type_short.py"
+    },
+    {
+      "name": "gen_markdown",
+      "line": 3485,
+      "group": "misc",
+      "file": "3485_gen_markdown.py"
+    },
+    {
+      "name": "_write_csv",
+      "line": 3775,
+      "group": "output",
+      "file": "3775__write_csv.py"
+    },
+    {
+      "name": "_write_sqlite",
+      "line": 3784,
+      "group": "output",
+      "file": "3784__write_sqlite.py"
+    },
+    {
+      "name": "_extractor_arg_help",
+      "line": 3923,
+      "group": "misc",
+      "file": "3923__extractor_arg_help.py"
+    },
+    {
+      "name": "_reflect_dataclass_fields",
+      "line": 3939,
+      "group": "doc_reflect",
+      "file": "3939__reflect_dataclass_fields.py"
+    },
+    {
+      "name": "_reflect_scan_functions",
+      "line": 3956,
+      "group": "doc_reflect",
+      "file": "3956__reflect_scan_functions.py"
+    },
+    {
+      "name": "_reflect_regex_patterns",
+      "line": 3981,
+      "group": "doc_reflect",
+      "file": "3981__reflect_regex_patterns.py"
+    },
+    {
+      "name": "_reflect_data_pool_kinds",
+      "line": 3997,
+      "group": "doc_reflect",
+      "file": "3997__reflect_data_pool_kinds.py"
+    },
+    {
+      "name": "_reflect_exclude_dirs",
+      "line": 4005,
+      "group": "doc_reflect",
+      "file": "4005__reflect_exclude_dirs.py"
+    },
+    {
+      "name": "_reflect_dataclass_schemas",
+      "line": 4012,
+      "group": "doc_reflect",
+      "file": "4012__reflect_dataclass_schemas.py"
+    },
+    {
+      "name": "cmd_doc",
+      "line": 4022,
+      "group": "cli",
+      "file": "4022_cmd_doc.py"
+    },
+    {
+      "name": "main",
+      "line": 4281,
+      "group": "cli",
+      "file": "4281_main.py"
+    },
+    {
+      "name": "_auto_refresh_extractor_doc",
+      "line": 4602,
+      "group": "misc",
+      "file": "4602__auto_refresh_extractor_doc.py"
+    }
+  ],
+  "groups": [
+    "audit",
+    "chain",
+    "cli",
+    "core",
+    "doc_reflect",
+    "misc",
+    "output",
+    "parse",
+    "scan"
+  ]
+}

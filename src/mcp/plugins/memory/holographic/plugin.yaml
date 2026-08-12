@@ -1,0 +1,8 @@
+name: holographic-memory
+version: 1.0.0
+description: "全息记忆插件 — 结构化事实存储、实体解析、信任评分、HRR组合检索。基于dusterbloom的Holographic Memory适配。"
+author: TS2 (adapted from Hermes holographic-memory by dusterbloom)
+kind: backend
+provides_tools:
+  - fact_store
+  - fact_feedback
