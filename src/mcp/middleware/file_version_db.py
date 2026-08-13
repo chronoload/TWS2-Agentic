@@ -28,6 +28,34 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+def default_db_path(workspace_root: str) -> str:
+    """FileVersionDB 的独立存储路径（用户主目录，不随 workspace 检出丢失）
+
+    与 Shadow Git（~/.ts2/shadow_repo/）同理：FileVersionDB 若放在
+    `<workspace>/.ts2_data/file_versions.db`，则检出新分支/切换工作区后
+    检查点数据即丢失（.ts2_data 不随仓库同步）。这里迁移到主目录独立位置：
+    `~/.ts2/fdb/<ws_hash>/file_versions.db`，按 workspace_root 哈希隔离。
+
+    首次调用时若新位置不存在且旧位置（<workspace>/.ts2_data/）有数据，
+    自动复制迁移（保留旧文件，不破坏历史）。
+    """
+    import shutil
+    from pathlib import Path
+
+    ws = str(workspace_root or "")
+    ws_hash = hashlib.sha256(ws.encode("utf-8")).hexdigest()[:16]
+    new_path = Path.home() / ".ts2" / "fdb" / ws_hash / "file_versions.db"
+    old_path = Path(ws) / ".ts2_data" / "file_versions.db"
+    if not new_path.exists() and old_path.exists():
+        try:
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(old_path, new_path)
+            logger.info(f"FileVersionDB 迁移: {old_path} -> {new_path}")
+        except Exception as e:
+            logger.warning(f"FileVersionDB 迁移失败(将新建): {e}")
+    return str(new_path)
+
 # 当前 schema 版本，用于迁移
 SCHEMA_VERSION = 3
 
