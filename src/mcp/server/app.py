@@ -8651,6 +8651,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         response = await call_next(request)
         if request.url.path.startswith("/static"):
             response.headers["Cache-Control"] = "no-cache"
+            # 修正 Windows mimetypes 对模块脚本的 MIME 误判（collab loro_wasm 等）
+            _p = request.url.path
+            if _p.endswith(".wasm"):
+                response.headers["Content-Type"] = "application/wasm"
+            elif _p.endswith(".js") and (response.headers.get("content-type") or "").startswith("application/json"):
+                response.headers["Content-Type"] = "text/javascript; charset=utf-8"
         return response
 
     # ─── SaberSystem 路由挂载（必须在 SPA fallback 之前）──────────────
