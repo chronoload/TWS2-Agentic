@@ -700,6 +700,17 @@ class Agent:
             except Exception as e:
                 logger.warning(f"MCP客户端初始化失败: {e}")
 
+        # ── Agent 核心附件（agent_assistant 非 GUI 能力 → Agent 设计内建）──
+        # debug_manager / metrics / conversation_history / plugin_manager(工具桥接)
+        # / workflow_engine / git_searcher / kg_rag / load_rag / async_compact
+        # / submit_workflow / resume_workflow / list_recoverable_workflows
+        try:
+            from .agent_core import attach_agent_core
+            self._agent_core_injected = attach_agent_core(self, background=True)
+            logger.info(f"Agent 核心附件注入完成: {self._agent_core_injected}")
+        except Exception as e:
+            logger.warning(f"Agent 核心附件注入失败（不影响主流程）: {e}")
+
     def register_context_injector(self, injector):
         """注册上下文注入器，在每次 chat() 调用时回调
 

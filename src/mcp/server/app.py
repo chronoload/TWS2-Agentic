@@ -1031,6 +1031,10 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         _hub_ready = False
         logger.warning("data_hub init failed: %s", _he)
 
+    # ─── Agent 核心能力已内建于 Agent 类（见 agent.py __init__ 的 attach_agent_core）
+    def _get_agent_core():
+        return None
+
     def _get_hub():
         if not _hub_ready:
             return None
