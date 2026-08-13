@@ -135,6 +135,7 @@ def get_dynamic_tool_use_section(active_tools, inactive_summaries: Optional[Dict
         "autoresearch": "AutoResearch",
         "feishu": "飞书",
         "gt": "GT 课程追踪",
+        "team": "团队协作",
         "other": "其他",
     }
 

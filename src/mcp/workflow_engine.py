@@ -738,12 +738,19 @@ class WorkflowEngine:
     def register_builtin_workflows(self):
         try:
             from .predefined_workflows import WORKFLOW_REGISTRY
+            registered = 0
+            skipped = 0
             for wf_id, wf_def in WORKFLOW_REGISTRY.items():
                 existing = self.persistence.get_definition(wf_def.workflow_id)
                 if not existing:
                     self.persistence.save_definition(wf_def)
-        except Exception:
-            pass
+                    registered += 1
+                else:
+                    skipped += 1
+            logger.info(f"内置工作流注册完成: 新增 {registered}, 已存在跳过 {skipped}, 共 {len(WORKFLOW_REGISTRY)}")
+        except Exception as e:
+            # 注册失败必须可见（例如 predefined_workflows 依赖的资源缺失），否则 db 为空且无人知晓
+            logger.error(f"内置工作流注册失败: {e}", exc_info=True)
 
     def start_workflow(self, definition: WorkflowDefinition,
                        input_data: Dict[str, Any] = None,
@@ -829,7 +836,8 @@ class WorkflowEngine:
 
         instance = self.persistence.get_instance(instance_id)
         if instance and instance.get("status") in (
-            WorkflowStatus.RUNNING.value, WorkflowStatus.PAUSED.value
+            WorkflowStatus.RUNNING.value, WorkflowStatus.PAUSED.value,
+            WorkflowStatus.PENDING.value,
         ):
             self.persistence.update_instance(
                 instance_id, status=WorkflowStatus.CANCELLED.value)

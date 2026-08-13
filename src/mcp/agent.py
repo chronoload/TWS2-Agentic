@@ -18,6 +18,10 @@ from .llm import LLM, LLMResponse, ToolCall, SimulatorLLM, MultiProviderManager,
 from .tools import Tool, get_tools
 from .ws2_tools import get_ws2_tools
 from .config import get_config_manager
+# 状态机抽象：AgentState(阶段枚举) / AgentAction(动作枚举) / AgentStateMachine(迁移驱动)。
+# 用于把 _chat_impl 的对话主循环拆分为显式阶段（见 _stage_prepare/_stage_llm_call/...），
+# 各阶段通过迁移表 _TRANSITIONS 串联成可观察、可测试的状态流。
+from .agent_state import AgentState, AgentAction, AgentStateMachine
 
 try:
     from .subagent import Coordinator, SessionAgent, AgentRole, AgentSpec, SubAgentResult
@@ -363,6 +367,52 @@ class AgentConfig:
     mode: str = "act"
 
 
+@dataclass
+class _ChatRun:
+    """一次 chat 运行（_chat_impl）的上下文载体
+
+    在 _chat_impl 入口创建，贯穿整个状态机循环，把各阶段函数（_stage_*）
+    需要的输入（用户输入、会话 ID、回调、限额）与累计的中间结果
+    （轮次、token 统计、工具 schemas、最新 LLM 响应）集中放在一个对象里，
+    避免为每个阶段函数引入大量显式参数。
+
+    关键字段说明：
+    - mw_ctx: 中间件上下文（MiddlewareContext），阶段函数据此接入中间件管道；
+    - round_count: 当前轮次，受 config.max_rounds 限制；
+    - total_prompt_tokens / total_completion_tokens: 本次运行累计 token；
+    - last_actual_prompt_tokens: 上一轮 API 实际上报的 prompt token，
+      供上下文预检与估算取较大值，避免低估；
+    - tool_schemas: 当前轮发送给模型的工具 schemas；
+    - llm_response: 最近一次 LLM 响应，供 TOOL_EXEC 阶段读取 tool_calls。
+    """
+    user_input: str = ""
+    session_id: str = ""
+    on_token: Optional[Callable] = None
+    on_tool: Optional[Callable] = None
+    on_tool_result: Optional[Callable] = None
+    max_tool_tokens: int = 2000
+    mw_ctx: Optional[Any] = None
+    round_count: int = 0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    last_actual_prompt_tokens: int = 0
+    tool_schemas: Optional[List[Dict]] = None
+    llm_response: Optional[Any] = None
+
+
+@dataclass
+class _StageResult:
+    """阶段函数（_stage_*）的返回值
+
+    - action: 请求状态机执行的迁移动作，作为进入下一状态的键；
+    - done:   是否已产出最终结果并终止本次 chat（True 时驱动器直接返回 result）；
+    - result: done=True 时的最终回答文本。
+    """
+    action: Optional[AgentAction] = None
+    done: bool = False
+    result: str = ""
+
+
 class Agent:
     def __init__(
         self,
@@ -423,6 +473,9 @@ class Agent:
         self._chat_epoch = 0  # chat 代际计数：cancel/reset 递增使旧线程 finally 不再复位状态机（防误清新 chat）
         self._active_session_id = ""  # 当前活跃会话 ID
         self._last_active_time = time_module.time()  # 最后活跃时间
+        # 状态机：显式驱动 chat 主循环的阶段流转（见 _chat_impl 与 _stage_* 系列），
+        # 状态从 IDLE 开始，每次 chat 在 _chat_impl 入口 reset 后复用。
+        self._state_machine = AgentStateMachine()
         
         # 状态变更回调列表
         self._status_callbacks: List[Callable] = []
@@ -1116,6 +1169,44 @@ class Agent:
         max_tool_tokens: int = 2000,
         session_id: str = "",
     ) -> str:
+        """状态机驱动的对话主流程（重构自旧版内联 while 循环）
+
+        调度流程：
+        1. 复位状态机到 IDLE，创建 _ChatRun 上下文，追加用户消息；
+        2. 注入各类上下文（记忆 / 动态上下文 / 外部注入器），
+           然后以 AgentAction.START 启动状态机（IDLE -> PREPARE）；
+        3. 进入 while 循环，按当前状态分发到对应阶段函数：
+             PREPARE       -> _stage_prepare        （中间件预处理 / 上下文压缩 / 工具激活）
+             LLM_CALL      -> _stage_llm_call       （调用模型并解析结果）
+             TOOL_EXEC     -> _stage_tool_exec      （执行模型请求的工具）
+             CONTEXT_CHECK -> _stage_context_check  （工具执行后的上下文 / 轮次检查）
+        4. 每个阶段返回 _StageResult：done=True 时返回最终结果并结束循环，
+           否则按 action 迁移到下一状态继续；
+        5. 运行异常时，若尚未处于终态，统一以 FAIL 迁移到 ERROR 后重抛。
+
+        与旧 _chat_impl 的行为对应关系：
+        - PREPARE       = 旧实现「循环前」的准备段；
+        - LLM_CALL      = 旧实现「单轮内」的模型调用段；
+        - TOOL_EXEC     = 旧实现「模型返回 tool_calls 后」的执行段；
+        - CONTEXT_CHECK = 旧实现「工具执行后」的轮次 / 上下文检查段。
+        审批（harness approval）、上下文压缩（_compress_and_save_to_memory）、
+        检查点（checkpoint）等既有能力均保留在对应阶段函数中，行为不变。
+
+        Returns:
+            最终回答文本。
+        """
+        sm = self._state_machine
+        # 复位到 IDLE，开始新一轮运行
+        sm.reset()
+        run = _ChatRun(
+            user_input=user_input,
+            session_id=session_id,
+            on_token=on_token,
+            on_tool=on_tool,
+            on_tool_result=on_tool_result,
+            max_tool_tokens=max_tool_tokens,
+        )
+
         with self._messages_lock:
             self.messages.append({"role": "user", "content": user_input})
 
@@ -1123,7 +1214,6 @@ class Agent:
             try:
                 memory_ctx = self._memory.get_memory_context(user_input)
                 if memory_ctx and self.messages and self.messages[0].get("role") == "system":
-                    # 替换而非追加，避免重复注入
                     self._inject_to_system_prompt("MEMORY_CONTEXT", memory_ctx)
             except Exception as e:
                 logger.debug(f"记忆上下文注入失败: {e}")
@@ -1136,7 +1226,6 @@ class Agent:
             except Exception:
                 pass
 
-        # 外部上下文注入（如学习状态等）— 通过 ContextProvider 的 Others 层
         if self._context_provider and self.messages and self.messages[0].get("role") == "system":
             try:
                 others_sections = self._context_provider.collect_others(
@@ -1150,7 +1239,6 @@ class Agent:
             except Exception as e:
                 logger.debug(f"动态上下文注入失败: {e}")
 
-        # 兼容旧式上下文注入器
         if self._context_injectors and self.messages and self.messages[0].get("role") == "system":
             for injector in self._context_injectors:
                 try:
@@ -1161,22 +1249,70 @@ class Agent:
                     logger.debug(f"上下文注入失败: {e}")
 
         model_id = self.config.model_id or "gpt-4o"
-
-        mw_ctx = None
         if HAS_MIDDLEWARE and self._middleware_chain:
-            mw_ctx = MiddlewareContext(
+            run.mw_ctx = MiddlewareContext(
                 session_id=session_id,
                 model_id=model_id,
             )
-            processed = self._middleware_chain.run_before_agent(self.messages, mw_ctx)
+
+        # 启动状态机：IDLE -> PREPARE
+        sm.transition(AgentAction.START)
+
+        try:
+            # 状态机主循环：非终态下按当前状态分发到对应阶段函数
+            while not sm.state.is_terminal:
+                state = sm.state
+                if state is AgentState.PREPARE:
+                    step = self._stage_prepare(run)
+                elif state is AgentState.LLM_CALL:
+                    step = self._stage_llm_call(run)
+                elif state is AgentState.TOOL_EXEC:
+                    step = self._stage_tool_exec(run)
+                elif state is AgentState.CONTEXT_CHECK:
+                    step = self._stage_context_check(run)
+                else:
+                    raise RuntimeError(f"状态机处于无法处理的非终态: {state}")
+                if step.done:
+                    # 阶段已产出最终结果：若尚未到达终态，先按 action 收敛到终态再返回
+                    if not sm.state.is_terminal:
+                        sm.transition(step.action)
+                    return step.result
+                # 阶段尚未结束：按返回的动作迁移到下一状态，进入下一轮循环
+                sm.transition(step.action)
+            raise RuntimeError(f"状态机意外进入终态: {sm.state}")
+        except Exception:
+            # 运行异常：若尚未处于终态，统一以 FAIL 迁移到 ERROR 后重抛
+            if not sm.state.is_terminal:
+                sm.transition(AgentAction.FAIL)
+            raise
+
+    def _stage_prepare(self, run: _ChatRun) -> _StageResult:
+        """准备阶段（对应旧 _chat_impl 的「循环前」准备段）
+
+        职责：
+        - 中间件 run_before_agent 预处理（可改写消息）；若中间件拦截
+          （返回 None），直接以 done=True + COMPLETE 结束本次 chat；
+        - 对话开始时估算上下文占用，超过窗口 55% 自动压缩并保存记忆；
+        - 按用户输入激活工具组（ToolGroupManager），并动态更新
+          system prompt 中的 TOOL_USE 说明。
+
+        输入: run（读取 run.user_input 用于工具组激活）。
+        输出: _StageResult(action=PREPARE_DONE) 迁移到 LLM_CALL；
+              若被中间件拦截则返回 done=True 的结果直接结束。
+
+        与旧 _chat_impl 的对应：本阶段代码原先位于旧实现消息追加、
+        上下文注入之后的循环体外，现原样迁移到独立阶段函数。
+        """
+        if HAS_MIDDLEWARE and self._middleware_chain and run.mw_ctx:
+            processed = self._middleware_chain.run_before_agent(self.messages, run.mw_ctx)
             if processed is None:
-                return "(中间件拦截：请求被阻止)"
+                return _StageResult(done=True, action=AgentAction.COMPLETE, result="(中间件拦截：请求被阻止)")
             self.messages = processed
 
-        # 对话开始时预检：如果上下文已超过 55%，提前压缩
         if HAS_MODERN_PROMPT:
             est_tokens = self._estimate_message_tokens(self.messages)
             ctx_window = self.model_context_window
+            # 对话刚开始就超 55%：先压缩再继续，避免后续轮次过早触硬限
             if est_tokens > ctx_window * 0.55:
                 logger.info(
                     f"对话开始时上下文已使用 {est_tokens}/{ctx_window} tokens "
@@ -1184,126 +1320,135 @@ class Agent:
                 )
                 self._compress_and_save_to_memory(reason="对话开始时上下文超出阈值")
 
-        # 动态工具过滤：首轮用用户输入激活意图组
         mgr = getattr(self, '_tool_group_mgr', None)
-        if mgr and user_input:
-            mgr.activate_for_query(user_input)
+        if mgr and run.user_input:
+            mgr.activate_for_query(run.user_input)
 
-        # 动态更新 system prompt 中的工具使用说明
         self._update_tool_use_in_prompt()
 
-        round_count = 0
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        # 保存上一轮 API 实际返回的 prompt_tokens，用于更准确的判断
-        _last_actual_prompt_tokens = 0
+        return _StageResult(action=AgentAction.PREPARE_DONE)
 
-        for _ in range(self.config.max_rounds):
-            round_count += 1
-            # 检查是否已被取消（reset/session 切换时设置）
+    def _stage_llm_call(self, run: _ChatRun) -> _StageResult:
+        """LLM 调用阶段（对应旧 _chat_impl 的「单轮内」模型调用段）
+
+        职责（每轮一次，总轮次受 config.max_rounds 限制）：
+        - 轮次计数、取消检查、同步中间件 turn 计数；
+        - 获取当前轮工具 schemas（动态过滤），并 sanitize 消息配对；
+        - 上下文预检：以「估算 token 与 API 实际上报 token 的较大值」
+          判断，超过硬限(85%)紧急压缩、超过软限(55%)预压缩；
+        - 经中间件 run_wrap_model_call（或直接 _call_llm）调用模型，
+          累计 prompt/completion token 统计；
+        - 模型返回 tool_calls -> 追加 assistant 消息，返回 TOOL_CALLED
+          迁移到 TOOL_EXEC；模型直接给出回答 -> 组装最终文本（含思考
+          过程、技能自动创建）返回 done=True + COMPLETE 结束；
+        - 收到取消信号（LLM cancelled / _cancelled）返回 CANCEL 结束。
+
+        输入: run（使用 round_count/tool_schemas/on_token/session_id 等字段）。
+        输出: _StageResult —— 完成类(done=True)直接结束，
+              或 action=TOOL_CALLED 迁移到 TOOL_EXEC。
+
+        保留的既有能力：上下文压缩（_compress_and_save_to_memory）、
+        技能自动创建（_skill_creator）、中间件强制停止（force_stop）。
+        """
+        while run.round_count < self.config.max_rounds:
+            run.round_count += 1
             if self._cancelled:
                 logger.info("Agent 对话已被取消（外部 reset/session 切换），终止循环")
-                return "(已取消)"
-            if mw_ctx:
-                mw_ctx.turn_count = round_count
+                return _StageResult(done=True, action=AgentAction.CANCEL, result="(已取消)")
+            if run.mw_ctx:
+                run.mw_ctx.turn_count = run.round_count
 
-            tool_schemas = self._get_tool_schemas(user_input if round_count == 1 else "")
+            tool_schemas = self._get_tool_schemas(run.user_input if run.round_count == 1 else "")
+            run.tool_schemas = tool_schemas
 
-            # 发送给 LLM 前验证消息格式，修复 tool_calls/tool 不配对问题
             safe_messages = sanitize_messages(self.messages)
 
-            # ── 在 llm.chat() 前预检上下文，超限则提前压缩 ──
             if HAS_MODERN_PROMPT:
-                # 用本轮实际估算（计入 tool_calls 结构）
                 est_tokens = self._estimate_message_tokens(safe_messages)
                 ctx_window = self.model_context_window
-
-                # 优先用上一轮 API 返回的实际 prompt_tokens（更准确）
-                if _last_actual_prompt_tokens > 0:
-                    effective_tokens = max(est_tokens, _last_actual_prompt_tokens)
+                # 用估算值与 API 实际上报值的较大者判断，避免低估上下文占用
+                if run.last_actual_prompt_tokens > 0:
+                    effective_tokens = max(est_tokens, run.last_actual_prompt_tokens)
                 else:
                     effective_tokens = est_tokens
-
-                # 硬限：超过窗口 85% → 立即压缩（否则下一轮 llm.chat 必炸）
-                # 软限：超过 55% → 提前压缩
                 soft_limit = int(ctx_window * 0.55)
                 hard_limit = int(ctx_window * 0.85)
-
+                # 硬限：预测即将超窗，压缩后必须重新 sanitize 并清空旧上报值
                 if effective_tokens > hard_limit:
                     logger.warning(
                         f"上下文预检 HIT HARD LIMIT: "
-                        f"估算={est_tokens}, API={_last_actual_prompt_tokens}, "
+                        f"估算={est_tokens}, API={run.last_actual_prompt_tokens}, "
                         f"窗口={ctx_window} ({effective_tokens/ctx_window*100:.0f}%), "
                         f"紧急压缩"
                     )
                     self._compress_and_save_to_memory(reason="上下文预检触及硬限")
                     safe_messages = sanitize_messages(self.messages)
-                    _last_actual_prompt_tokens = 0  # 压缩后 API token 不准了
-
+                    run.last_actual_prompt_tokens = 0
                 elif effective_tokens > soft_limit:
                     logger.info(
                         f"上下文预检触发软限压缩: "
-                        f"估算={est_tokens}, API={_last_actual_prompt_tokens}, "
+                        f"估算={est_tokens}, API={run.last_actual_prompt_tokens}, "
                         f"窗口={ctx_window} ({effective_tokens/ctx_window*100:.0f}%)"
                     )
                     self._compress_and_save_to_memory(reason="上下文预检触发软限压缩")
                     safe_messages = sanitize_messages(self.messages)
-                    _last_actual_prompt_tokens = 0
+                    run.last_actual_prompt_tokens = 0
 
-            if HAS_MIDDLEWARE and self._middleware_chain and mw_ctx:
+            if HAS_MIDDLEWARE and self._middleware_chain and run.mw_ctx:
                 def _llm_handler(msgs):
                     return self._call_llm(
                         msgs,
                         tools=tool_schemas,
-                        on_token=on_token,
-                        session_id=session_id,
+                        on_token=run.on_token,
+                        session_id=run.session_id,
                     )
                 response = self._middleware_chain.run_wrap_model_call(
-                    safe_messages, _llm_handler, mw_ctx
+                    safe_messages, _llm_handler, run.mw_ctx
                 )
             else:
+                # 无中间件：直接调用模型（_call_llm 会优先走模型选择器）
                 response = self._call_llm(
                     safe_messages,
                     tools=tool_schemas,
-                    on_token=on_token,
-                    session_id=session_id,
+                    on_token=run.on_token,
+                    session_id=run.session_id,
                 )
 
-            total_prompt_tokens += response.prompt_tokens
-            total_completion_tokens += response.completion_tokens
-            if mw_ctx:
-                mw_ctx.total_prompt_tokens = total_prompt_tokens
-                mw_ctx.total_completion_tokens = total_completion_tokens
+            run.total_prompt_tokens += response.prompt_tokens
+            run.total_completion_tokens += response.completion_tokens
+            if run.mw_ctx:
+                run.mw_ctx.total_prompt_tokens = run.total_prompt_tokens
+                run.mw_ctx.total_completion_tokens = run.total_completion_tokens
 
-            # 保存 API 实际返回的 prompt_tokens，用于下一轮预检
-            _last_actual_prompt_tokens = getattr(response, 'prompt_tokens', 0)
+            # 记录 API 实际上报的 prompt token，供下一轮上下文预检参考
+            run.last_actual_prompt_tokens = getattr(response, 'prompt_tokens', 0)
 
             if getattr(response, 'cancelled', False) or self._cancelled:
                 logger.info("Agent 收到取消信号，终止对话循环")
-                return response.content or "(已取消)"
+                return _StageResult(done=True, action=AgentAction.CANCEL, result=response.content or "(已取消)")
 
-            if HAS_MIDDLEWARE and self._middleware_chain and mw_ctx:
-                mw_result = self._middleware_chain.run_after_model(response, self.messages, mw_ctx)
+            if HAS_MIDDLEWARE and self._middleware_chain and run.mw_ctx:
+                mw_result = self._middleware_chain.run_after_model(response, self.messages, run.mw_ctx)
                 if mw_result and mw_result.force_stop:
                     logger.warning(f"中间件强制停止: {mw_result.reason}")
-                    return f"(中间件停止: {mw_result.reason})"
+                    return _StageResult(done=True, action=AgentAction.COMPLETE, result=f"(中间件停止: {mw_result.reason})")
 
             if not response.tool_calls:
-                # 跳过空内容的 assistant 消息（无 tool_calls 且 content 为空）
                 content = response.content or ""
                 if not content.strip() and not response.reasoning_content:
                     logger.debug("跳过空 assistant 消息（无 tool_calls 且 content 为空）")
                     continue
                 with self._messages_lock:
                     self.messages.append(response.message)
-                if HAS_MIDDLEWARE and self._middleware_chain and mw_ctx:
-                    self.messages = self._middleware_chain.run_after_agent(self.messages, mw_ctx)
+                if HAS_MIDDLEWARE and self._middleware_chain and run.mw_ctx:
+                    self.messages = self._middleware_chain.run_after_agent(self.messages, run.mw_ctx)
+                # 模型直接给出最终回答：组装返回文本（含思考过程）
                 final = response.content or ""
                 if response.reasoning_content:
                     final = f"💭 思考过程：\n{response.reasoning_content}\n\n---\n\n{final}"
                 logger.info(
-                    f"Agent 完成 (轮次={round_count}, "
-                    f"prompt={total_prompt_tokens}, completion={total_completion_tokens})"
+                    f"Agent 完成 (轮次={run.round_count}, "
+                    f"prompt={run.total_prompt_tokens}, completion={run.total_completion_tokens})"
                 )
                 if self._skill_creator:
                     try:
@@ -1320,26 +1465,92 @@ class Agent:
                                         logger.debug(f"技能自动保存失败: {result.error}")
                     except Exception as e:
                         logger.debug(f"技能自动创建检查失败: {e}")
-                return final
+                return _StageResult(done=True, action=AgentAction.COMPLETE, result=final)
 
             with self._messages_lock:
                 self.messages.append(response.message)
+            # 模型请求了工具：保存响应供 TOOL_EXEC 阶段执行，迁移到 TOOL_EXEC
+            run.llm_response = response
+            return _StageResult(action=AgentAction.TOOL_CALLED)
 
-            if len(response.tool_calls) == 1:
-                tc = response.tool_calls[0]
-                if on_tool:
-                    on_tool(tc.name, tc.arguments)
-                result = self._execute_tool(tc, max_tool_tokens=max_tool_tokens, mw_ctx=mw_ctx)
-                # ask 挂起：若工具触发了 ask，将 result 替换为用户答案注入对话
-                if tc.name == "ask_followup_question":
-                    ans = self.get_last_ask_answer()
-                    if ans is not None:
-                        result = f"用户答复: {ans}"
-                # 获取 checkpoint_hash (由 after_tool 中间件写入)
+        if HAS_MIDDLEWARE and self._middleware_chain and run.mw_ctx:
+            self.messages = self._middleware_chain.run_after_agent(self.messages, run.mw_ctx)
+
+        logger.warning(f"已达到最大轮次 ({self.config.max_rounds})")
+        return _StageResult(done=True, action=AgentAction.COMPLETE, result="(已达到最大轮次)")
+
+    def _stage_tool_exec(self, run: _ChatRun) -> _StageResult:
+        """工具执行阶段（对应旧 _chat_impl 的「模型返回 tool_calls 后」执行段）
+
+        职责：
+        - 单工具调用走 _execute_tool（含审批、ask 挂起式追问、中间件、
+          checkpoint 记录）；多个工具调用走 _execute_tools_parallel 并行执行；
+        - 把每个工具结果作为 tool 消息追加进对话，并回填 checkpoint_hash
+          （同时回写到对应 assistant tool_call 上）；
+        - ask_followup_question 的返回结果会替换为实际用户答案
+          （来自 _maybe_suspend_for_ask 挂起通道）；
+        - 记录工具已使用（_mark_tool_used），activate_tool_group 后刷新
+          TOOL_USE prompt；
+        - 执行期间收到取消信号则返回 done=True + CANCEL 结束。
+
+        输入: run（读取 llm_response.tool_calls，回调 run.on_tool/on_tool_result）。
+        输出: _StageResult(action=TOOL_DONE) 迁移到 CONTEXT_CHECK。
+
+        保留的既有能力：工具审批（harness approval）、ask 挂起式追问、
+        自动对话检查点（_auto_conversation_checkpoint）。
+        """
+        response = run.llm_response
+        if len(response.tool_calls) == 1:
+            # 单工具：串行执行，便于处理 ask 答复替换与取消检查
+            tc = response.tool_calls[0]
+            if run.on_tool:
+                run.on_tool(tc.name, tc.arguments)
+            result = self._execute_tool(tc, max_tool_tokens=run.max_tool_tokens, mw_ctx=run.mw_ctx)
+            # ask_followup_question 挂起返回后，把占位结果替换成真实用户答复
+            if tc.name == "ask_followup_question":
+                ans = self.get_last_ask_answer()
+                if ans is not None:
+                    result = f"用户答复: {ans}"
+            cp_hash = self._get_last_checkpoint_hash()
+            if run.on_tool_result:
+                run.on_tool_result(tc.name, result)
+            with self._messages_lock:
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                    "checkpoint_hash": cp_hash,
+                })
+            self._auto_conversation_checkpoint(tc.name, cp_hash)
+            if cp_hash:
+                for msg in reversed(self.messages):
+                    if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        for t in msg["tool_calls"]:
+                            if isinstance(t, dict) and t.get("id") == tc.id:
+                                t["checkpoint_hash"] = cp_hash
+                                break
+                        break
+                    elif msg.get("tool_calls"):
+                        for t in msg["tool_calls"]:
+                            if hasattr(t, 'id') and t.id == tc.id:
+                                if hasattr(t, 'checkpoint_hash'):
+                                    t.checkpoint_hash = cp_hash
+                                break
+                        break
+            self._mark_tool_used(tc.name)
+            if tc.name == "activate_tool_group":
+                self._update_tool_use_in_prompt()
+            if self._cancelled:
+                return _StageResult(done=True, action=AgentAction.CANCEL, result="(已取消)")
+        else:
+            # 多工具：并行执行，逐个追加 tool 消息并回填 checkpoint_hash
+            results = self._execute_tools_parallel(
+                response.tool_calls, run.on_tool, max_tool_tokens=run.max_tool_tokens, mw_ctx=run.mw_ctx
+            )
+            for tc, result in zip(response.tool_calls, results):
                 cp_hash = self._get_last_checkpoint_hash()
-                if on_tool_result:
-                    on_tool_result(tc.name, result)
-                # 先注入结果到对话循环（包括超时/中间件停止等情况）
+                if run.on_tool_result:
+                    run.on_tool_result(tc.name, result)
                 with self._messages_lock:
                     self.messages.append({
                         "role": "tool",
@@ -1347,9 +1558,7 @@ class Agent:
                         "content": result,
                         "checkpoint_hash": cp_hash,
                     })
-                # 自动创建对话快照并关联 SQLite 检查点（迁移自 agent_assistant 每轮自动保存）
                 self._auto_conversation_checkpoint(tc.name, cp_hash)
-                # 同时将 checkpoint_hash 关联到 assistant 的 tool_call
                 if cp_hash:
                     for msg in reversed(self.messages):
                         if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -1357,77 +1566,51 @@ class Agent:
                                 if isinstance(t, dict) and t.get("id") == tc.id:
                                     t["checkpoint_hash"] = cp_hash
                                     break
-                            break
-                        elif msg.get("tool_calls"):
-                            for t in msg["tool_calls"]:
-                                if hasattr(t, 'id') and t.id == tc.id:
+                                elif hasattr(t, 'id') and t.id == tc.id:
                                     if hasattr(t, 'checkpoint_hash'):
                                         t.checkpoint_hash = cp_hash
                                     break
                             break
-                # 标记工具已使用，确保后续轮次保留
                 self._mark_tool_used(tc.name)
-                # 如果激活了工具组，立即更新 prompt 和 schemas
                 if tc.name == "activate_tool_group":
                     self._update_tool_use_in_prompt()
-                # 结果注入后再检查是否取消（用户主动取消 / 中间件强制停止）
-                if self._cancelled:
-                    return "(已取消)"
-            else:
-                results = self._execute_tools_parallel(
-                    response.tool_calls, on_tool, max_tool_tokens=max_tool_tokens, mw_ctx=mw_ctx
+            if self._cancelled:
+                return _StageResult(done=True, action=AgentAction.CANCEL, result="(已取消)")
+        # 工具全部执行完成：迁移到 CONTEXT_CHECK 检查上下文与轮次
+        return _StageResult(action=AgentAction.TOOL_DONE)
+
+    def _stage_context_check(self, run: _ChatRun) -> _StageResult:
+        """上下文检查阶段（对应旧 _chat_impl 的「工具执行后」检查段）
+
+        职责：
+        - 工具执行后估算上下文占用，超过窗口 65% 自动压缩并保存记忆，
+          为新一轮 LLM 调用腾出空间；
+        - 达到最大轮次则运行中间件 run_after_agent 并 done=True + COMPLETE 结束；
+        - 否则返回 NEXT_ROUND，回到 LLM_CALL 开始新一轮。
+
+        输入: run（读取 run.round_count 与最大轮次上限比较）。
+        输出: _StageResult —— action=NEXT_ROUND 进入下一轮，
+              或 done=True + COMPLETE 结束。
+        """
+        if HAS_MODERN_PROMPT:
+            est_tokens = self._estimate_message_tokens(self.messages)
+            ctx_window = self.model_context_window
+            # 工具结果可能携带大量文本：超 65% 即压缩，避免下一轮触硬限
+            if est_tokens > ctx_window * 0.65:
+                logger.warning(
+                    f"上下文已使用 {est_tokens}/{ctx_window} tokens "
+                    f"({est_tokens/ctx_window*100:.0f}%), 工具执行后自动压缩"
                 )
-                # 先注入所有结果到对话循环
-                for tc, result in zip(response.tool_calls, results):
-                    cp_hash = self._get_last_checkpoint_hash()
-                    if on_tool_result:
-                        on_tool_result(tc.name, result)
-                    with self._messages_lock:
-                        self.messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result,
-                            "checkpoint_hash": cp_hash,
-                        })
-                    # 自动创建对话快照并关联 SQLite 检查点
-                    self._auto_conversation_checkpoint(tc.name, cp_hash)
-                    # 将 checkpoint_hash 关联到 assistant 的 tool_call
-                    if cp_hash:
-                        for msg in reversed(self.messages):
-                            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                                for t in msg["tool_calls"]:
-                                    if isinstance(t, dict) and t.get("id") == tc.id:
-                                        t["checkpoint_hash"] = cp_hash
-                                        break
-                                    elif hasattr(t, 'id') and t.id == tc.id:
-                                        if hasattr(t, 'checkpoint_hash'):
-                                            t.checkpoint_hash = cp_hash
-                                        break
-                                break
-                    self._mark_tool_used(tc.name)
-                    if tc.name == "activate_tool_group":
-                        self._update_tool_use_in_prompt()
-                # 结果注入后再检查是否取消
-                if self._cancelled:
-                    return "(已取消)"
+                self._compress_and_save_to_memory(reason="工具执行后上下文超过 65%")
 
-            # 每轮工具执行后检查上下文窗口（安全网，主防线在 llm.chat 前）
-            if HAS_MODERN_PROMPT:
-                est_tokens = self._estimate_message_tokens(self.messages)
-                ctx_window = self.model_context_window
+        if run.round_count >= self.config.max_rounds:
+            if HAS_MIDDLEWARE and self._middleware_chain and run.mw_ctx:
+                self.messages = self._middleware_chain.run_after_agent(self.messages, run.mw_ctx)
+            logger.warning(f"已达到最大轮次 ({self.config.max_rounds})")
+            return _StageResult(done=True, action=AgentAction.COMPLETE, result="(已达到最大轮次)")
 
-                if est_tokens > ctx_window * 0.65:
-                    logger.warning(
-                        f"上下文已使用 {est_tokens}/{ctx_window} tokens "
-                        f"({est_tokens/ctx_window*100:.0f}%), 工具执行后自动压缩"
-                    )
-                    self._compress_and_save_to_memory(reason="工具执行后上下文超过 65%")
-
-        if HAS_MIDDLEWARE and self._middleware_chain and mw_ctx:
-            self.messages = self._middleware_chain.run_after_agent(self.messages, mw_ctx)
-
-        logger.warning(f"已达到最大轮次 ({self.config.max_rounds})")
-        return "(已达到最大轮次)"
+        # 未达上限：进入下一轮（CONTEXT_CHECK -> LLM_CALL）
+        return _StageResult(action=AgentAction.NEXT_ROUND)
 
     def _execute_tool(self, tool_call: ToolCall,
                       max_tool_tokens: int = 2000,

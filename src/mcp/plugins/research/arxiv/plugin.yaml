@@ -1,0 +1,7 @@
+name: arxiv-search
+version: 1.0.0
+description: "ArXiv 论文搜索 — 通过 arxiv Python 包搜索学术论文"
+author: TS2 (adapted from Hermes)
+kind: backend
+provides_tools:
+  - arxiv_search

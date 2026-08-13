@@ -224,6 +224,15 @@ PREFIX_GROUP_RULES: List[Dict[str, Any]] = [
         "keywords": ["搜索", "博查", "bocha", "search", "联网", "网页",
                       "网络搜索", "最新", "新闻"],
     },
+    # 团队协作（Cline AgentTeam 多智能体）
+    {
+        "prefix": "team_",
+        "group": "team",
+        "label": "团队协作",
+        "always_active": True,
+        "keywords": ["团队", "team", "teammate", "协作", "多智能体",
+                      "子代理", "分工", "协作者", "agentteam"],
+    },
 ]
 
 # ── 工具组可用性检查 ──────────────────────────────────
@@ -305,7 +314,7 @@ def _classify_tool(tool_name: str) -> str:
     Returns:
         组名: "core" | "ws2" | "datahub_core" | "datahub_pro" |
               "scholar" | "wolfram" | "lean4" | "manim" | "mathlens" |
-              "autoresearch" | "feishu" | "gt" | "other"
+              "autoresearch" | "feishu" | "gt" | "team" | "other"
     """
     # 1. 核心工具
     if tool_name in CORE_TOOL_NAMES:

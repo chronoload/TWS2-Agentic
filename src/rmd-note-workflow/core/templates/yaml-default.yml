@@ -1,0 +1,30 @@
+# 默认 YAML 头模板
+# 占位符由 bootstrap 根据 config 填充
+---
+title: "Lecture Notes"
+subtitle: "{project_name} — {doc_id} {title}"
+author: "{author}"
+date: "`r Sys.Date()`"
+always_allow_html: true
+output:
+  pdf_document:
+    includes:
+      in_header: "{preamble_path}"
+    pandoc_args:
+      - --lua-filter={lua_filter_path}
+    latex_engine: {latex_engine}
+    fig_caption: true
+    number_sections: true
+    toc: true
+    toc_depth: 3
+    md_extensions: +fenced_divs+bracketed_spans
+    keep_tex: false
+    keep_md: false
+    extra_dependencies: {extra_dependencies}
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    number_sections: true
+---

@@ -1,0 +1,9 @@
+name: ts2-physics
+version: 1.0.0
+description: "物理科学工具集 — 常数查询、单位转换、公式计算、LaTeX渲染。"
+author: TS2
+kind: backend
+provides_tools:
+  - physics_constants
+  - unit_convert
+  - formula_compute

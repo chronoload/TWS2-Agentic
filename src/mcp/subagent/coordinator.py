@@ -201,6 +201,89 @@ class Coordinator:
 
         return results
 
+    def run_sequential(self, tasks: List[Dict], on_event: Optional[Callable] = None) -> List[SubAgentResult]:
+        """按序执行多个子 Agent 任务，每个任务的 prompt 注入前序结果
+
+        对应 Cline AgentTeam 编排中按顺序逐个调用子代理的语义：
+        - 任务列表严格按给定顺序串行执行（前一任务完成才启动下一个）；
+        - 从第二个任务起，把此前所有任务的执行结果（agent/内容/状态）打包为
+          context["previous_results"] 传入，模拟 Cline 中把前序 Agent 输出
+          作为后续 Agent 上下文（context window）传递的衔接方式；
+        - 各任务间不共享会话状态，仅通过 previous_results 上下文衔接。
+        """
+        results: List[SubAgentResult] = []
+        for task in tasks:
+            agent_name = task["agent"]
+            prompt = task["prompt"]
+            # 首个任务没有前置结果，直接执行；后续任务收集全部历史结果作为上下文
+            context = None
+            if results:
+                prev_results = []
+                for r in results:
+                    # 将结果归一化为字典：status 统一转为字符串，便于下游拼接
+                    status = r.status.value if isinstance(r.status, SubAgentStatus) else str(r.status)
+                    prev_results.append({
+                        "agent": r.agent_name,
+                        "content": r.content,
+                        "status": status,
+                    })
+                context = {"previous_results": prev_results}
+            results.append(self.run(agent_name, prompt, context=context, on_event=on_event))
+        return results
+
+    def run_pipeline(self, stages: List[Dict], transformers: Optional[Dict] = None, on_event: Optional[Callable] = None) -> List[SubAgentResult]:
+        """流水线执行多个阶段，每阶段输出经 transformer 转换后作为下一阶段输入
+
+        相比 run_sequential 的多结果累积，run_pipeline 更贴近 Cline AgentTeam
+        中"逐级接力"的流水线语义：
+        - stages 中的每个阶段按顺序执行，阶段输出只向前传递最近一个阶段的结果；
+        - transformers 以"阶段序号 -> 转换器"的形式提供，转换器针对第 i 个阶段的
+          输出、在第 i+1 个阶段前生效（键 i 对应 stages[i] 与 stages[i+1] 之间）；
+        - transformer 支持两种形态（见 _transform_prompt）：
+            1. 可调用对象：接收上一阶段 SubAgentResult（或其 content 字符串）返回新 prompt；
+            2. 普通字符串：直接作为前缀文本拼接到下一阶段 prompt 之前；
+        - 未提供 transformer 时，默认把上一阶段 content 以"阶段结果:" 前缀拼接。
+        """
+        results: List[SubAgentResult] = []
+        transformers = transformers or {}
+        for index, stage in enumerate(stages):
+            agent_name = stage["agent"]
+            prompt = stage["prompt"]
+            # 除首个阶段外，都要把上一阶段输出作为本阶段输入的上下文
+            if results:
+                prev_result = results[-1]
+                # 键 index-1 对应"从第 index-1 个阶段到第 index 个阶段"的转换器
+                transformer = transformers.get(index - 1)
+                if transformer is not None:
+                    # 可调用形态：交由 _transform_prompt 兼容两种调用签名
+                    if callable(transformer):
+                        prompt = f"{self._transform_prompt(transformer, prev_result)}\n\n{prompt}"
+                    # 字符串形态：直接把固定文本作为前缀注入
+                    else:
+                        prompt = f"{transformer}\n\n{prompt}"
+                else:
+                    # 无转换器时的默认衔接：直接透传上一阶段内容
+                    content = prev_result.content if prev_result.content else "(空)"
+                    prompt = f"阶段结果:\n{content}\n\n{prompt}"
+            results.append(self.run(agent_name, prompt, on_event=on_event))
+        return results
+
+    @staticmethod
+    def _transform_prompt(transformer: Callable, result: SubAgentResult) -> str:
+        """执行流水线 transformer，兼容两种调用形态
+
+        - transformer(result)：直接接收完整的 SubAgentResult 对象（可访问
+          content/status/agent_name 等元信息），适合需要结构化上下文转换的场景；
+        - transformer(result.content)：当直接传对象抛出 TypeError 时，回退为
+          仅传入上一阶段的内容字符串，兼容只关心文本的简单转换器。
+        两种形态对应 Cline AgentTeam 中输出处理器既可拿结构化结果、也可拿
+        纯文本的两种使用方式。
+        """
+        try:
+            return transformer(result)
+        except TypeError:
+            return transformer(result.content)
+
     def _build_tools(self, spec: AgentSpec) -> List[Dict]:
         """根据 AgentSpec 构建工具 schema 列表（LLM 可直接使用的格式）"""
         if self.tool_registry is None:

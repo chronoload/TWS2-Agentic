@@ -6,6 +6,32 @@ from .base import AgentMiddleware, MiddlewareContext, MiddlewareResult, Middlewa
 logger = logging.getLogger(__name__)
 
 
+def add_default_middlewares(chain: "MiddlewareChain", mode_getter: Optional[Callable[[], str]] = None) -> bool:
+    """把一组"默认中间件"注册进给定的中间件链。
+
+    当前默认集合只包含 CommandGuardMiddleware（Plan 模式下的命令黑名单守卫，
+    对应 Cline 的 command-guard.ts）。实现采用函数内延迟导入：command_guard
+    模块的导入若失败，不应拖垮中间件链的初始化，因此在这里捕获异常并降级。
+
+    参数
+    ----
+    chain: 目标中间件链，命令守卫会被 add 进去（按 order 自动排序）。
+    mode_getter: 透传给 CommandGuardMiddleware 的模式取值回调（可选），
+    用于在无显式模式时兜底判断是否处于 Plan 模式。
+
+    返回
+    ----
+    注册成功返回 True；任何异常返回 False，并记录一条 warning 日志。
+    """
+    try:
+        from .command_guard import CommandGuardMiddleware
+        chain.add(CommandGuardMiddleware(mode_getter=mode_getter))
+        return True
+    except Exception as e:
+        logger.warning(f"CommandGuardMiddleware 注册失败: {e}")
+        return False
+
+
 class MiddlewareChain:
     def __init__(self):
         self._middlewares: List[AgentMiddleware] = []

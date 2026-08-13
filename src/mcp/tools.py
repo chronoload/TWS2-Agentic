@@ -5316,6 +5316,17 @@ def get_tools(base_dir: Optional[Path] = None, enabled_only: bool = False) -> Li
     except Exception:
         _record_tool_group("media", "多媒体工具", [])
 
+    # ── 团队协作工具（Cline AgentTeam） ────────────────────
+    try:
+        # 惰性导入团队工具：仅在 get_team_tools 可用时注册"团队协作"工具组
+        from .team import get_team_tools
+        team_tools = get_team_tools()
+        all_tools.extend(_record_tool_group("team", "团队协作", team_tools))
+    except Exception:
+        # 团队模块（或其所依赖的运行时）不可用时降级为空工具组，
+        # 保证 get_tools 整体不因单个工具组失败而中断
+        _record_tool_group("team", "团队协作", [])
+
     # ── 远程 MCP 服务工具（如百度搜索等） ────────────────
     try:
         mcp_service_tools = load_mcp_service_tools()

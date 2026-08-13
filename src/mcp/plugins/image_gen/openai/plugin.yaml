@@ -1,0 +1,7 @@
+name: openai
+version: 1.0.0
+description: "OpenAI 图像生成后端 (gpt-image-2)。保存生成图像到本地缓存。"
+author: TS2 (adapted from Hermes)
+kind: backend
+requires_env:
+  - OPENAI_API_KEY

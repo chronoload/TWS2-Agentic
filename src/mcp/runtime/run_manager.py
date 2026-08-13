@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
+from ..worktree import remove_worktree
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +48,12 @@ class RunRecord:
     started_at: float = 0.0
     completed_at: float = 0.0
     pre_run_checkpoint_id: Optional[str] = None
+    # 本次运行关联的 git worktree 路径（由 mcp/worktree.py 的 create_task_worktree 创建）。
+    # 非空表示该次任务在隔离的 worktree 中执行，用于实验性改动或并行任务隔离。
+    worktree_path: Optional[str] = None
+    # 任务结束后是否保留 worktree（True 表示保留，False 表示随任务结束自动清理）。
+    # 由 cleanup_worktree(run_id, keep=True) 置位，用于调试期或需要人工复查的场景。
+    keep_worktree: bool = False
 
     @property
     def duration_ms(self) -> int:
@@ -112,6 +120,7 @@ class RunManager:
             record.completed_at = time.time()
             record.prompt_tokens = prompt_tokens
             record.completion_tokens = completion_tokens
+            self._cleanup_worktree_if_any(record)
             self._persist(record)
 
     def mark_error(self, run_id: str, error: str):
@@ -120,6 +129,7 @@ class RunManager:
             record.status = RunStatus.ERROR
             record.error = error
             record.completed_at = time.time()
+            self._cleanup_worktree_if_any(record)
             self._persist(record)
 
     def mark_interrupted(self, run_id: str):
@@ -127,6 +137,7 @@ class RunManager:
         if record:
             record.status = RunStatus.INTERRUPTED
             record.completed_at = time.time()
+            self._cleanup_worktree_if_any(record)
             self._persist(record)
 
     def mark_timeout(self, run_id: str):
@@ -143,6 +154,43 @@ class RunManager:
             if record.task and not record.task.done():
                 record.task.cancel()
             self.mark_interrupted(run_id)
+
+    def attach_worktree(self, run_id: str, worktree_path: str):
+        """将已创建好的 worktree 关联到指定运行记录
+
+        与 mcp/worktree.py 的 create_task_worktree 联动：外部先调用
+        create_task_worktree 创建隔离工作区，再把返回的 path 登记到
+        RunRecord 上。此后该任务终结时（见 _cleanup_worktree_if_any）
+        会按此路径自动清理。
+        """
+        record = self._runs.get(run_id)
+        if record:
+            record.worktree_path = worktree_path
+            self._persist(record)
+
+    def cleanup_worktree(self, run_id: str, keep: bool = False) -> bool:
+        """主动清理运行记录关联的 worktree
+
+        - keep=True：标记保留（置 keep_worktree=True 并持久化），后续
+          任务终结时的自动清理将跳过该 worktree，方便调试复查；
+        - keep=False：调用 mcp/worktree.py 的 remove_worktree 删除，
+          成功后清空 worktree_path 并持久化。
+        返回清理是否成功（无可清理对象时视为成功）。
+        """
+        record = self._runs.get(run_id)
+        # 记录不存在或尚未关联 worktree：无需清理，直接视为成功
+        if not record or not record.worktree_path:
+            return True
+        if keep:
+            # 保留模式：只打标记，不执行删除
+            record.keep_worktree = True
+            self._persist(record)
+            return True
+        removed = remove_worktree(record.worktree_path)
+        if removed:
+            record.worktree_path = None
+            self._persist(record)
+        return removed
 
     def get(self, run_id: str) -> Optional[RunRecord]:
         return self._runs.get(run_id)
@@ -166,6 +214,23 @@ class RunManager:
                     to_remove.append(run_id)
         for run_id in to_remove:
             del self._runs[run_id]
+
+    def _cleanup_worktree_if_any(self, record: RunRecord):
+        """任务终结时的 worktree 自动清理（生命周期清理策略）
+
+        在 mark_success / mark_error / mark_interrupted 等终结状态转换时被调用：
+        - 仅当记录关联了 worktree（worktree_path 非空）且未被标记保留
+          （keep_worktree=False）时才执行删除；
+        - 复用 mcp/worktree.py 的 remove_worktree 完成 git worktree remove，
+          删除成功后清空 worktree_path，避免重复清理；
+        - 清理失败只记录错误日志，不阻断任务收尾流程。
+        """
+        if record.worktree_path and not record.keep_worktree:
+            try:
+                if remove_worktree(record.worktree_path):
+                    record.worktree_path = None
+            except Exception as exc:
+                logger.error(f"RunManager worktree cleanup error: {exc}")
 
     def _find_running_by_thread(self, thread_id: str) -> Optional[RunRecord]:
         for record in self._runs.values():

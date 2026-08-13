@@ -1,0 +1,7 @@
+name: web-ddgs
+version: 1.0.0
+description: "DuckDuckGo 网页搜索 — 通过 ddgs Python 包，无需 API 密钥。安装: pip install ddgs"
+author: TS2 (adapted from Hermes)
+kind: backend
+provides_tools:
+  - web_search
