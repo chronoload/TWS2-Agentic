@@ -912,10 +912,10 @@ class CheckpointMiddleware(AgentMiddleware):
         self._fdb: Optional[Any] = None
 
     def _ensure_fdb(self) -> Any:
-        """懒初始化 SQLite 文件版本数据库"""
+        """懒初始化 SQLite 文件版本数据库（独立于 workspace 的主目录存储，随 workspace 哈希隔离）"""
         if self._fdb is None and self._workspace_root:
-            from .file_version_db import FileVersionDB
-            db_path = os.path.join(self._workspace_root, ".ts2_data", "file_versions.db")
+            from .file_version_db import FileVersionDB, default_db_path
+            db_path = default_db_path(self._workspace_root)
             self._fdb = FileVersionDB(db_path)
         return self._fdb
 

@@ -5252,6 +5252,33 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             return True
         return False
 
+    def _force_snapshot_to_store(agent, session_id: str, store) -> bool:
+        """流式/运行中 Agent 的强制快照落盘（switch 离开时兜底）
+
+        `_sync_agent_from_store` 在 chat 运行中（streaming / _chat_active 未空闲）
+        会跳过同步，导致「流式中切换会话」时消息不落盘 —— 若该会话之后被
+        回收（agent 池清理 / 服务重启）则内容丢失。
+        此函数绕过 streaming 判定，直接把当前内存快照条件化写入 SessionStore：
+        - store 已有更多消息时不覆盖（避免流式快照丢失 store 独有数据）；
+        - 无记录时自动创建（标题沿用 _extract_session_name）。
+        """
+        try:
+            msgs = agent.snapshot_messages()
+            if not msgs:
+                return False
+            record = store.get(session_id)
+            if record and record.messages and len(record.messages) > len(msgs):
+                return False  # store 已有更多消息，不覆盖
+            if not record:
+                store.create_with_id(session_id=session_id,
+                                     name=_extract_session_name(msgs, [], session_id))
+            store.update(session_id, messages=msgs)
+            logger.info(f"[force-snapshot] Saved '{session_id[:12]}' {len(msgs)} msgs (streaming fallback)")
+            return True
+        except Exception as e:
+            logger.debug(f"[force-snapshot] error: {e}")
+            return False
+
     # ─── Web 审批联动 ─────────────────────────────────────────
     # request_id → (ApprovalRequest, agent)，供前端 decide API 决策
     _web_approval_requests = {}
@@ -6815,11 +6842,14 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     was_in_pool = req.session_id in _agent_pool
 
                 # 1. 保存所有非目标会话的 Agent 状态到 SessionStore
+                #    _sync_agent_from_store 在 chat 运行中(streaming)会跳过；
+                #    跳过时用快照强制落盘，避免流式中切换导致消息不保存、回收后丢失
                 if store:
                     with _agent_pool_lock:
                         for sid, ag in _agent_pool.items():
                             if sid != req.session_id and ag.messages:
-                                _sync_agent_from_store(ag, sid, store)
+                                if not _sync_agent_from_store(ag, sid, store):
+                                    _force_snapshot_to_store(ag, sid, store)
 
                 # 2. 主动激活目标 Agent — 状态机会自动从 Store 加载
                 logger.info(f"[switch] Activating session '{req.session_id[:12]}'")
@@ -7369,8 +7399,8 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     def _get_fdb_for_workspace(workspace_dir: str) -> Optional[Any]:
         """获取 FileVersionDB 实例（独立于 agent，可直接查询检查点）"""
         try:
-            from ..middleware.file_version_db import FileVersionDB
-            db_path = os.path.join(workspace_dir, ".ts2_data", "file_versions.db")
+            from ..middleware.file_version_db import FileVersionDB, default_db_path
+            db_path = default_db_path(workspace_dir)
             if os.path.exists(db_path):
                 return FileVersionDB(db_path)
         except Exception as e:
