@@ -1652,7 +1652,13 @@ function __ensureVditorLute(v, done) {
   if (!v || v.lute) { done && done(); return; }
   ensureLib('Lute', function (ok) {
     if (ok && window.Lute && v && !v.lute) {
-      try { v.lute = new window.Lute(); } catch (e) { console.warn('Lute() 初始化失败:', e); }
+      try {
+        var L = window.Lute;
+        // GopherJS 编译产物：window.Lute 是命名空间对象，用 New() 工厂创建实例
+        if (L && typeof L.New === 'function') { v.lute = L.New(); }
+        else if (typeof L === 'function') { v.lute = new L(); }
+        else if (L && typeof L.default === 'function') { v.lute = new L.default(); }
+      } catch (e) { console.warn('Lute 初始化失败:', e); }
     }
     if (!v.lute) console.warn('Lute 加载失败，Markdown 渲染可能不可用');
     done && done();
