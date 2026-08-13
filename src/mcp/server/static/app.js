@@ -10514,6 +10514,57 @@ function _autoExpandCompact(sessionId, ui) {
   });
 }
 
+// ─── 无感滑动加载：滚动到消息列表顶部时，自动分页加载被压缩的具体历史（无需按钮）───
+// 触发点：_bindAgentMsgScroll 中 _agentMsgRenderStart === 0（窗口已到最早）且 scrollTop < 30。
+function _autoLoadCompactMoreIfAny() {
+  var sid = _getAgentSessionId();
+  if (!sid) return;
+  for (var i = 0; i < state.agentMessages.length; i++) {
+    var m = state.agentMessages[i];
+    if (m && m.isCompactSummary && m.expandedHasMore && !m._compactLoading) {
+      _loadCompactMorePage(m, i);
+      return;  // 一次只加载一张摘要卡，避免并发叠加
+    }
+  }
+}
+
+// 加载压缩历史下一页（分页追加），插入已加载块末尾，保持窗口起点与滚动位置
+function _loadCompactMorePage(card, ti) {
+  var sid = _getAgentSessionId();
+  if (!sid || !card || card._compactLoading) return;
+  card._compactLoading = true;
+  var container = document.getElementById('agentMessages');
+  var oldSH = container ? container.scrollHeight : 0;
+  var oldST = container ? container.scrollTop : 0;
+  var off = (card.expandedCount || 0);
+  _fetchCompactPage(sid, off, _COMPACT_PAGE_SIZE).then(function(res) {
+    card._compactLoading = false;
+    var exp = (res && res.expanded) || [];
+    if (!exp.length) {
+      card.expandedHasMore = false;
+      if (container) _fullRenderRange(container, _agentMsgRenderStart, state.agentMessages.length, false, oldSH, oldST);
+      return;
+    }
+    var ui3 = _expandBackendMessages(exp).filter(function(m) { return !(m && m.isCompactSummary); });
+    // 找到已加载历史块的末尾（连续 _compactOwner 相同的消息之后），在其后追加
+    var insIdx = ti + 1;
+    while (insIdx < state.agentMessages.length && state.agentMessages[insIdx] && state.agentMessages[insIdx]._compactOwner === card._compactKey) { insIdx++; }
+    for (var x = 0; x < ui3.length; x++) { ui3[x]._compactOwner = card._compactKey; }
+    state.agentMessages.splice.apply(state.agentMessages, [insIdx, 0].concat(ui3));
+    card.expandedCount = (card.expandedCount || 0) + ui3.length;
+    card.expandedTotal = res.total || card.expandedCount;
+    card.expandedHasMore = !!res.has_more;
+    // 保持窗口起点与滚动位置重渲染（不跳底部）
+    if (container) {
+      _fullRenderRange(container, _agentMsgRenderStart, state.agentMessages.length, false, oldSH, oldST);
+    } else {
+      renderAgentMessages();
+    }
+  }).catch(function() {
+    card._compactLoading = false;
+  });
+}
+
 function _messagesEqual(a, b) {
   /** 仅比较消息内容本身（忽略渲染期附加的 _streaming 等瞬时键），不做任何语义合并 */
   const clean = function(list) {
@@ -12005,9 +12056,11 @@ function _applyAgentMsgWindow(container, forceScrollBottom) {
   }
   
   _bindAgentMsgClicks(container);
-  if (total > _AGENT_MSG_WINDOW_THRESHOLD) {
-    _bindAgentMsgScroll(container);
-  }
+  // 无条件绑定滚动监听：
+  //  - 窗口化（_agentMsgRenderStart>0）→ 上滑无感扩展更早窗口
+  //  - 压缩摘要卡（_agentMsgRenderStart===0 且 has_more）→ 上滑无感加载被压缩历史
+  // 两者都不需要按钮，滚动到顶自动触发（统一的无感滑动加载）。
+  _bindAgentMsgScroll(container);
 }
 
 // 增量渲染入口（仅非窗口化/从头渲染时使用）：直接走渐进式全量渲染
@@ -12076,13 +12129,8 @@ function _progressiveRender(container, start, end, forceScrollBottom, prevScroll
 // 全量渲染指定范围
 function _fullRenderRange(container, start, end, forceScrollBottom, prevScrollHeight, prevScrollTop) {
   let html = '';
-  
-  // 如果 start > 0，添加"加载更早消息"按钮
-  if (start > 0) {
-    html += '<div class="agent-msg-loadmore" id="agentMsgLoadMore">' +
-      '<button onclick="_extendAgentMsgWindowTop()">📂 加载更早的 ' +
-      Math.min(_AGENT_MSG_WINDOW_EXTEND, start) + ' 条消息（剩 ' + start + ' 条）</button></div>';
-  }
+  // 不再渲染「📂 加载更早消息」按钮：窗口化模式下滚动到顶部即自动扩展（_extendAgentMsgWindowTop），
+  // 与压缩历史一样走无感滑动加载，避免按钮打断阅读流。
   
   for (let i = start; i < end; i++) {
     const msg = state.agentMessages[i];
@@ -12110,7 +12158,7 @@ function _fullRenderRange(container, start, end, forceScrollBottom, prevScrollHe
 
 function _renderAgentMessageHtml(msg, mi) {
   let rendered = '';
-  // ── 压缩摘要卡片：提示"这段被压缩过 + 已找回 N 条"，可展开摘要对比确认无遗漏 ──
+  // ── 压缩摘要卡片：提示"这段被压缩过 + 已找回 N 条"，滚动到顶部自动加载更早历史（无感）──
   if (msg.role === 'system' && msg.isCompactSummary) {
     if (!msg._compactKey) msg._compactKey = 'compact_' + mi + '_' + Date.now();
     var _cid = msg._compactKey;
@@ -12120,25 +12168,20 @@ function _renderAgentMessageHtml(msg, mi) {
     var _countTip;
     if (_loadedN > 0) {
       _countTip = _hasMore
-        ? '（已找回 <b>' + _loadedN + ' / ' + _totalN + '</b> 条，点「加载更多」可查看更早历史）'
-        : '（已找回全部 <b>' + _loadedN + ' / ' + _totalN + '</b> 条具体历史，点开可对比摘要确认无遗漏）';
+        ? '（已找回 <b>' + _loadedN + ' / ' + _totalN + '</b> 条，上滑自动加载更早历史）'
+        : '（已找回全部 <b>' + _loadedN + ' / ' + _totalN + '</b> 条具体历史）';
     } else {
       _countTip = _totalN > 0
-        ? '（共 <b>' + _totalN + '</b> 条具体历史可找回，点开可对比摘要确认无遗漏）'
-        : '（点开可查看摘要内容）';
+        ? '（共 <b>' + _totalN + '</b> 条具体历史，上滑自动加载）'
+        : '（可展开摘要查看内容）';
     }
-    var _btn = '';
-    if (_loadedN > 0 && _hasMore) {
-      _btn = '<button class="compact-more-btn" data-cid="' + _cid + '" style="cursor:pointer;color:#fff;background:var(--accent);border:none;border-radius:4px;padding:3px 8px;font-size:11px;flex:0 0 auto">⏬ 加载更多</button>';
-    } else if (!_loadedN) {
-      _btn = '<button class="compact-expand-btn" data-cid="' + _cid + '" style="cursor:pointer;color:#fff;background:var(--accent);border:none;border-radius:4px;padding:3px 8px;font-size:11px;flex:0 0 auto">🔍 找回具体历史</button>';
-    }
+    // 无按钮：滚动到消息列表顶部时自动分页加载（_autoLoadCompactMoreIfAny），
+    // 与窗口化"加载更早消息"统一为无感滑动加载，不打断阅读流。
     rendered = '<div class="compact-card" data-cid="' + _cid + '" style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-secondary);font-size:12px">' +
       '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
         '<span>📜</span>' +
         '<span style="flex:1;color:var(--fg-muted)">这段对话曾被压缩为摘要' + _countTip + '</span>' +
         '<span class="compact-toggle" data-cid="' + _cid + '" style="cursor:pointer;color:var(--accent);font-size:11px;flex:0 0 auto">展开摘要</span>' +
-        _btn +
       '</div>' +
       '<div class="compact-summary-body" data-cid="' + _cid + '" style="display:none;margin-top:6px;padding:8px;background:var(--bg);border:1px dashed var(--border);border-radius:6px;white-space:pre-wrap;max-height:260px;overflow-y:auto;font-size:11px;color:var(--fg)">' + escapeHtml(msg.content) + '</div>' +
     '</div>';
@@ -12230,17 +12273,23 @@ function _renderAgentMessageHtml(msg, mi) {
   '</div>';
 }
 
-// 监听消息容器滚动：到顶部时自动加载更早消息（防抖优化）
+// 监听消息容器滚动：到顶部时自动加载更早消息（窗口扩展或压缩历史，防抖优化）
 function _bindAgentMsgScroll(container) {
   if (_agentMsgScrollBound) return;
   _agentMsgScrollBound = true;
   let scrollTimeout = null;
   container.addEventListener('scroll', function() {
     if (scrollTimeout) return;  // 防抖
-    if (this.scrollTop < 30 && _agentMsgRenderStart > 0) {
+    if (this.scrollTop < 30) {
       scrollTimeout = requestAnimationFrame(function() {
-        _extendAgentMsgWindowTop(true);
         scrollTimeout = null;
+        if (_agentMsgRenderStart > 0) {
+          // 窗口化：上滑无感扩展更早消息窗口
+          _extendAgentMsgWindowTop(true);
+        } else {
+          // 已到最早窗口（含压缩摘要卡）：无感加载被压缩的具体历史（滚动即加载，无需按钮）
+          _autoLoadCompactMoreIfAny();
+        }
       });
     }
   }, { passive: true });  // passive 提升滚动性能
@@ -12279,77 +12328,8 @@ function _initGlobalFileClickHandler() {
         }
         return;
       }
-      // === 压缩摘要卡：找回具体历史（分页懒加载第一页，替换摘要卡） ===
-      var _compBtn = e.target.closest('.compact-expand-btn');
-      if (_compBtn) {
-        var _cId2 = _compBtn.getAttribute('data-cid');
-        var _sid2 = _getAgentSessionId();
-        if (!_sid2) { _compBtn.textContent = '⚠️ 无会话'; return; }
-        _compBtn.textContent = '⏳ 展开中...';
-        _compBtn.disabled = true;
-        _fetchCompactPage(_sid2, 0, _COMPACT_PAGE_SIZE).then(function(res) {
-          var _exp = (res && res.expanded) || [];
-          if (!_exp.length) { _compBtn.textContent = '⚠️ 无可找回'; return; }
-          var _ui = _expandBackendMessages(_exp).filter(function(m) { return !(m && m.isCompactSummary); });
-          var _ti = -1;
-          for (var _i2 = 0; _i2 < state.agentMessages.length; _i2++) {
-            if (state.agentMessages[_i2] && state.agentMessages[_i2]._compactKey === _cId2) { _ti = _i2; break; }
-          }
-          if (_ti < 0) { _compBtn.textContent = '⚠️ 找不到摘要卡'; return; }
-          var _card = state.agentMessages[_ti];
-          _card.expandedCount = _ui.length;
-          _card.expandedTotal = res.total || _ui.length;
-          _card.expandedHasMore = !!res.has_more;
-          var _newBlock = [_card];
-          for (var _x2 = 0; _x2 < _ui.length; _x2++) {
-            _ui[_x2]._compactOwner = _cId2;
-            _newBlock.push(_ui[_x2]);
-          }
-          state.agentMessages.splice.apply(state.agentMessages, [_ti, 1].concat(_newBlock));
-          renderAgentMessages();
-        }).catch(function() { _compBtn.textContent = '⚠️ 展开失败'; _compBtn.disabled = false; });
-        return;
-      }
-      // === 压缩摘要卡：加载更多（分页追加已找回历史） ===
-      var _moreBtn = e.target.closest('.compact-more-btn');
-      if (_moreBtn) {
-        var _cId3 = _moreBtn.getAttribute('data-cid');
-        var _sid3 = _getAgentSessionId();
-        if (!_sid3) { _moreBtn.textContent = '⚠️ 无会话'; return; }
-        var _card3 = null;
-        var _ti3 = -1;
-        for (var _m3 = 0; _m3 < state.agentMessages.length; _m3++) {
-          if (state.agentMessages[_m3] && state.agentMessages[_m3]._compactKey === _cId3) { _ti3 = _m3; _card3 = state.agentMessages[_m3]; break; }
-        }
-        if (!_card3 || _ti3 < 0) { _moreBtn.textContent = '⚠️ 找不到摘要卡'; return; }
-        if (_card3._compactLoading) return; // 防重入
-        _card3._compactLoading = true;
-        _moreBtn.textContent = '⏳ 加载中...';
-        _moreBtn.disabled = true;
-        var _off3 = (_card3.expandedCount || 0);
-        _fetchCompactPage(_sid3, _off3, _COMPACT_PAGE_SIZE).then(function(res) {
-          _card3._compactLoading = false;
-          var _exp3 = (res && res.expanded) || [];
-          if (!_exp3.length) { _moreBtn.textContent = '没有更多了'; return; }
-          var _ui3 = _expandBackendMessages(_exp3).filter(function(m) { return !(m && m.isCompactSummary); });
-          // 找到已加载历史块的末尾（连续 _compactOwner 相同的消息之后），在其后追加
-          var _insIdx = _ti3 + 1;
-          while (_insIdx < state.agentMessages.length && state.agentMessages[_insIdx] && state.agentMessages[_insIdx]._compactOwner === _cId3) { _insIdx++; }
-          for (var _x3 = 0; _x3 < _ui3.length; _x3++) { _ui3[_x3]._compactOwner = _cId3; }
-          state.agentMessages.splice.apply(state.agentMessages, [_insIdx, 0].concat(_ui3));
-          _card3.expandedCount = (_card3.expandedCount || 0) + _ui3.length;
-          _card3.expandedTotal = res.total || _card3.expandedCount;
-          _card3.expandedHasMore = !!res.has_more;
-          if (!_card3.expandedHasMore) { _moreBtn.textContent = '已全部加载'; }
-          else { _moreBtn.textContent = '⏬ 加载更多'; _moreBtn.disabled = false; }
-          renderAgentMessages();
-        }).catch(function() {
-          _card3._compactLoading = false;
-          _moreBtn.textContent = '⚠️ 加载失败';
-          _moreBtn.disabled = false;
-        });
-        return;
-      }
+      // === 压缩摘要卡：无按钮（恢复逻辑已改为滚动到顶部自动加载，见 _bindAgentMsgScroll）===
+      // （compact-expand-btn / compact-more-btn 分支已移除；仅保留 compact-toggle 展开摘要正文）
       // === 排除非 Agent 区域的点击（关键修复）===
       // 1. 编辑器标签页区域的点击不由全局处理器处理
       //    主编辑器: #editorTabs, 分屏编辑器: #editorTabs-*, 容器类: .editor-tabs
@@ -19544,6 +19524,7 @@ function setAgentDisplayMode(mode) {
   } else {
     disableAgentSplitMode();
   }
+  applyIntraSplit();
   showToast('已切换到' + (mode === 'split' ? '真分屏' : '单实例跳跃') + '模式');
 }
 
@@ -19563,10 +19544,12 @@ function enableAgentSplitMode() {
 }
 
 function disableAgentSplitMode() {
+  _splitStopPolling();
   const splitContainer = document.getElementById('agentSplitContainer');
   if (splitContainer) {
     splitContainer.remove();
   }
+  window._agentSplitPanels = {};
   const mainAgent = document.getElementById('agentChatMain');
   if (mainAgent) {
     mainAgent.style.display = '';
@@ -19580,22 +19563,26 @@ function applyAgentSplitLayout() {
   const layout = localStorage.getItem(AGENT_SPLIT_LAYOUT_KEY) || 'horizontal';
   const count = parseInt(localStorage.getItem(AGENT_SPLIT_COUNT_KEY) || '2');
   
-  // 移除已有的分屏容器
-  const existing = document.getElementById('agentSplitContainer');
-  if (existing) existing.remove();
-  
   // 隐藏原主聊天区域
   const mainAgent = document.getElementById('agentChatMain');
   if (mainAgent) {
     mainAgent.style.display = 'none';
   }
   
-  // 创建分屏容器
-  const container = document.createElement('div');
-  container.id = 'agentSplitContainer';
-  container.className = 'agent-split-container';
+  // 复用已有分屏容器（不重建 DOM，保留面板状态/滚动/输入）
+  let container = document.getElementById('agentSplitContainer');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'agentSplitContainer';
+    container.className = 'agent-split-container';
+    const agentMain = document.getElementById('agentChatMain');
+    if (agentMain && agentMain.parentNode) {
+      agentMain.parentNode.insertBefore(container, agentMain);
+    }
+  }
   
   // 设置布局类
+  container.className = 'agent-split-container';
   if (layout === 'horizontal') {
     container.classList.add('layout-horizontal');
   } else if (layout === 'vertical') {
@@ -19619,26 +19606,65 @@ function applyAgentSplitLayout() {
         list.forEach(function(id) { sessionsToShow.push(id); });
       }
     }
-    // 创建分屏面板
-    for (let i = 0; i < Math.min(sessionsToShow.length, count); i++) {
-      const panel = createAgentSplitPanel(sessionsToShow[i], i);
-      container.appendChild(panel);
-    }
-    // 插入到原主聊天区域位置
-    const agentMain = document.getElementById('agentChatMain');
-    if (agentMain && agentMain.parentNode) {
-      agentMain.parentNode.insertBefore(container, agentMain);
-    }
+    _syncSplitPanels(container, sessionsToShow, count);
+    _splitStartPolling();
     showToast('分屏模式已激活：' + sessionsToShow.length + ' 个会话');
   }).catch(function() {
-    for (let i = 0; i < Math.min(sessionsToShow.length, count); i++) {
-      container.appendChild(createAgentSplitPanel(sessionsToShow[i], i));
-    }
-    const agentMain = document.getElementById('agentChatMain');
-    if (agentMain && agentMain.parentNode) {
-      agentMain.parentNode.insertBefore(container, agentMain);
+    _syncSplitPanels(container, sessionsToShow, count);
+    _splitStartPolling();
+  });
+}
+
+// 同步分屏面板集合：已有面板复用（保留 DOM/状态），缺的创建，多余的移除
+function _syncSplitPanels(container, sessionIds, count) {
+  // 记录现有面板
+  const existing = {};
+  container.querySelectorAll('.agent-split-panel').forEach(function(p) {
+    existing[p.dataset.sessionId] = p;
+  });
+  const panelMap = window._agentSplitPanels = window._agentSplitPanels || {};
+  
+  // 移除多余面板（不在目标列表中的）
+  const target = {};
+  sessionIds.slice(0, count).forEach(function(id) { target[id] = true; });
+  Object.keys(existing).forEach(function(id) {
+    if (!target[id]) {
+      container.removeChild(existing[id]);
+      delete existing[id];
+      delete panelMap[id];
     }
   });
+  
+  // 补齐/复用面板（保持容器内顺序 = sessionIds 顺序）
+  const wanted = sessionIds.slice(0, count);
+  let prevEl = null;
+  wanted.forEach(function(id) {
+    let panel = existing[id];
+    if (!panel) {
+      panel = createAgentSplitPanel(id);
+      existing[id] = panel;
+      panelMap[id] = panel;
+      // 复用该会话的已缓存消息（若本会话已在主视图加载过）
+      const cached = _splitSessionCache[id];
+      if (cached && cached.messages) {
+        _splitRenderMessages(panel, cached.messages);
+      } else {
+        _splitLoadSession(panel, id);
+      }
+    }
+    // 重新挂载保持顺序
+    if (panel.parentNode !== container) {
+      if (prevEl && prevEl.nextSibling) {
+        container.insertBefore(panel, prevEl.nextSibling);
+      } else {
+        container.appendChild(panel);
+      }
+    }
+    prevEl = panel;
+  });
+  
+  // 重建拖拽分隔条（horizontal/vertical 布局）
+  _rebuildSplitDividers(container);
 }
 
 function createAgentSplitPanel(sessionId, index) {
@@ -19652,83 +19678,322 @@ function createAgentSplitPanel(sessionId, index) {
   
   const title = document.createElement('span');
   title.className = 'agent-split-title';
-  title.textContent = '会话 ' + (index + 1) + ' (' + sessionId.slice(0, 8) + ')';
+  title.textContent = sessionId.slice(0, 8) + '…';
+  title.title = sessionId;
   
   const isCurSession = sessionId === _getAgentSessionId();
   const status = document.createElement('span');
   status.className = 'agent-split-status';
-  // P3 状态机枚举文本（对齐 kimi-code：idle/running/streaming/awaiting_approval/aborted）
-  const st = isCurSession ? (state.agentSessionState || (state.agentStreaming ? 'streaming' : 'idle')) : 'idle';
-  const stTxt = { idle: '○ 空闲', running: '● 处理中', streaming: '● 对话中', awaiting_approval: '⏳ 待审批', aborted: '⛔ 已中止' }[st] || '○ 空闲';
-  const stColor = { idle: 'var(--fg-muted)', running: '#f59e0b', streaming: 'var(--green, #22c55e)', awaiting_approval: '#f97316', aborted: '#ef4444' }[st] || 'var(--fg-muted)';
-  status.textContent = stTxt;
-  status.style.color = stColor;
+  status.dataset.sid = sessionId;
+  _updateSplitStatusEl(status, sessionId, isCurSession ? (state.agentSessionState || (state.agentStreaming ? 'streaming' : 'idle')) : 'idle');
   
   const switchBtn = document.createElement('button');
   switchBtn.className = 'agent-split-switch';
-  switchBtn.textContent = '切换';
+  switchBtn.textContent = '⤢';
+  switchBtn.title = '在主视图打开此会话';
   switchBtn.onclick = function() {
     switchToSession(sessionId);
+  };
+  
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'agent-split-close';
+  closeBtn.textContent = '✕';
+  closeBtn.title = '关闭此面板';
+  closeBtn.onclick = function() {
+    const container = document.getElementById('agentSplitContainer');
+    if (container) {
+      container.removeChild(panel);
+      delete window._agentSplitPanels[sessionId];
+    }
   };
   
   header.appendChild(title);
   header.appendChild(status);
   header.appendChild(switchBtn);
+  header.appendChild(closeBtn);
   
   // 消息区域
   const messages = document.createElement('div');
   messages.className = 'agent-split-messages';
-  messages.id = 'agent-split-messages-' + index;
+  messages.dataset.sid = sessionId;
+  messages.innerHTML = '<div class="agent-split-empty">加载中…</div>';
   
-  // 渲染该会话的消息 — 前端不缓存，按需从后端加载
-  const isStreaming = false;
-
-  if (sessionId === _getAgentSessionId() && state.agentMessages.length > 0) {
-    // 当前活跃会话：直接使用 state.agentMessages
-    state.agentMessages.forEach(function(msg) {
-      if (msg.role === 'system') return;
-      const msgEl = document.createElement('div');
-      msgEl.className = 'agent-msg agent-msg-' + msg.role;
-      msgEl.innerHTML = '<div class="msg-content">' + (msg.content || '') + '</div>';
-      messages.appendChild(msgEl);
-    });
-  } else {
-    // 其他会话：显示加载提示，点击从后端重载
-    const loadHint = document.createElement('div');
-    loadHint.style.cssText = 'padding:12px;text-align:center;color:var(--fg-muted);font-size:11px;cursor:pointer';
-    loadHint.textContent = '点击从后端加载历史消息';
-    loadHint.onclick = async function() {
-      loadHint.textContent = '加载中...';
-      try {
-        const res = await client.switchAgentSession(sessionId);
-        if (res.code === 0 && res.data?.switched) {
-          switchToSession(sessionId);
-        }
-      } catch(e) {
-        loadHint.textContent = '加载失败: ' + e.message;
-      }
-    };
-    messages.appendChild(loadHint);
-  }
-  
-  // 如果是当前会话，显示输入框
+  // 输入区域（每个面板独立输入框，发送到对应会话）
   const inputArea = document.createElement('div');
   inputArea.className = 'agent-split-input';
-  
-  if (sessionId === _getAgentSessionId()) {
-    inputArea.innerHTML = '<div class="agent-input-wrap" style="margin:8px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;display:flex;gap:6px">' +
-      '<textarea placeholder="输入消息..." style="flex:1;min-height:40px;padding:6px;background:transparent;border:none;color:var(--fg);font-size:12px;resize:none;outline:none"></textarea>' +
-      '<button onclick="sendAgentMessage()" style="padding:4px 12px;background:var(--accent);color:var(--bg);border:none;border-radius:4px;cursor:pointer;font-size:11px">发送</button>' +
-      '</div>';
-  } else {
-    inputArea.innerHTML = '<div style="padding:12px;text-align:center;color:var(--fg-muted);font-size:11px;border-top:1px solid var(--border);cursor:pointer" onclick="switchToSession(\'' + sessionId + '\')">点击切换到此会话</div>';
-  }
+  const textarea = document.createElement('textarea');
+  textarea.className = 'agent-split-textarea';
+  textarea.placeholder = '输入消息… (Enter 发送)';
+  textarea.rows = 2;
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'agent-split-send';
+  sendBtn.textContent = '发送';
+  sendBtn.onclick = function() { _splitSendMessage(sessionId, panel, textarea); };
+  textarea.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      _splitSendMessage(sessionId, panel, textarea);
+    }
+  });
+  inputArea.appendChild(textarea);
+  inputArea.appendChild(sendBtn);
   
   panel.appendChild(header);
   panel.appendChild(messages);
   panel.appendChild(inputArea);
   
   return panel;
+}
+
+// ─── 真分屏辅助：会话消息缓存 / 加载 / 渲染 / 发送 / 轮询 / 拖拽分隔 ───
+
+// 会话消息缓存（分屏面板复用，避免重复请求）
+window._splitSessionCache = {};
+
+// 加载指定会话消息到面板（只读 API，不切换主视图会话）
+async function _splitLoadSession(panel, sessionId) {
+  const messagesEl = panel.querySelector('.agent-split-messages');
+  try {
+    const res = await client.getAgentSession(sessionId);
+    if (res && res.code === 0 && res.data) {
+      const msgs = res.data.messages || [];
+      window._splitSessionCache[sessionId] = { messages: msgs, status: res.data.status, is_streaming: !!res.data.is_streaming };
+      _splitRenderMessages(panel, msgs);
+      _updateSplitStatusEl(panel.querySelector('.agent-split-status'), sessionId, res.data.status || 'idle');
+    }
+  } catch (e) {
+    if (messagesEl) {
+      messagesEl.innerHTML = '<div class="agent-split-empty" style="color:var(--red)">加载失败: ' + escapeHtml(e.message || e) + '</div>';
+    }
+  }
+}
+
+// 渲染会话消息到面板（复用主视图的消息渲染风格）
+function _splitRenderMessages(panel, messages) {
+  const messagesEl = panel.querySelector('.agent-split-messages');
+  if (!messagesEl) return;
+  if (!messages || messages.length === 0) {
+    messagesEl.innerHTML = '<div class="agent-split-empty">暂无消息</div>';
+    return;
+  }
+  // 保留滚动位置：记录是否为底部
+  const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  messagesEl.innerHTML = '';
+  messages.forEach(function(msg) {
+    if (!msg || msg.role === 'system') return;
+    const msgEl = document.createElement('div');
+    msgEl.className = 'agent-msg agent-msg-' + msg.role;
+    let content = msg.content || '';
+    if (msg.role === 'assistant' && msg.reasoning_content) {
+      content = '<details class="agent-reasoning"><summary>思考</summary>' + escapeHtml(msg.reasoning_content) + '</details>' + content;
+    }
+    // 工具调用折叠卡
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length) {
+      const names = msg.tool_calls.map(function(tc) {
+        return (tc && tc.function && tc.function.name) || 'tool';
+      }).join(', ');
+      content += '<div class="agent-tool-badge">🔧 ' + escapeHtml(names) + '</div>';
+    }
+    // 工具结果折叠
+    if (msg.role === 'tool') {
+      content = '<div class="agent-tool-result">' + escapeHtml(String(content).slice(0, 500)) + '</div>';
+    }
+    msgEl.innerHTML = '<div class="msg-content">' + (typeof window.renderAgentContent === 'function' ? (window.renderAgentContent(content) || escapeHtml(String(content))) : escapeHtml(String(content))) + '</div>';
+    messagesEl.appendChild(msgEl);
+  });
+  // 保持在底部
+  if (nearBottom) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+}
+
+// 更新面板状态点
+function _updateSplitStatusEl(el, sessionId, st) {
+  if (!el) return;
+  const stTxt = { idle: '○ 空闲', running: '● 处理中', streaming: '● 对话中', awaiting_approval: '⏳ 待审批', aborted: '⛔ 已中止', not_found: '○ 无会话' }[st] || '○ 空闲';
+  const stColor = { idle: 'var(--fg-muted)', running: '#f59e0b', streaming: '#22c55e', awaiting_approval: '#f97316', aborted: '#ef4444', not_found: 'var(--fg-muted)' }[st] || 'var(--fg-muted)';
+  el.textContent = stTxt;
+  el.style.color = stColor;
+}
+
+// 从分屏面板发送消息到指定会话
+async function _splitSendMessage(sessionId, panel, textarea) {
+  const text = (textarea.value || '').trim();
+  if (!text) return;
+  textarea.value = '';
+  // 追加用户消息到面板（乐观渲染）
+  const messagesEl = panel.querySelector('.agent-split-messages');
+  if (messagesEl) {
+    const msgEl = document.createElement('div');
+    msgEl.className = 'agent-msg agent-msg-user';
+    msgEl.innerHTML = '<div class="msg-content">' + escapeHtml(text) + '</div>';
+    messagesEl.appendChild(msgEl);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  try {
+    // 切到该会话上下文（保持后端会话归属），发送
+    _setAgentSessionId(sessionId);
+    const res = await client.agentChat(text, [], sessionId);
+    // 发送成功后立即刷新面板（拉取最新消息，含流式结果轮询）
+    await _splitLoadSession(panel, sessionId);
+  } catch (e) {
+    showToast('发送失败: ' + (e.message || e), 'error');
+  }
+}
+
+// 轮询：分屏模式下定期刷新各面板会话消息
+let _splitPollTimer = null;
+function _splitStartPolling() {
+  _splitStopPolling();
+  _splitPollTimer = setInterval(function() {
+    const container = document.getElementById('agentSplitContainer');
+    if (!container) return;
+    // 仅刷新当前可见的面板（避免后台开销）
+    container.querySelectorAll('.agent-split-panel').forEach(function(panel) {
+      const sid = panel.dataset.sessionId;
+      if (sid) _splitLoadSession(panel, sid);
+    });
+  }, 4000);
+}
+function _splitStopPolling() {
+  if (_splitPollTimer) {
+    clearInterval(_splitPollTimer);
+    _splitPollTimer = null;
+  }
+}
+
+// 重建拖拽分隔条（horizontal/vertical 布局面板间加可拖拽分隔条）
+function _rebuildSplitDividers(container) {
+  // 移除旧分隔条
+  container.querySelectorAll('.agent-split-divider').forEach(function(d) { d.remove(); });
+  const layout = localStorage.getItem(AGENT_SPLIT_LAYOUT_KEY) || 'horizontal';
+  if (layout === 'grid') return; // 网格布局不支持拖拽
+  const isRow = layout === 'horizontal';
+  const panels = container.querySelectorAll('.agent-split-panel');
+  if (panels.length < 2) return;
+  const saved = localStorage.getItem('ts2_agent_split_divider_' + layout);
+  const basePx = saved ? parseFloat(saved) : 50; // 百分比
+  const applyWidth = function() {
+    panels.forEach(function(p, i) {
+      if (isRow) {
+        p.style.flex = (i === 0 ? basePx : (100 - basePx)) + ' 1 0%';
+      } else {
+        p.style.flex = (i === 0 ? basePx : (100 - basePx)) + ' 1 0%';
+      }
+    });
+  };
+  applyWidth();
+  // 在第一个面板后插入分隔条
+  const divider = document.createElement('div');
+  divider.className = 'agent-split-divider' + (isRow ? ' divider-col' : ' divider-row');
+  container.insertBefore(divider, panels[1]);
+  let dragging = false;
+  divider.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    dragging = true;
+    document.body.classList.add('split-dragging');
+    const onMove = function(ev) {
+      if (!dragging) return;
+      const rect = container.getBoundingClientRect();
+      let pct;
+      if (isRow) {
+        pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      } else {
+        pct = ((ev.clientY - rect.top) / rect.height) * 100;
+      }
+      pct = Math.max(15, Math.min(85, pct));
+      localStorage.setItem('ts2_agent_split_divider_' + layout, String(pct));
+      panels.forEach(function(p, i) {
+        p.style.flex = (i === 0 ? pct : (100 - pct)) + ' 1 0%';
+      });
+    };
+    const onUp = function() {
+      dragging = false;
+      document.body.classList.remove('split-dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+// ─── 单窗口内分屏（对话 + 工具面板，不干扰 single/split 模式）───
+let _intraObserver = null;
+
+function toggleIntraSplit() {
+  const on = localStorage.getItem('ts2_agent_intra_split') !== 'on';
+  localStorage.setItem('ts2_agent_intra_split', on ? 'on' : 'off');
+  applyIntraSplit();
+  showToast(on ? '已开启单窗口内分屏' : '已关闭单窗口内分屏');
+}
+
+// 应用单窗口内分屏：agentChatMain 加 intra-split（grid 两栏：对话 + 工具面板）
+function applyIntraSplit() {
+  const main = document.getElementById('agentChatMain');
+  const btn = document.getElementById('intraSplitBtn');
+  if (!main) return;
+  const mode = localStorage.getItem(AGENT_DISPLAY_MODE_KEY) || 'single';
+  const on = localStorage.getItem('ts2_agent_intra_split') === 'on' && mode === 'single';
+  // 按钮显隐：split（多会话看板）模式下隐藏，single 模式下可见
+  if (btn) btn.style.display = mode === 'split' ? 'none' : '';
+  main.classList.toggle('intra-split', on);
+  let side = document.getElementById('agentSplitSide');
+  if (on) {
+    if (!side) {
+      side = document.createElement('div');
+      side.id = 'agentSplitSide';
+      side.className = 'agent-split-side';
+      side.innerHTML = '<div class="agent-split-side-header"><span>🔧 工具调用</span><button class="agent-split-side-close" onclick="toggleIntraSplit()">✕</button></div><div class="agent-split-side-body" id="agentSplitSideBody"></div>';
+      main.appendChild(side);
+    }
+    _renderSplitSideTools();
+    // 监听消息区变化自动刷新工具面板
+    if (!_intraObserver) {
+      const msgsEl = document.getElementById('agentMessages');
+      if (msgsEl) {
+        _intraObserver = new MutationObserver(function() {
+          try {
+            if (localStorage.getItem('ts2_agent_intra_split') === 'on') _renderSplitSideTools();
+          } catch (e) {}
+        });
+        _intraObserver.observe(msgsEl, { childList: true, subtree: true });
+      }
+    }
+  } else {
+    if (side) side.remove();
+  }
+}
+
+// 从当前会话消息提取工具调用渲染到右侧面板
+function _renderSplitSideTools() {
+  const body = document.getElementById('agentSplitSideBody');
+  if (!body) return;
+  const msgs = (state && state.agentMessages) || [];
+  const tools = [];
+  msgs.forEach(function(m) {
+    if (m && m.role === 'assistant' && m.tool_calls && m.tool_calls.length) {
+      m.tool_calls.forEach(function(tc) {
+        if (tc && tc.function) {
+          tools.push({ name: tc.function.name, args: tc.function.arguments || '', id: tc.id || '' });
+        }
+      });
+    }
+  });
+  if (!tools.length) {
+    body.innerHTML = '<div class="agent-split-empty">暂无工具调用</div>';
+    return;
+  }
+  body.innerHTML = tools.map(function(t, i) {
+    return '<div class="agent-side-tool">' +
+      '<div style="display:flex;align-items:center;gap:6px">' +
+        '<span style="color:var(--cyan)">🔧</span>' +
+        '<span style="font-weight:600;font-size:11px;color:var(--fg)">' + escapeHtml(t.name) + '</span>' +
+        '<span style="margin-left:auto;font-size:9px;color:var(--fg-dim);font-family:monospace">#' + (i + 1) + '</span>' +
+      '</div>' +
+      '<div class="agent-side-tool-args">' + escapeHtml(String(t.args || '').slice(0, 300)) + '</div>' +
+    '</div>';
+  }).join('');
 }
 
 // 初始化 Agent 显示模式设置
