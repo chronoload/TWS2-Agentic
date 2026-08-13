@@ -423,6 +423,10 @@ class Agent:
         model_selector=None,
     ):
         self.config = config or AgentConfig()
+        # 规范化 base_dir：调用方（app.py / 测试）可能传 str，
+        # 统一转 Path，避免后续 base_dir / "data" 抛 str/str 类型错误
+        if self.config.base_dir and not isinstance(self.config.base_dir, Path):
+            self.config.base_dir = Path(self.config.base_dir)
         # 模式为单实例内存态：由调用方（server 端）按会话设置/恢复，不再从全局 config 加载
         self.llm = llm or SimulatorLLM()
         self._model_selector = model_selector
