@@ -7560,13 +7560,15 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             if not snapshot_msgs or not _has_compact_summary(snapshot_msgs):
                 return None
             cur_cp_id = None
+            # list_checkpoints 已按新→旧排序（reverse=True），第一个命中即最近一次压缩快照
             for key in reloader.list_checkpoints():
                 cp = reloader.restore_checkpoint(key)
                 if cp is None:
                     continue
                 msgs = getattr(cp, "messages_snapshot", None) or []
                 if msgs and _has_compact_summary(msgs):
-                    cur_cp_id = key  # 取最后一个（最近一次压缩）含摘要快照
+                    cur_cp_id = key  # 第一个命中 = 最新压缩快照，立即停止，避免遍历全部检查点刷日志/耗性能
+                    break
             if not cur_cp_id:
                 return None
             return _expand_compact_checkpoint(reloader, cur_cp_id, snapshot_msgs)
