@@ -10283,11 +10283,11 @@ function _renderBackendHonestly(data) {
   const backendMessages = (data && data.messages) || [];
   if (!backendMessages.length) return false;
   const ui = _expandBackendMessages(backendMessages);
-  // ── 默认找回：检测到压缩摘要 system 消息 → 自动展开拼接完整历史（不显示摘要提示卡）──
+  // ── 默认找回：检测到压缩摘要 system 消息 → 自动展开拼接完整历史（保留摘要提示卡）──
   const _hasCompact = ui.some(function(m) { return m && m.isCompactSummary; });
   const _curSid = _getAgentSessionId();
-  if (_hasCompact && window.__compactExpandedSession !== _curSid) {
-    // 异步展开：成功后用完整历史替换摘要卡并重渲染；失败则保留摘要卡（回退）
+  if (_hasCompact && window.__compactExpandedSession !== _curSid && window.__compactExpandFailedSession !== _curSid) {
+    // 异步展开：成功后摘要卡保留 + 拼接历史；失败标记失败（不重试），摘要卡仍显示
     _autoExpandCompact(_curSid, ui);
   }
   // 完全一致则跳过（去掉渲染期附加的 _streaming 等瞬时键后比较）
@@ -10316,9 +10316,9 @@ function _renderBackendHonestly(data) {
   return true;
 }
 
-// ─── 默认找回压缩历史：自动展开拼接（不显示"历史已压缩"提示卡）───
+// ─── 默认找回压缩历史：自动展开拼接（保留摘要提示卡，找回失败也显示）───
 function _autoExpandCompact(sessionId, ui) {
-  if (!sessionId) { window.__compactExpandedSession = ''; return; }
+  if (!sessionId) { window.__compactExpandFailedSession = ''; return; }
   fetch('/api/agent/messages/expand', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -10326,31 +10326,35 @@ function _autoExpandCompact(sessionId, ui) {
   }).then(function(r) { return r.json(); }).then(function(res) {
     var _exp = (res && res.data && res.data.expanded) || [];
     if (!_exp.length) {
-      // 无可找回历史：标记已处理，保留摘要卡（回退展示）
-      window.__compactExpandedSession = sessionId;
+      // 找回失败：标记失败（不再重试），摘要卡下次轮询仍显示（提示"这段被压缩过"）
+      window.__compactExpandFailedSession = sessionId;
+      console.log('[Agent] 压缩历史找回失败（无可用归档），保留摘要卡');
       return;
     }
-    // 展开历史 → UI 结构（_expandBackendMessages 对已展开会话会过滤摘要，故此处强制不走过滤）
+    // 展开历史 → UI 结构（剔除可能残留的摘要 system）
     var _expandedUi = _expandBackendMessages(_exp);
-    // 递归安全：展开结果里若仍含摘要（理论上无），再次展开；这里直接剔除摘要 system
     _expandedUi = _expandedUi.filter(function(m) { return !(m && m.isCompactSummary); });
-    // 把本地消息流里的所有摘要卡替换为展开的完整历史（展开拼接）
+    // 本地消息流：摘要卡保留（标注找回条数）+ 其后拼接展开历史
     var _newArr = [];
     var _replaced = false;
     for (var _i = 0; _i < state.agentMessages.length; _i++) {
       var _m = state.agentMessages[_i];
       if (_m && _m.isCompactSummary) {
-        _newArr.push.apply(_newArr, _expandedUi);
+        _m.expandedCount = _expandedUi.length;
+        _newArr.push(_m); // 保留摘要提示卡
+        _newArr.push.apply(_newArr, _expandedUi); // 拼接找回的具体历史
         _replaced = true;
       } else {
         _newArr.push(_m);
       }
     }
     if (!_replaced) {
-      // 本地视图尚未渲染摘要卡（如刚进入会话），按 ui 顺序替换：找到 isCompactSummary 位置
+      // 本地视图尚未渲染摘要卡（如刚进入会话），按 ui 顺序插入
       _newArr = [];
       for (var _j = 0; _j < ui.length; _j++) {
         if (ui[_j] && ui[_j].isCompactSummary) {
+          ui[_j].expandedCount = _expandedUi.length;
+          _newArr.push(ui[_j]);
           _newArr.push.apply(_newArr, _expandedUi);
         } else {
           _newArr.push(ui[_j]);
@@ -10359,15 +10363,15 @@ function _autoExpandCompact(sessionId, ui) {
     }
     state.agentMessages = _newArr;
     window.__compactExpandedSession = sessionId;
-    console.log('[Agent] 默认找回：自动展开压缩历史', _expandedUi.length, '条消息');
+    console.log('[Agent] 默认找回：自动展开压缩历史', _expandedUi.length, '条消息（摘要卡保留）');
     _resetFlowNav();
     for (var _k = 0; _k < _newArr.length; _k++) {
       _addFlowNavBlock(_newArr[_k].role, _newArr[_k].content, _k, _newArr[_k]);
     }
     renderAgentMessages();
   }).catch(function() {
-    // 展开失败：标记已处理，保留摘要卡回退展示
-    window.__compactExpandedSession = sessionId;
+    // 找回失败：标记失败（不重试），摘要卡保留显示
+    window.__compactExpandFailedSession = sessionId;
   });
 }
 
