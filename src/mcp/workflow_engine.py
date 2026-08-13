@@ -836,7 +836,8 @@ class WorkflowEngine:
 
         instance = self.persistence.get_instance(instance_id)
         if instance and instance.get("status") in (
-            WorkflowStatus.RUNNING.value, WorkflowStatus.PAUSED.value
+            WorkflowStatus.RUNNING.value, WorkflowStatus.PAUSED.value,
+            WorkflowStatus.PENDING.value,
         ):
             self.persistence.update_instance(
                 instance_id, status=WorkflowStatus.CANCELLED.value)

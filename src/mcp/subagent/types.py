@@ -39,9 +39,20 @@ class SubagentConfig:
 
 @dataclass
 class AgentSpec:
+    """子代理（Agent）注册规格。
+
+    描述一个可被 Coordinator 调度的 Agent 的完整配置，包括角色、
+    名称、系统提示词、模型与运行限制，以及工具权限等。通过
+    Coordinator.register_agent() 注册后即可被 run/run_parallel 等调度。
+    """
+
     role: AgentRole
     name: str
     system_prompt: str = ""
+    # kind：Agent 在编排流程中的身份类型，默认 "subagent"（普通子代理，单次委派）。
+    # 取值为 "teammate" 时表示该 Agent 以团队成员身份参与 Cline AgentTeam
+    # 风格的团队协作流程，对应 Cline 中 teammate 与 subagent 的区分。
+    kind: str = "subagent"
     model: str = ""
     max_turns: int = 20
     timeout_seconds: int = 1800

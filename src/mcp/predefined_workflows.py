@@ -17,6 +17,8 @@ from typing import Dict, Any, Optional
 from .workflow_engine import (
     WorkflowDefinition, StepDefinition, StepType,
 )
+# macdev 工作流（macdev 机器驱动开发库改造成可编排工作流）
+from .macdev_workflows import register_macdev_workflows
 
 # ============================================================
 # 06_analysis   代码架构分析
@@ -1646,6 +1648,9 @@ WORKFLOW_REGISTRY: Dict[str, WorkflowDefinition] = {
     "param_chain_demo": param_chain_demo_workflow(),
     "lean4_param_chain": lean4_param_chain_workflow(),
 }
+
+# 注册 macdev 工作流（macdev 开发库 → 可编排工作流）
+register_macdev_workflows(WORKFLOW_REGISTRY)
 
 
 def get_workflow(workflow_id: str) -> WorkflowDefinition:
