@@ -7533,6 +7533,77 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             pass
         return None
 
+    def _expand_for_snapshot(reloader, snapshot_msgs: list) -> Optional[list]:
+        """按当前会话消息自动定位最近压缩快照并展开为完整历史。
+
+        前端「展开找回具体历史」按需调用：当前消息含 [对话历史摘要] 时，
+        找到最近创建的含摘要对话快照作为当前检查点，复用 _expand_compact_checkpoint
+        合并最早完整基底 + 压缩点之后新增消息（多次压缩递归还原）。
+        """
+        try:
+            if not snapshot_msgs or not _has_compact_summary(snapshot_msgs):
+                return None
+            cur_cp_id = None
+            for key in reloader.list_checkpoints():
+                cp = reloader.restore_checkpoint(key)
+                if cp is None:
+                    continue
+                msgs = getattr(cp, "messages_snapshot", None) or []
+                if msgs and _has_compact_summary(msgs):
+                    cur_cp_id = key  # 取最后一个（最近一次压缩）含摘要快照
+            if not cur_cp_id:
+                return None
+            return _expand_compact_checkpoint(reloader, cur_cp_id, snapshot_msgs)
+        except Exception:
+            return None
+
+    @app.post("/api/agent/messages/expand")
+    async def agent_messages_expand(req: Request):
+        """压缩视图展开：找回被 [对话历史摘要] 压缩掉的具体历史（日志式，多次压缩可还原）。
+
+        body: { session_id } → { expanded: [完整历史消息] }
+        前端在点击「展开找回具体历史」时按需调用；无压缩/无归档返回 expanded=[]。
+        """
+        body = await _hub_body(req)
+        session_id = body.get("session_id", "")
+
+        def _do() -> list:
+            try:
+                from ..cache.context_reloader import get_context_reloader
+                reloader = get_context_reloader()
+            except Exception:
+                return []
+            if reloader is None:
+                return []
+            # 当前会话消息（含摘要的压缩后状态）
+            snapshot = None
+            try:
+                agent = _peek_agent_for_session(session_id)
+                if agent and agent.messages:
+                    snapshot = agent.snapshot_messages()
+            except Exception:
+                pass
+            if not snapshot:
+                try:
+                    store = _get_session_store()
+                    if store:
+                        t = store.get(session_id)
+                        if t and t.messages:
+                            snapshot = t.messages
+                except Exception:
+                    pass
+            if not snapshot:
+                return []
+            expanded = _expand_for_snapshot(reloader, snapshot)
+            return expanded or []
+
+        try:
+            expanded = await asyncio.get_event_loop().run_in_executor(None, _do)
+            return ok(data={"expanded": expanded, "count": len(expanded)})
+        except Exception as e:
+            logger.warning(f"[messages/expand] 展开失败: {e}")
+            return ok(data={"expanded": [], "count": 0})
+
     def _format_checkpoint_row(c: dict) -> dict:
         """格式化检查点记录为前端需要的格式"""
         # 映射 created_at → timestamp（前端统一用 timestamp）

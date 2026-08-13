@@ -10209,7 +10209,9 @@ function _expandBackendMessages(backendMessages) {
   for (const msg of backendMessages) {
     if (msg.role === 'tool') continue;
     if (msg.role === 'system') {
-      ui.push({ role: 'system', content: msg.content });
+      // 压缩摘要 system 消息标记 isCompactSummary → 前端渲染为可折叠卡片（诚实渲染保留，但不平铺大段摘要）
+      var _isComp = typeof msg.content === 'string' && msg.content.indexOf('[对话历史摘要') === 0;
+      ui.push({ role: 'system', content: msg.content, isCompactSummary: _isComp });
     } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length) {
       // 思考( reasoning_content )与内容( content )必须留在同一气泡，
       // 否则思考被丢弃、简短内容被单独提到工具卡上方，顺序失真。
@@ -11882,6 +11884,24 @@ function _fullRenderRange(container, start, end, forceScrollBottom, prevScrollHe
 
 function _renderAgentMessageHtml(msg, mi) {
   let rendered = '';
+  // ── 压缩摘要卡片：诚实渲染但折叠，不平铺大段 [对话历史摘要] ──
+  if (msg.role === 'system' && msg.isCompactSummary) {
+    if (!msg._compactKey) msg._compactKey = 'compact_' + mi + '_' + Date.now();
+    var _cid = msg._compactKey;
+    rendered = '<div class="compact-card" data-cid="' + _cid + '" style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-secondary);font-size:12px">' +
+      '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        '<span>📜</span>' +
+        '<span style="flex:1;color:var(--fg-muted)">较早对话已压缩为摘要（展开可查看摘要，或找回被压缩的具体历史）</span>' +
+        '<span class="compact-toggle" data-cid="' + _cid + '" style="cursor:pointer;color:var(--accent);font-size:11px;flex:0 0 auto">展开摘要</span>' +
+        '<button class="compact-expand-btn" data-cid="' + _cid + '" style="cursor:pointer;color:#fff;background:var(--accent);border:none;border-radius:4px;padding:3px 8px;font-size:11px;flex:0 0 auto">🔍 找回具体历史</button>' +
+      '</div>' +
+      '<div class="compact-summary-body" data-cid="' + _cid + '" style="display:none;margin-top:6px;padding:8px;background:var(--bg);border:1px dashed var(--border);border-radius:6px;white-space:pre-wrap;max-height:260px;overflow-y:auto;font-size:11px;color:var(--fg)">' + escapeHtml(msg.content) + '</div>' +
+    '</div>';
+    return '<div class="agent-msg system" data-index="' + mi + '">' +
+      '<div class="msg-role">📜 历史已压缩</div>' +
+      '<div class="msg-content">' + rendered + '</div>' +
+    '</div>';
+  }
   if (msg.role === 'user') {
     // 技能注入消息：折叠为提示条，不展示全文（保持上下文感知但 UI 简洁）
     var _content = msg.content || '';
@@ -12000,6 +12020,44 @@ function _initGlobalFileClickHandler() {
           _full.style.display = _isOpen ? 'none' : 'block';
           _injToggle.textContent = _isOpen ? '展开' : '收起';
         }
+        return;
+      }
+      // === 压缩摘要卡：展开/收起摘要正文 ===
+      var _compToggle = e.target.closest('.compact-toggle');
+      if (_compToggle) {
+        var _cId = _compToggle.getAttribute('data-cid');
+        var _body = document.querySelector('.compact-summary-body[data-cid="' + _cId + '"]');
+        if (_body) {
+          var _isOpen2 = _body.style.display !== 'none';
+          _body.style.display = _isOpen2 ? 'none' : 'block';
+          _compToggle.textContent = _isOpen2 ? '展开摘要' : '收起摘要';
+        }
+        return;
+      }
+      // === 压缩摘要卡：找回具体历史（调后端展开，替换摘要卡） ===
+      var _compBtn = e.target.closest('.compact-expand-btn');
+      if (_compBtn) {
+        var _cId2 = _compBtn.getAttribute('data-cid');
+        var _sid2 = _getAgentSessionId();
+        if (!_sid2) { _compBtn.textContent = '⚠️ 无会话'; return; }
+        _compBtn.textContent = '⏳ 展开中...';
+        _compBtn.disabled = true;
+        fetch('/api/agent/messages/expand', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: _sid2 })
+        }).then(function(r) { return r.json(); }).then(function(res) {
+          var _exp = (res && res.data && res.data.expanded) || [];
+          if (!_exp.length) { _compBtn.textContent = '⚠️ 无可找回'; return; }
+          var _ui = _expandBackendMessages(_exp);
+          var _ti = -1;
+          for (var _i2 = 0; _i2 < state.agentMessages.length; _i2++) {
+            if (state.agentMessages[_i2] && state.agentMessages[_i2]._compactKey === _cId2) { _ti = _i2; break; }
+          }
+          if (_ti < 0) { _compBtn.textContent = '⚠️ 找不到摘要卡'; return; }
+          state.agentMessages.splice.apply(state.agentMessages, [_ti, 1].concat(_ui));
+          renderAgentMessages();
+        }).catch(function() { _compBtn.textContent = '⚠️ 展开失败'; _compBtn.disabled = false; });
         return;
       }
       // === 排除非 Agent 区域的点击（关键修复）===
