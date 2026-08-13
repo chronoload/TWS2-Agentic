@@ -10209,9 +10209,30 @@ function _expandBackendMessages(backendMessages) {
   for (const msg of backendMessages) {
     if (msg.role === 'tool') continue;
     if (msg.role === 'system') {
-      // 压缩摘要 system 消息标记 isCompactSummary → 前端渲染为可折叠卡片（诚实渲染保留，但不平铺大段摘要）
+      // 压缩摘要 system 消息：
+      // 1) 后端已附带 expanded（默认找回）→ 同步拼接完整历史，不显示摘要提示卡
+      // 2) 已自动展开过的会话 → 直接跳过（保持展开后的视图稳定）
+      // 3) 兜底：标记 isCompactSummary → 渲染折叠卡（点击/自动找回）
       var _isComp = typeof msg.content === 'string' && msg.content.indexOf('[对话历史摘要') === 0;
-      ui.push({ role: 'system', content: msg.content, isCompactSummary: _isComp });
+      if (_isComp) {
+        if (msg.expanded && msg.expanded.length) {
+          var _exUi = _expandBackendMessages(msg.expanded);
+          // 先保留摘要提示卡（提示"这段被压缩过 + 已找回 N 条"，可展开对比摘要确认无遗漏），
+          // 再拼接展开找回的具体历史
+          ui.push({ role: 'system', content: msg.content, isCompactSummary: true, expandedCount: _exUi.length });
+          for (var _ei = 0; _ei < _exUi.length; _ei++) {
+            if (!(_exUi[_ei] && _exUi[_ei].isCompactSummary)) ui.push(_exUi[_ei]);
+          }
+          continue;
+        }
+        // 兜底路径（后端未附 expanded）：已通过 API 展开过 → 跳过；否则标记摘要卡
+        if (window.__compactExpandedSession === _getAgentSessionId()) {
+          continue;
+        }
+        ui.push({ role: 'system', content: msg.content, isCompactSummary: true });
+      } else {
+        ui.push({ role: 'system', content: msg.content });
+      }
     } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length) {
       // 思考( reasoning_content )与内容( content )必须留在同一气泡，
       // 否则思考被丢弃、简短内容被单独提到工具卡上方，顺序失真。
@@ -10262,6 +10283,13 @@ function _renderBackendHonestly(data) {
   const backendMessages = (data && data.messages) || [];
   if (!backendMessages.length) return false;
   const ui = _expandBackendMessages(backendMessages);
+  // ── 默认找回：检测到压缩摘要 system 消息 → 自动展开拼接完整历史（不显示摘要提示卡）──
+  const _hasCompact = ui.some(function(m) { return m && m.isCompactSummary; });
+  const _curSid = _getAgentSessionId();
+  if (_hasCompact && window.__compactExpandedSession !== _curSid) {
+    // 异步展开：成功后用完整历史替换摘要卡并重渲染；失败则保留摘要卡（回退）
+    _autoExpandCompact(_curSid, ui);
+  }
   // 完全一致则跳过（去掉渲染期附加的 _streaming 等瞬时键后比较）
   if (_messagesEqual(ui, state.agentMessages)) return false;
   // 防御：后端重渲染可能丢失 checkpoint_hash（来源差异/序列化裁剪）——
@@ -10286,6 +10314,61 @@ function _renderBackendHonestly(data) {
   renderAgentMessages();
   updateSessionInfo(ui.length + '条消息');
   return true;
+}
+
+// ─── 默认找回压缩历史：自动展开拼接（不显示"历史已压缩"提示卡）───
+function _autoExpandCompact(sessionId, ui) {
+  if (!sessionId) { window.__compactExpandedSession = ''; return; }
+  fetch('/api/agent/messages/expand', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId })
+  }).then(function(r) { return r.json(); }).then(function(res) {
+    var _exp = (res && res.data && res.data.expanded) || [];
+    if (!_exp.length) {
+      // 无可找回历史：标记已处理，保留摘要卡（回退展示）
+      window.__compactExpandedSession = sessionId;
+      return;
+    }
+    // 展开历史 → UI 结构（_expandBackendMessages 对已展开会话会过滤摘要，故此处强制不走过滤）
+    var _expandedUi = _expandBackendMessages(_exp);
+    // 递归安全：展开结果里若仍含摘要（理论上无），再次展开；这里直接剔除摘要 system
+    _expandedUi = _expandedUi.filter(function(m) { return !(m && m.isCompactSummary); });
+    // 把本地消息流里的所有摘要卡替换为展开的完整历史（展开拼接）
+    var _newArr = [];
+    var _replaced = false;
+    for (var _i = 0; _i < state.agentMessages.length; _i++) {
+      var _m = state.agentMessages[_i];
+      if (_m && _m.isCompactSummary) {
+        _newArr.push.apply(_newArr, _expandedUi);
+        _replaced = true;
+      } else {
+        _newArr.push(_m);
+      }
+    }
+    if (!_replaced) {
+      // 本地视图尚未渲染摘要卡（如刚进入会话），按 ui 顺序替换：找到 isCompactSummary 位置
+      _newArr = [];
+      for (var _j = 0; _j < ui.length; _j++) {
+        if (ui[_j] && ui[_j].isCompactSummary) {
+          _newArr.push.apply(_newArr, _expandedUi);
+        } else {
+          _newArr.push(ui[_j]);
+        }
+      }
+    }
+    state.agentMessages = _newArr;
+    window.__compactExpandedSession = sessionId;
+    console.log('[Agent] 默认找回：自动展开压缩历史', _expandedUi.length, '条消息');
+    _resetFlowNav();
+    for (var _k = 0; _k < _newArr.length; _k++) {
+      _addFlowNavBlock(_newArr[_k].role, _newArr[_k].content, _k, _newArr[_k]);
+    }
+    renderAgentMessages();
+  }).catch(function() {
+    // 展开失败：标记已处理，保留摘要卡回退展示
+    window.__compactExpandedSession = sessionId;
+  });
 }
 
 function _messagesEqual(a, b) {
@@ -11884,16 +11967,22 @@ function _fullRenderRange(container, start, end, forceScrollBottom, prevScrollHe
 
 function _renderAgentMessageHtml(msg, mi) {
   let rendered = '';
-  // ── 压缩摘要卡片：诚实渲染但折叠，不平铺大段 [对话历史摘要] ──
+  // ── 压缩摘要卡片：提示"这段被压缩过 + 已找回 N 条"，可展开摘要对比确认无遗漏 ──
   if (msg.role === 'system' && msg.isCompactSummary) {
     if (!msg._compactKey) msg._compactKey = 'compact_' + mi + '_' + Date.now();
     var _cid = msg._compactKey;
+    var _countTip = msg.expandedCount
+      ? '（已自动找回 <b>' + msg.expandedCount + '</b> 条具体历史，点开可对比摘要确认无遗漏）'
+      : '（点开可查看摘要内容）';
+    var _btn = msg.expandedCount
+      ? ''
+      : '<button class="compact-expand-btn" data-cid="' + _cid + '" style="cursor:pointer;color:#fff;background:var(--accent);border:none;border-radius:4px;padding:3px 8px;font-size:11px;flex:0 0 auto">🔍 找回具体历史</button>';
     rendered = '<div class="compact-card" data-cid="' + _cid + '" style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-secondary);font-size:12px">' +
       '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
         '<span>📜</span>' +
-        '<span style="flex:1;color:var(--fg-muted)">较早对话已压缩为摘要（展开可查看摘要，或找回被压缩的具体历史）</span>' +
+        '<span style="flex:1;color:var(--fg-muted)">这段对话曾被压缩为摘要' + _countTip + '</span>' +
         '<span class="compact-toggle" data-cid="' + _cid + '" style="cursor:pointer;color:var(--accent);font-size:11px;flex:0 0 auto">展开摘要</span>' +
-        '<button class="compact-expand-btn" data-cid="' + _cid + '" style="cursor:pointer;color:#fff;background:var(--accent);border:none;border-radius:4px;padding:3px 8px;font-size:11px;flex:0 0 auto">🔍 找回具体历史</button>' +
+        _btn +
       '</div>' +
       '<div class="compact-summary-body" data-cid="' + _cid + '" style="display:none;margin-top:6px;padding:8px;background:var(--bg);border:1px dashed var(--border);border-radius:6px;white-space:pre-wrap;max-height:260px;overflow-y:auto;font-size:11px;color:var(--fg)">' + escapeHtml(msg.content) + '</div>' +
     '</div>';
