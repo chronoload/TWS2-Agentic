@@ -15809,6 +15809,11 @@ async function workflowControl(action, instId) {
     const res = await fetch(`${API_BASE}/api/workflow/${action}/${instId}`, { method: 'POST' });
     const data = await res.json();
     if (data.code !== 0) { showToast(data.msg || '操作失败', 'error'); return; }
+    // 校验后端实际执行结果字段（paused/resumed/cancelled），避免静默失败：
+    // 例：未开始的 pending 实例 cancel 时后端返回 {cancelled:false}，此处应提示而非假装成功
+    const okField = { pause: 'paused', resume: 'resumed', cancel: 'cancelled' }[action];
+    const applied = okField ? !!(data.data && data.data[okField]) : true;
+    if (!applied) { showToast(`⚠ 操作未生效：实例当前状态不允许 ${action}`, 'error'); return; }
     showToast(`✔ ${action}`, 'info');
     workflowRefreshInstances();
   } catch (e) { showToast('操作失败', 'error'); }
