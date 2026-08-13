@@ -153,7 +153,14 @@ def generate_summary(messages: List[Dict[str, Any]],
             # 提取助手的关键决策/结论
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
-                    tc_name = tc.get("name", "unknown") if isinstance(tc, dict) else str(tc)
+                    # 兼容两种 tool_calls 结构：
+                    #   OpenAI 格式:  {"function": {"name": "xxx", ...}}
+                    #   Anthropic 格式: {"name": "xxx", ...}
+                    # 取不到 name 时回退到整个 tc 的字符串形式，避免显示 unknown
+                    if isinstance(tc, dict):
+                        tc_name = tc.get("name") or (tc.get("function") or {}).get("name") or str(tc)
+                    else:
+                        tc_name = str(tc)
                     tool_calls.append(tc_name)
             elif content:
                 # 提取结论性语句（通常在末尾）
@@ -165,7 +172,7 @@ def generate_summary(messages: List[Dict[str, Any]],
         elif role == "tool":
             # 工具结果摘要
             result_preview = content[:150] if len(content) > 150 else content
-            tool_name = msg.get("name", "unknown")
+            tool_name = msg.get("name") or msg.get("tool_name") or "unknown"
             tool_results_summary.append(f"{tool_name}: {result_preview}")
 
     summary_parts = [
