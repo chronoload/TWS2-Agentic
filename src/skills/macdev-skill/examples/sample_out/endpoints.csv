@@ -1,0 +1,3 @@
+﻿method,path,func,request_model,response_keys,file,line,doc
+GET,/api/a,a,,,app.py,34,
+GET,/api/b,b,,,app.py,39,

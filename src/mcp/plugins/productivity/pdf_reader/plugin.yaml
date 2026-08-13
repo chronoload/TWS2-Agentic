@@ -1,0 +1,7 @@
+name: pdf-reader
+version: 1.0.0
+description: "PDF 文档读取 — 提取文本、元数据、页码范围"
+author: TS2
+kind: backend
+provides_tools:
+  - pdf_reader

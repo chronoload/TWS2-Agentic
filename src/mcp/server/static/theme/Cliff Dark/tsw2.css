@@ -1,0 +1,97 @@
+/* ═══════════════════════════════════════════════════════════════
+   思源「Cliff Dark」主题 → TWS2 适配层
+   源主题：Crowds21 / chenshinshi Cliff-Dark v3.4.4（深色）
+   适配说明：思源主题 CSS 面向思源 DOM（.protyle-wysiwyg 等），
+   直接引入会大量失效。本文件把其色板 / 背景图 / 毛玻璃质感映射
+   到 TWS2 的 CSS 变量体系（html[data-theme="Cliff Dark"] 作用域），
+   全局组件通过变量自动生效；另补少量组件级规则还原悬崖夜景氛围。
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ─── 变量映射（取自 theme.css :root 与各 styles/*.css） ─── */
+html[data-theme="Cliff Dark"] {
+  --bg: #2b2b2b;                 /* --b3-theme-background */
+  --bg-secondary: rgba(41, 42, 45, 0.90);  /* --b3-theme-surface-light */
+  --bg-tertiary: #292a2d;        /* --b3-tab-background */
+  --bg-hover: rgba(230, 230, 230, 0.08);   /* --b3-list-hover */
+  --bg-card: #2b2b2bee;          /* --b3-theme-surface */
+  --fg: #c9d1d9;                 /* --b3-theme-on-background */
+  --fg-muted: #9aa0a6;           /* --b3-theme-on-surface */
+  --fg-dim: #565a60;
+  --accent: rgb(30, 195, 180);   /* --b3-theme-primary 青绿 */
+  --accent-hover: #4fe0cf;
+  --accent-bg: rgba(30, 195, 180, 0.14);
+  --green: #70ad47;
+  --green-bg: rgba(71, 116, 71, 0.35);     /* --b3-card-success-background */
+  --red: #e84c22;
+  --red-bg: rgba(154, 77, 73, 0.35);       /* --b3-card-error-background */
+  --yellow: #ffc000;
+  --yellow-bg: rgba(140, 113, 72, 0.35);   /* --b3-card-warning-background */
+  --cyan: #7dcfff;
+  --cyan-bg: rgba(82, 116, 145, 0.35);     /* --b3-card-info-background */
+  --purple: #8064a2;
+  --purple-bg: rgba(119, 97, 144, 0.35);
+  --orange: #ff9e64;
+  --orange-bg: rgba(255, 158, 100, 0.16);
+  --border: rgba(230, 230, 230, 0.10);     /* --b3-border-color */
+  --border-light: rgba(230, 230, 230, 0.18);
+  --radius: 6px;
+  --radius-lg: 10px;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --font-sans: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+  --font-mono: 'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace;
+}
+
+/* ─── 组件级适配 ─── */
+/* 悬崖背景图铺满全屏（复原源主题 body 背景；叠加深色遮罩降低不透明度，避免抢眼） */
+html[data-theme="Cliff Dark"] body {
+  background-image: linear-gradient(rgba(43, 43, 43, 0.70), rgba(43, 43, 43, 0.70)), url('cliff_bg.jpg');
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+/* 侧栏 / Agent 面板：半透明 + 高糊化毛玻璃（源主题 blur(15px) → 提高至 30px） */
+html[data-theme="Cliff Dark"] .sidebar,
+html[data-theme="Cliff Dark"] .agent-panel {
+  background: rgba(43, 43, 43, 0.60);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+}
+/* 卡片 / 弹层：深色半透明 */
+html[data-theme="Cliff Dark"] .bg-card,
+html[data-theme="Cliff Dark"] .modal-content {
+  background: rgba(43, 43, 43, 0.88);
+}
+/* 编辑器区域：大幅提高透明度，让悬崖背景透出（对应源主题 .protyle 透明编辑区） */
+html[data-theme="Cliff Dark"] .editor-wrapper,
+html[data-theme="Cliff Dark"] #vditor {
+  background: rgba(43, 43, 43, 0.30);
+}
+html[data-theme="Cliff Dark"] #vditor .vditor-reset,
+html[data-theme="Cliff Dark"] #vditor .vditor-ir,
+html[data-theme="Cliff Dark"] #vditor .vditor-sv,
+html[data-theme="Cliff Dark"] #vditor .vditor-wysiwyg {
+  background: transparent;
+  color: var(--fg);
+}
+/* 编辑器工具栏：同样透明化 */
+html[data-theme="Cliff Dark"] #vditor .vditor-toolbar {
+  background: rgba(43, 43, 43, 0.45);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+/* 引用块：青绿点缀 */
+html[data-theme="Cliff Dark"] .vditor-reset blockquote,
+html[data-theme="Cliff Dark"] .markdown-body blockquote {
+  background: rgba(30, 195, 180, 0.08);
+  border-left: 3px solid rgb(30, 195, 180);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+/* 代码块：深色渐变底（对应 --custom-transparent） */
+html[data-theme="Cliff Dark"] .vditor-reset pre,
+html[data-theme="Cliff Dark"] .markdown-body pre {
+  background: linear-gradient(to bottom, rgba(30, 30, 30, 0.85), rgba(30, 30, 30, 0.40));
+  color: #c9d1d9;
+  border: 1px solid rgba(230, 230, 230, 0.08);
+  border-radius: var(--radius);
+}

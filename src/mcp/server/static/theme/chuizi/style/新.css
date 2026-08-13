@@ -1,0 +1,32 @@
+/* 设置界面 */
+.b3-dialog__container .config__panel>.b3-tab-bar::before {
+    display: block;
+    content: "设置";
+    font-size: 18px;
+    font-weight: 600;
+    margin: 9px 0 18px 18px;
+    opacity: 1;
+}
+/* 下划线 */
+.protyle-wysiwyg span[data-type~=u] {
+    border-bottom: 2px solid !important;
+}
+/* 删除线 */
+.b3-typography s, .b3-typography span[data-type~=s], .protyle-wysiwyg s, .protyle-wysiwyg span[data-type~=s] {
+    opacity: 0.6 !important;
+    text-decoration: line-through !important;
+}
+/* 表情界面 */
+.emojis__panel {
+    overflow: unset !important;
+}
+/*工具栏适配*/
+.toolbar__item:not(.toolbar__item--disabled):not(.toolbar__item--close):hover, .toolbar__item--active {
+    background-color: transparent;
+    color: rgba(255,255,255,.8);
+}
+.status .toolbar__item:not(.toolbar__item--disabled):not(.toolbar__item--close):hover{color:var(--b3-theme-on-background)}
+:root {
+    --b3-toolbar-blur-background: #524841;
+    --b3-tooltips-color:#fff;
+}

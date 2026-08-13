@@ -1,0 +1,16 @@
+{
+  "name": "sample-task",
+  "endpoints": [
+    {"file": "app.py", "module": "app", "methods": ["get"], "prefix": ""}
+  ],
+  "files": {
+    "app": "app.py",
+    "client": "client/app.js"
+  },
+  "chains": {
+    "max_depth": 3,
+    "entries": [{"kind": "endpoint", "prefix": "/api/"}]
+  },
+  "exclude": ["test", "tests", "node_modules", ".git", "docs", "__pycache__"],
+  "strategy": "base"
+}

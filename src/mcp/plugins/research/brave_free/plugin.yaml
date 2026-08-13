@@ -1,0 +1,7 @@
+name: brave-free-search
+version: 1.0.0
+description: "Brave 免费搜索 — 无需 API 密钥的网页搜索"
+author: TS2 (adapted from Hermes)
+kind: backend
+provides_tools:
+  - brave_search

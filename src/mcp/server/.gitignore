@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+
+# Node / frontend build
+node_modules/
+dist/
+build/
+
+# Large / unrelated bundled subprojects (not part of core TS2 server)
+static_electron/node_modules/
+web/
+人文与社会科学议论/
+PipePipe-main/
+
+# Logs
+*.log

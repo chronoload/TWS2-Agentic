@@ -1,0 +1,15 @@
+name: spotify
+version: 1.0.0
+description: "Spotify 集成 — 7个工具 (playback, devices, queue, search, playlists, albums, library)。需要 SPOTIFY_ACCESS_TOKEN 环境变量。"
+author: TS2 (adapted from Hermes)
+kind: backend
+provides_tools:
+  - spotify_playback
+  - spotify_devices
+  - spotify_queue
+  - spotify_search
+  - spotify_playlists
+  - spotify_albums
+  - spotify_library
+requires_env:
+  - SPOTIFY_ACCESS_TOKEN

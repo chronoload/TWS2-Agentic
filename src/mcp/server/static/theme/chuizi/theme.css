@@ -1,0 +1,426 @@
+/* ----------------------------------------------------引入开始---------------------------------------------------------- */
+
+/* ————————————————————初始设置———————————————————— */
+/* 引入颜色和字体 */
+@import url("style/01-color-font/color-font.css");
+/* 引入一些初始设置 */
+@import url("style/07-others/begin-setting.css");
+/* 引入空行提示 */
+@import url("style/07-others/empty-letter.css");
+
+
+/* ————————————————————界面修改———————————————————— */
+/* 修改上左右dock栏样式 */
+@import url("style/02-appearance/dock.css");
+/* 修改正文A4纸大小 */
+@import url("style/02-appearance/A4.css");
+/* 修改文档树样式 */
+@import url("style/02-appearance/file-tree.css");
+/* 修改标签页样式 */
+@import url("style/02-appearance/tab-bar.css");
+/* 修改面包屑样式 */
+@import url("style/02-appearance/breadcrumb.css");
+/* 修改鼠标滑选块时光标颜色 */
+@import url("style/02-appearance/mouse.css");
+/* 修改选中文字后弹出的悬浮工具栏的样式 */
+@import url("style/02-appearance/toolbar.css");
+/* 修改弹出菜单的样式 */
+@import url("style/02-appearance/meun.css");
+/* 修改按钮样式 */
+@import url("style/02-appearance/button.css");
+/* 修改设置界面样式 */
+@import url("style/02-appearance/setting-option.css");
+/* 修改警告界面样式 */
+@import url("style/02-appearance/warning-color.css");
+
+
+/* ————————————————————行内元素———————————————————— */
+/* 修改高亮样式 */
+@import url("style/03-inline-span/mark.css");
+/* 修改加粗样式 */
+@import url("style/03-inline-span/strong.css");
+/* 修改下划线样式 */
+@import url("style/03-inline-span/underline.css");
+/* 修改删除线样式 */
+@import url("style/03-inline-span/line-through.css");
+/* 修改块引用样式 */
+@import url("style/03-inline-span/block-ref.css");
+/* 修改超链接样式 */
+@import url("style/03-inline-span/a-link.css");
+/* 修改标签样式 */
+@import url("style/03-inline-span/tag.css");
+/* 修改键盘keyboard样式 */
+@import url("style/03-inline-span/keyboard.css");
+/* 修改行内代码样式 */
+@import url("style/03-inline-span/inline-code.css");
+/* 修改上标和下标样式 */
+@import url("style/03-inline-span/sup-sub.css");
+/* 修改更多字体的样式 */
+@import url("style/03-inline-span/strong-morestyle.css");
+
+/* ————————————————————块级元素———————————————————— */
+/* 修改表格样式 */
+@import url("style/04-block-div/table.css");
+/* 修改引用样式 */
+@import url("style/04-block-div/blockquote.css");
+/* 修改嵌入块样式 */
+@import url("style/04-block-div/render-node.css");
+/* 修改图片样式 */
+@import url("style/04-block-div/image.css");
+/* 修改列表样式 */
+@import url("style/04-block-div/list.css");
+/* 修改代码块样式 */
+@import url("style/04-block-div/code-block.css");
+/* 修改超级块样式 */
+@import url("style/04-block-div/super-block.css");
+/* 修改PDF双链的样式 */
+@import url("style/04-block-div/pdf.css");
+/* 修改分割线样式 */
+@import url("style/04-block-div/divider-fengexian.css");
+/* 修改标题样式 */
+@import url("style/04-block-div/NodeHeading-biaoti.css");
+/* 引入4种样式 */
+@import url("style/04-block-div/card.css");
+
+/* ————————————————————自定义属性———————————————————— */
+/* 增加文档的自定义属性 */
+@import url("style/05-custom-function-for-file/custom-function-for-file.css");
+/* 增加块的自定义属性 */
+@import url("style/06-custom-function-for-block/custom-function-for-block.css");
+/*自定制修改*/
+@import url("style/新.css");
+@import url("chuizi.css");
+
+
+/* ----------------------------------------------------引入结束---------------------------------------------------------- */
+
+.layout--float .fn__flex.fn__flex-1{
+   background-image:unset;
+   box-shadow:unset;
+}
+.layout__dockl,.layout__dockr{
+   box-shadow:unset !important;
+   border:none !important;
+}
+.layout--float .fn__flex-1.fn__flex-column{
+   box-shadow:0 0 2px rgb(126 50 0 / 10%) inset, 0 1px 4px rgb(58 15 0 / 20%);
+}
+.layout__dockl.layout--float [data-type="wnd"]{
+   margin-left:0px !important;
+}
+.layout__dockr.layout-float [data-type="wnd"]{
+   margin-right:0px !important;
+}
+
+/*.pdf__outer .textLayer, .pdf__outer .pdf__resize{background-color:#f1e5c9}
+.pdf__outer.pdf__outer--dark .textLayer, .pdf__outer.pdf__outer--dark .pdf__resize{background-color:#44403e}*/
+.b3-label.fn__flex.config__item .fn__flex-1.fn__flex-center,.fn__flex.b3-label.config__item .fn__flex-1,.config-query .fn__flex-1{overflow-y:hidden}
+.config__panel>.b3-tab-bar .config__tab-title{display:none}
+.config__panel>.b3-tab-bar .b3-form__icon{margin:-4px 12px 8px}
+.dock#dockBottom{background-color:transparent;margin-top:-42px;border:none}
+.layout--float.layout__dockb {
+    position: absolute;
+    bottom: 32px !important;
+}
+.dock#dockBottom .dock__item {border-radius:2px;background-color:var(--b3-theme-surface);border:none;color:#b4a08e;box-shadow: 0 0 1px rgb(126 50 0 / 10%) inset, 0 .5px 2px rgb(58 15 0 / 20%);z-index:100}
+/*状态栏插件*/
+#status .toolbar__item span {margin: 3px 10px 0px -30px!important;font-size: 1px !important;padding: 10px;color: transparent;}
+:root{--b3-border-radius-b:4px}
+.b3-menu__items{padding:0px;overflow-x:hidden}
+.b3-menu__item{padding:0 16px;border-radius:0px}
+/*.protyle-util .color__square,.pdf__util.b3-menu .color__square{transform:scale(1.1);border-radius:0px;box-shadow:unset;margin:0px 3px}
+.protyle-util .color__square[data-type="backgroundColor"]{border-radius:100px}
+.protyle-util .color__square[data-type="color"],.protyle-util .color__square[style="background-color:var(--b3-font-background13)"]{box-shadow:0px 0px 0px 1px var(--b3-border-color) inset}*/
+.protyle-util .color__square:hover{box-shadow:0px 0px 0px 2px var(--b3-theme-primary-lighter) inset}
+.protyle-wysiwyg [data-node-id].li:before{border-left-color:var(--b3-scroll-color)}
+.color__square[style*="font-color"],.color__square[data-position="3bottom"]{box-shadow:unset;background:rgba(0,0,0,.03)}
+.protyle-font{font-weight:600}
+.color__square[style*="background"]{box-shadow: 0 0 0 1px #a2949457 inset;}
+
+/*搜索*/
+#searchList,
+#globalSearchList {
+    padding-right: 0px !important;
+}
+
+#searchList [data-type="search-item"],
+#globalSearchList [data-type="search-item"] {
+    display: block !important;
+    padding-top: 0px !important;
+    padding-right: 0px !important;
+    /*padding-left: 0px !important;*/
+}
+
+#searchList [data-type="search-item"]>.b3-list-item__graphic,
+#globalSearchList [data-type="search-item"]>.b3-list-item__graphic {
+    position: absolute;
+    margin-top: 6px !important;
+    margin-left: 2px !important;
+}
+
+#searchList [data-type="search-item"]>.b3-list-item__text,
+#globalSearchList [data-type="search-item"]>.b3-list-item__text {
+    margin-left: 20px;
+    max-height: 73px !important;
+    padding-top: 5px !important;
+    padding-bottom: 2px !important;
+    padding-right: 5px !important;
+    overflow-y: auto !important;
+    text-overflow: ellipsis !important;
+    line-height: 1.3;
+    -webkit-box-orient: inherit !important;
+}
+
+#searchList [data-type="search-item"]>.b3-list-item__meta.b3-list-item__meta--ellipsis,
+#globalSearchList [data-type="search-item"]>.b3-list-item__meta.b3-list-item__meta--ellipsis {
+    display: block !important;
+    max-width: 95% !important;
+    margin-top: -7px !important;
+    margin-bottom: -5px !important;
+    padding-left: 12px !important;
+}
+#searchList [data-type="search-item"], #globalSearchList [data-type="search-item"] {
+    padding:2px 2px 4px 2px;
+    border-bottom:1px dashed var(--b3-border-color);
+    border-radius: 0px 0px 0px 0px;
+   margin:1px 1px;
+   padding-top:6px !important;
+}
+#searchList ::-webkit-scrollbar, #globalSearchList ::-webkit-scrollbar {
+   width:0px;
+}
+#searchList .b3-list-item:has(.b3-list-item__toggle--hl){background-color:#fbf7ed;margin:0px}
+#searchList .b3-list-item:has(.b3-list-item__toggle--hl) .b3-list-item__text.ariaLabel{font-weight:600}
+.b3-switch{border-radius:12px}
+.config__tab-container--top{margin-top:0px}
+.config__tab-container--top[data-name="bazaar"]{margin-top:-16px}
+.layout-tab-bar .item--full{min-width:8em}
+.pdf__rect.popover__block>div:before {
+    content: "";
+    position: absolute;
+    left: 0px;
+    top: 0px !important;
+    height: 100%;
+    width: 100%;
+}
+
+/* ————————————————————1红色———————————————————— */
+.pdf__rect.popover__block>[style*="background-color: var(--b3-pdf-background1)"]:before {
+    background-color: var(--b3-pdf-background1);
+    border-bottom: 2px solid #d83931;
+}
+
+/* ————————————————————2橙色———————————————————— */
+.pdf__rect.popover__block>[style*="background-color: var(--b3-pdf-background2)"]:before {
+    background-color: var(--b3-pdf-background2);
+    border-bottom: 2px solid  #de7802;
+}
+
+/* ————————————————————3黄色———————————————————— */
+.pdf__rect.popover__block>[style*="background-color: var(--b3-pdf-background3)"]:before {
+    background-color: var(--b3-pdf-background3);
+    border-bottom: 2px solid #856404;
+}
+
+/* ————————————————————4绿色———————————————————— */
+.pdf__rect.popover__block>[style*="background-color: var(--b3-pdf-background4)"]:before {
+    background-color: var(--b3-pdf-background4);
+    border-bottom: 2px solid  #2ea121;}
+
+/* ————————————————————5青色———————————————————— */
+.pdf__rect.popover__block>[style*="background-color: var(--b3-pdf-background5)"]:before {
+    background-color: var(--b3-pdf-background5);
+    border-bottom: 2px solid #35737d;
+}
+
+/* ————————————————————6蓝色———————————————————— */
+.pdf__rect.popover__block>[style*="background-color: var(--b3-pdf-background6)"]:before {
+    background-color: var(--b3-pdf-background6);
+    border-bottom: 2px solid #7a878b70;
+}
+
+/* ————————————————————7紫色———————————————————— */
+.pdf__rect.popover__block>[style*="background-color: var(--b3-pdf-background7)"]:before {
+    background-color: var(--b3-pdf-background7);
+    border-bottom: 2px solid #6425d0;
+}
+
+.dock--vertical{width:36px;}
+.dock--vertical .dock__item{padding:6px 6px 6px 6px;margin:7px 4px;border-radius:2px}
+.status,.toolbar{height:28px;line-height:28px}
+.dock--vertical .dock__item,.dock--vertical .dock__item--activefocus{border:1px solid transparent}
+.dock--vertical .dock__item--active{background-color:#f3eee1;border:1px solid var(--b3-theme-surface-lighter)}
+.b3-list-item[data-type="toggle"]{border-bottom:none !important;padding-left:0px !important;}
+.b3-list-item[data-type="toggle"] .b3-list-item__text{color:var(--b3-theme-primary-lightest)!important}
+
+
+
+@font-face {
+        font-family: 'syst';
+        src: url("src/屏显臻宋.ttf");
+    }
+@font-face {
+        font-family: 'systh';
+        src: url("src/SourceHanSerifCN-Heavy.ttf");
+}
+/* [0] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.0.woff2) format('woff2');
+    unicode-range: U+1f1e6-1f1ff;
+}
+
+
+/* [1] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.1.woff2) format('woff2');
+    unicode-range: U+200d, U+2620, U+26a7, U+fe0f, U+1f308, U+1f38c, U+1f3c1, U+1f3f3-1f3f4, U+1f6a9, U+e0062-e0063, U+e0065, U+e0067, U+e006c, U+e006e, U+e0073-e0074, U+e0077, U+e007f;
+}
+
+
+/* [2] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.2.woff2) format('woff2');
+    unicode-range: U+23, U+2a, U+30-39, U+a9, U+ae, U+200d, U+203c, U+2049, U+20e3, U+2122, U+2139, U+2194-2199, U+21a9-21aa, U+23cf, U+23e9-23ef, U+23f8-23fa, U+24c2, U+25aa-25ab, U+25b6, U+25c0, U+25fb-25fe, U+2611, U+2622-2623, U+2626, U+262a, U+262e-262f, U+2638, U+2640, U+2642, U+2648-2653, U+2660, U+2663, U+2665-2666, U+2668, U+267b, U+267e-267f, U+2695, U+269b-269c, U+26a0, U+26a7, U+26aa-26ab, U+26ce, U+26d4, U+2705, U+2714, U+2716, U+271d, U+2721, U+2733-2734, U+2747, U+274c, U+274e, U+2753-2755, U+2757, U+2764, U+2795-2797, U+27a1, U+27b0, U+27bf, U+2934-2935, U+2b05-2b07, U+2b1b-2b1c, U+2b55, U+3030, U+303d, U+3297, U+3299, U+fe0f, U+1f170-1f171, U+1f17e-1f17f, U+1f18e, U+1f191-1f19a, U+1f201-1f202, U+1f21a, U+1f22f, U+1f232-1f23a, U+1f250-1f251, U+1f310, U+1f3a6, U+1f3b5-1f3b6, U+1f3bc, U+1f3e7, U+1f441, U+1f499-1f49c, U+1f49f-1f4a0, U+1f4a2, U+1f4ac-1f4ad, U+1f4b1-1f4b2, U+1f4b9, U+1f4db, U+1f4f2-1f4f6, U+1f500-1f50a, U+1f515, U+1f518-1f524, U+1f52f-1f53d, U+1f549, U+1f54e, U+1f5a4, U+1f5e8, U+1f5ef, U+1f6ab, U+1f6ad-1f6b1, U+1f6b3, U+1f6b7-1f6bc, U+1f6be, U+1f6c2-1f6c5, U+1f6d0-1f6d1, U+1f6d7, U+1f6dc, U+1f7e0-1f7eb, U+1f7f0, U+1f90d-1f90e, U+1f9e1, U+1fa75-1fa77, U+1faaf;
+}
+
+
+/* [3] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.3.woff2) format('woff2');
+    unicode-range: U+231a-231b, U+2328, U+23f0-23f3, U+2602, U+260e, U+2692, U+2694, U+2696-2697, U+2699, U+26b0-26b1, U+26cf, U+26d1, U+26d3, U+2702, U+2709, U+270f, U+2712, U+fe0f, U+1f302, U+1f321, U+1f392-1f393, U+1f3a9, U+1f3bd, U+1f3ee, U+1f3f7, U+1f3fa, U+1f451-1f462, U+1f484, U+1f489-1f48a, U+1f48c-1f48e, U+1f4a1, U+1f4a3, U+1f4b0, U+1f4b3-1f4b8, U+1f4bb-1f4da, U+1f4dc-1f4f1, U+1f4ff, U+1f50b-1f514, U+1f516-1f517, U+1f526-1f529, U+1f52c-1f52e, U+1f550-1f567, U+1f56f-1f570, U+1f576, U+1f587, U+1f58a-1f58d, U+1f5a5, U+1f5a8, U+1f5b1-1f5b2, U+1f5c2-1f5c4, U+1f5d1-1f5d3, U+1f5dc-1f5de, U+1f5e1, U+1f5f3, U+1f6aa, U+1f6ac, U+1f6bd, U+1f6bf, U+1f6c1, U+1f6cb, U+1f6cd-1f6cf, U+1f6d2, U+1f6e0-1f6e1, U+1f6f0, U+1f97b-1f97f, U+1f9af, U+1f9ba, U+1f9e2-1f9e6, U+1f9ea-1f9ec, U+1f9ee-1f9f4, U+1f9f7-1f9ff, U+1fa71-1fa74, U+1fa79-1fa7b, U+1fa86, U+1fa91-1fa93, U+1fa96, U+1fa99-1faa0, U+1faa2-1faa7, U+1faaa-1faae;
+}
+
+
+/* [4] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.4.woff2) format('woff2');
+    unicode-range: U+265f, U+26bd-26be, U+26f3, U+26f8, U+fe0f, U+1f004, U+1f0cf, U+1f380-1f384, U+1f386-1f38b, U+1f38d-1f391, U+1f396-1f397, U+1f399-1f39b, U+1f39e-1f39f, U+1f3a3-1f3a5, U+1f3a7-1f3a9, U+1f3ab-1f3b4, U+1f3b7-1f3bb, U+1f3bd-1f3c0, U+1f3c5-1f3c6, U+1f3c8-1f3c9, U+1f3cf-1f3d3, U+1f3f8-1f3f9, U+1f47e, U+1f4e2, U+1f4f7-1f4fd, U+1f52b, U+1f579, U+1f58c-1f58d, U+1f5bc, U+1f6f7, U+1f6f9, U+1f6fc, U+1f93f, U+1f941, U+1f945, U+1f947-1f94f, U+1f9e7-1f9e9, U+1f9f5-1f9f6, U+1fa70-1fa71, U+1fa80-1fa81, U+1fa83-1fa85, U+1fa87-1fa88, U+1fa94-1fa95, U+1fa97-1fa98, U+1faa1, U+1faa9;
+}
+
+
+/* [5] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.5.woff2) format('woff2');
+    unicode-range: U+2693, U+26e9-26ea, U+26f1-26f2, U+26f4-26f5, U+26fa, U+26fd, U+2708, U+fe0f, U+1f301, U+1f303, U+1f306-1f307, U+1f309, U+1f310, U+1f3a0-1f3a2, U+1f3aa, U+1f3cd-1f3ce, U+1f3d5, U+1f3d7-1f3db, U+1f3df-1f3e6, U+1f3e8-1f3ed, U+1f3ef-1f3f0, U+1f488, U+1f492, U+1f4ba, U+1f54b-1f54d, U+1f5fa-1f5ff, U+1f680-1f6a2, U+1f6a4-1f6a8, U+1f6b2, U+1f6d1, U+1f6d5-1f6d6, U+1f6dd-1f6df, U+1f6e2-1f6e5, U+1f6e9, U+1f6eb-1f6ec, U+1f6f3-1f6f6, U+1f6f8, U+1f6fa-1f6fb, U+1f9bc-1f9bd, U+1f9ed, U+1f9f3, U+1fa7c;
+}
+
+
+/* [6] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.6.woff2) format('woff2');
+    unicode-range: U+2615, U+fe0f, U+1f32d-1f330, U+1f336, U+1f33d, U+1f345-1f37f, U+1f382, U+1f52a, U+1f942-1f944, U+1f950-1f96f, U+1f99e, U+1f9aa, U+1f9c0-1f9cb, U+1fad0-1fadb;
+}
+
+
+/* [7] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.7.woff2) format('woff2');
+    unicode-range: U+200d, U+2600-2601, U+2603-2604, U+2614, U+2618, U+26a1, U+26c4-26c5, U+26c8, U+26f0, U+2728, U+2744, U+2b1b, U+2b50, U+fe0f, U+1f300, U+1f304-1f305, U+1f308, U+1f30a-1f30f, U+1f311-1f321, U+1f324-1f32c, U+1f331-1f335, U+1f337-1f33c, U+1f33e-1f344, U+1f3d4, U+1f3d6, U+1f3dc-1f3de, U+1f3f5, U+1f400-1f43f, U+1f490, U+1f4a7, U+1f4ab, U+1f4ae, U+1f525, U+1f54a, U+1f573, U+1f577-1f578, U+1f648-1f64a, U+1f940, U+1f980-1f9ae, U+1f9ba, U+1fa90, U+1faa8, U+1fab0-1fabd, U+1fabf, U+1face-1facf, U+1fae7;
+}
+
+
+/* [8] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.8.woff2) format('woff2');
+    unicode-range: U+200d, U+2640, U+2642, U+2695-2696, U+26f7, U+26f9, U+2708, U+2764, U+fe0f, U+1f33e, U+1f373, U+1f37c, U+1f384-1f385, U+1f393, U+1f3a4, U+1f3a8, U+1f3c2-1f3c4, U+1f3c7, U+1f3ca-1f3cc, U+1f3eb, U+1f3ed, U+1f3fb-1f3ff, U+1f466-1f478, U+1f47c, U+1f481-1f483, U+1f486-1f487, U+1f48b, U+1f48f, U+1f491, U+1f4bb-1f4bc, U+1f527, U+1f52c, U+1f574-1f575, U+1f57a, U+1f645-1f647, U+1f64b, U+1f64d-1f64e, U+1f680, U+1f692, U+1f6a3, U+1f6b4-1f6b6, U+1f6c0, U+1f6cc, U+1f91d, U+1f926, U+1f930-1f931, U+1f934-1f93a, U+1f93c-1f93e, U+1f977, U+1f9af-1f9b3, U+1f9b8-1f9b9, U+1f9bc-1f9bd, U+1f9cc-1f9cf, U+1f9d1-1f9df, U+1fa82, U+1fac3-1fac5;
+}
+
+
+/* [9] */
+
+@font-face {
+    font-family: 'Noto Color Emoji';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url(src/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.9.woff2) format('woff2');
+    unicode-range: U+200d, U+261d, U+2620, U+2639-263a, U+2665, U+270a-270d, U+2728, U+2763-2764, U+2b50, U+fe0f, U+1f31a-1f31f, U+1f32b, U+1f383, U+1f389, U+1f3fb-1f3ff, U+1f440-1f450, U+1f463-1f465, U+1f479-1f47b, U+1f47d-1f480, U+1f485, U+1f48b-1f48c, U+1f493-1f49f, U+1f4a4-1f4a6, U+1f4a8-1f4ab, U+1f4af, U+1f525, U+1f573, U+1f590, U+1f595-1f596, U+1f5a4, U+1f5e3, U+1f600-1f644, U+1f648-1f64a, U+1f64c, U+1f64f, U+1f90c-1f925, U+1f927-1f92f, U+1f932-1f933, U+1f970-1f976, U+1f978-1f97a, U+1f9a0, U+1f9b4-1f9b7, U+1f9bb, U+1f9be-1f9bf, U+1f9d0, U+1f9e0-1f9e1, U+1fa75-1fa79, U+1fac0-1fac2, U+1fae0-1fae6, U+1fae8, U+1faf0-1faf8;
+}
+
+
+body {
+        font-family: "syst" !important;
+    }
+:root{--b3-font-family: "syst",'Noto Color Emoji' !important;--b3-font-family-emoji: 'Noto Color Emoji', sans-serif !important;}
+
+
+.block__logo,.b3-dialog__container .config__panel>.b3-tab-bar::before,.protyle-title__input,.sy__outline .b3-list-item[title]{font-family:"systh" !important;font-weight:bold !important}
+.protyle-util  .b3-text-field.b3-text-field--text.fn__block {min-height: 200px !important;}
+
+.block__edit.fn__flex-1.protyle{overflow-y:hidden}
+
+.block__edit.fn__flex-1.protyle .protyle-wysiwyg.protyle-wysiwyg--attr {
+    padding: 5px 15px 0px 8px!important;
+}
+.block__popover--open .block__icons{min-height:32px}
+.b3-list-item .counter:hover:not(.b3-tooltips.b3-tooltips__nw){background:transparent;color:var(--b3-theme-on-surface-light)}
+.block__edit.fn__flex-1.protyle .protyle-wysiwyg.protyle-wysiwyg--attr .b3-tooltips:after{max-width:400px}
+.block__edit.fn__flex-1.protyle .protyle-wysiwyg.protyle-wysiwyg--attr [data-node-id][memo]:first-child,.block__edit.fn__flex-1.protyle .protyle-wysiwyg.protyle-wysiwyg--attr [data-node-id][name]:first-child,.block__edit.fn__flex-1.protyle .protyle-wysiwyg.protyle-wysiwyg--attr [data-node-id][alias]:first-child,.block__edit.fn__flex-1.protyle .protyle-wysiwyg.protyle-wysiwyg--attr [data-node-id][bookmark]:first-child{margin-top:5px}
+.protyle-content{overflow-x:hidden}
+.b3-list-item.b3-list-item--hide-action .b3-list-item__toggle.fn__hidden::before{margin-left:-3px}
+
+
+.config-bazaar__title{backdrop-filter:unset;background:linear-gradient(#fffcf6,transparent)}
+
+.av__cellassetimg{box-shadow:unset !important;padding:0em !important; margin:0em !important}
+
+
+.av__row--header{background-color:#645647;color:white}
+.av__row--header .av__cellheadericon,.av__row--header .block__icon{color:white}
+.av__row--header .block__icon:hover{color:gray !important}
+img.av__cellheadericon{box-shadow:unset!important;margin:0 5px 0 0 !important}
+
+
+.layout--float.layout__dockl{overflow:unset}
+
+.config__tab-container .b3-label:not(.b3-label--inner){box-shadow:0 15px 0 0 var(--b3-theme-surface),0 16px 0 0 var(--b3-border-color)}
+.config__tab-wrap .config__tab-container .b3-label:not(.b3-label--inner){box-shadow:0 15px 0 0 var(--b3-theme-background),0 16px 0 0 var(--b3-border-color)}
+
+
+.protyle-wysiwyg [data-node-id].bq:not(div.list div.bq){
+background-color:rgba(251, 247, 237,.3)!important}
