@@ -5215,6 +5215,13 @@ def get_tools(base_dir: Optional[Path] = None, enabled_only: bool = False) -> Li
     except Exception:
         _record_tool_group("macdev", "Macdev 开发库", [])
 
+    # ── worktree（git 任务工作树）────────────────────────
+    try:
+        from .worktree_tools import WorktreeTool
+        all_tools.extend(_record_tool_group("worktree", "Git 工作树", [WorktreeTool()]))
+    except Exception:
+        _record_tool_group("worktree", "Git 工作树", [])
+
     # ── 学术搜索 ────────────────────────────────────────
     try:
         from .scholar.server import ScholarMCPServer

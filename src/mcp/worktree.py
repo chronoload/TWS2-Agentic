@@ -192,30 +192,60 @@ def create_task_worktree(cwd: str, task_id: str = "") -> CreateWorktreeResult:
         return CreateWorktreeResult(success=False, message=f"Failed to create worktree: {exc}")
 
 
+def _resolve_worktree_repo(path: str) -> Optional[str]:
+    """从 worktree 的 .git 指针文件解析主仓库根。
+
+    git worktree 的 .git 是一个指针文件，内容形如
+    "gitdir: <主仓库>/.git/worktrees/<name>"。解析它定位主仓库，
+    以便在主仓库上下文中执行 git worktree remove（不能 -C worktree 自身，
+    否则移除过程中 .git 指针失效会报 not a git repository）。
+    """
+    try:
+        gitfile = os.path.join(path, ".git")
+        with open(gitfile, encoding="utf-8") as f:
+            line = f.read().strip()
+        if not line.startswith("gitdir:"):
+            return None
+        gitdir = os.path.normpath(
+            os.path.join(path, line[len("gitdir:"):].strip())
+        )
+        # gitdir 形如 <repo>/.git/worktrees/<name> → 回退两层到 <repo>
+        repo = os.path.dirname(os.path.dirname(gitdir))
+        return repo or None
+    except Exception:
+        return None
+
+
 def remove_worktree(path: str) -> bool:
     """移除指定路径的 git worktree。
 
     先尝试普通移除；若因存在未提交改动等被 git 拒绝，再降级为 --force 强制移除。
+    执行基准：优先从主仓库（由 .git 指针解析）运行；解析失败时回退当前目录。
 
     Returns:
         bool: 是否移除成功（任一次 git 命令成功即返回 True）。
     """
-    try:
-        result = subprocess.run(
-            ["git", "-C", path, "worktree", "remove", path],
-            capture_output=True,
-            text=True,
+    repo = _resolve_worktree_repo(path)
+
+    def _run(extra: list) -> subprocess.CompletedProcess:
+        if repo:
+            return subprocess.run(
+                ["git", "-C", repo, "worktree", "remove", *extra, path],
+                capture_output=True, text=True,
+                timeout=WORKTREE_OPERATION_TIMEOUT,
+            )
+        return subprocess.run(
+            ["git", "worktree", "remove", *extra, path],
+            capture_output=True, text=True,
             timeout=WORKTREE_OPERATION_TIMEOUT,
         )
+
+    try:
+        result = _run([])
         if result.returncode == 0:
             return True
         # 普通移除失败（通常是有未提交改动）时强制移除
-        forced = subprocess.run(
-            ["git", "-C", path, "worktree", "remove", "--force", path],
-            capture_output=True,
-            text=True,
-            timeout=WORKTREE_OPERATION_TIMEOUT,
-        )
+        forced = _run(["--force"])
         return forced.returncode == 0
     except Exception:
         return False
