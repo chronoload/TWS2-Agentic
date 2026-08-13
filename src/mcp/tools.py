@@ -3977,12 +3977,13 @@ class SearchSkillsTool(SearchTool):
             if skill_type:
                 all_skills = [s for s in all_skills if self._match_keyword(s.type, skill_type)]
 
-            # 关键词过滤
+            # 关键词过滤 + 名字匹配优先排前（之后才是描述匹配；稳定排序保持组内相对顺序）
             if keyword:
                 all_skills = [
                     s for s in all_skills
                     if self._match_keyword(s.name, keyword) or self._match_keyword(s.description, keyword)
                 ]
+                all_skills.sort(key=lambda s: 0 if self._match_keyword(s.name, keyword) else 1)
 
             total = len(all_skills)
             page = all_skills[offset:offset + limit]
@@ -4118,13 +4119,14 @@ class SearchMCPToolsTool(SearchTool):
             if server:
                 tools = [t for t in tools if self._match_keyword(t.get("server_name", ""), server)]
 
-            # 关键词过滤
+            # 关键词过滤 + 名字匹配优先排前（之后才是描述匹配；稳定排序保持组内相对顺序）
             if keyword:
                 tools = [
                     t for t in tools
                     if self._match_keyword(t.get("name", ""), keyword)
                     or self._match_keyword(t.get("description", ""), keyword)
                 ]
+                tools.sort(key=lambda t: 0 if self._match_keyword(t.get("name", ""), keyword) else 1)
 
             total = len(tools)
             page = tools[offset:offset + limit]

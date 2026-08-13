@@ -1,0 +1,49 @@
+{
+  "manifest_version": "20260811213414_external_prod_skill_version",
+  "global": {
+    "skills": [
+      {
+        "name": "TRAE-browseruse",
+        "version": "0.0.4",
+        "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/skills/1001/trae_agent::default::prod_20260609::TRAE-browseruse/0.0.4/package.zip",
+        "sha256": "b462f4ffc18520bc7020d10f2fb3828f144b83ff82d812ae114185e86137beec"
+      },
+      {
+        "name": "TRAE-browseruse-external",
+        "version": "0.0.4",
+        "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/skills/1001/trae_agent::default::prod_20260609::TRAE-browseruse-external/0.0.4/package.zip",
+        "sha256": "4bb76a4cc7ab52c5fc9f7e930b1b0cde8b1e1f3e92334ec06f95512d47a9aa10"
+      },
+      {
+        "name": "TRAE-code-mode-orchestrator",
+        "version": "0.0.2",
+        "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/skills/1001/trae_agent::default::prod_20260609::TRAE-code-mode-orchestrator/0.0.2/package.zip",
+        "sha256": "627238f2ed294120f96249a0ae65900de1d425015cc4b6fdabc6c700b87e9259"
+      },
+      {
+        "name": "TRAE-computer-use",
+        "version": "0.0.1",
+        "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/skills/1001/trae_agent::default::prod_20260609::TRAE-computer-use/0.0.1/package.zip",
+        "sha256": "ec48cf6383a70875a8aa7b882b64c7d0ab269520acfd438eda18e097756a52c7"
+      },
+      {
+        "name": "digital-avatar-creator",
+        "version": "0.0.1",
+        "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/skills/1001/trae_agent::default::prod_20260609::digital-avatar-creator/0.0.1/package.zip",
+        "sha256": "7a3f818864bade0daefc97b2fbf2af191b9659061360b7d5d8513d90bbc04699"
+      },
+      {
+        "name": "dynamic-ui",
+        "version": "0.0.1",
+        "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/skills/1001/trae_agent::default::prod_20260609::dynamic-ui/0.0.1/package.zip",
+        "sha256": "ffaa13bb09fe02598ced3c73d373d4ec2a93a8c85e4dbb04be5152115f724424"
+      },
+      {
+        "name": "skill-creator",
+        "version": "0.0.1",
+        "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/skills/1001/trae_agent::default::prod_20260609::skill-creator/0.0.1/package.zip",
+        "sha256": "2a2262728ca822e4b192208d2fc24ceea5af32afb0bff803108a11acf2954eed"
+      }
+    ]
+  }
+}

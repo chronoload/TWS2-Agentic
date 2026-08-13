@@ -1,0 +1,5 @@
+﻿plan_id,plan_title,plan_status,created_at,task_id,task_title,task_status,step_id,step_ord,step_text,step_status
+20260814_Agent-分屏-pane-重构-C-kanban-式,Agent 分屏 pane 重构（C+kanban 式）,open,2026-08-14 02:36:16,1,删除旧真分屏代码,done,,,,
+20260814_Agent-分屏-pane-重构-C-kanban-式,Agent 分屏 pane 重构（C+kanban 式）,open,2026-08-14 02:36:16,2,实现 Agent 分屏 pane（方案C+kanban）,done,,,,
+20260814_Agent-分屏-pane-重构-C-kanban-式,Agent 分屏 pane 重构（C+kanban 式）,open,2026-08-14 02:36:16,3,2.0 升级：模式切换+一比一复刻+看板式横向滚动,done,,,,
+20260814_Agent-分屏-pane-重构-C-kanban-式,Agent 分屏 pane 重构（C+kanban 式）,open,2026-08-14 02:36:16,4,2.1 修复：单实例去污染+工具卡片复刻+嵌套看板,done,,,,

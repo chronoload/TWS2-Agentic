@@ -925,12 +925,18 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
     @app.get("/api/system/workspaces")
     async def system_workspaces():
-        """返回可用工作区列表（不含敏感字段）"""
+        """返回可用工作区列表（不含敏感字段），标注当前激活工作区与默认工作区"""
         config = load_api_config()
         workspaces = config.get("workspaces", [])
+        current = os.path.normcase(str(Path(app.state.workspace_dir).resolve()))
+        default = os.path.normcase(str(Path(workspace_dir).resolve()))
         safe = []
         for ws in workspaces:
-            safe.append({k: v for k, v in ws.items() if k != "auth_code"})
+            item = {k: v for k, v in ws.items() if k != "auth_code"}
+            ws_path = os.path.normcase(str(Path(ws["path"]).resolve()))
+            item["active"] = ws_path == current
+            item["isDefault"] = ws_path == default
+            safe.append(item)
         return ok(data=safe)
 
     @app.post("/api/system/switchWorkspace")
@@ -978,7 +984,13 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             return err(403, "无权访问该工作区")
 
         app.state.workspace_dir = ws_path
-        app.state.sync_engine = FileSyncEngine(ws_path)
+        engine = FileSyncEngine(ws_path)
+        # 默认工作区（create_app 时的 workspace_dir）保留 EXPOSED_DIRS 安全限制；
+        # 切换到其他工作区时暴露全部文件（不受 EXPOSED_DIRS 限制）。
+        if os.path.normcase(str(Path(ws_path).resolve())) != os.path.normcase(str(Path(workspace_dir).resolve())):
+            engine.EXPOSED_DIRS = set()
+            engine.EXPOSED_ROOT_FILES = set()
+        app.state.sync_engine = engine
         app.state.sync_engine.set_change_callback(on_file_change)
         logger.info(f"Switched workspace to {ws_path}")
 
@@ -5724,7 +5736,15 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
                     def _on_web_approval(request):
                         try:
-                            _web_approval_requests[request.id] = (request, agent)
+                            _web_approval_requests[request.id] = (request, agent, req.session_id or 'default')
+                            # 后台线程等待请求结束（decide 立即返回 / 300s 超时返回），
+                            # 无论结果如何都清理 _web_approval_requests，防止超时泄漏/幽灵条目
+                            def _cleanup_when_done(r):
+                                try:
+                                    r.wait(timeout=300)
+                                finally:
+                                    _web_approval_requests.pop(r.id, None)
+                            threading.Thread(target=_cleanup_when_done, args=(request,), daemon=True).start()
                             try:
                                 agent._awaiting_approval = True
                             except Exception:
@@ -5962,7 +5982,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         item = _web_approval_requests.get(request_id)
         if not item:
             return err(msg=f"审批请求不存在或已过期: {request_id}")
-        request, agent = item
+        request, agent, _sid = item
         from ..harness import ApprovalDecision
         decision_map = {
             "approve": ApprovalDecision.APPROVE,
@@ -5982,6 +6002,28 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         except Exception:
             pass
         return ok(data={"decided": True, "request_id": request_id, "decision": decision_str})
+
+    @app.get("/api/agent/approval/pending")
+    async def agent_approval_pending(req: Request):
+        """刷新/断线恢复：返回当前 session 的待审批请求列表（前端据此重新弹窗）"""
+        sid = (req.query_params.get("session_id") or "").strip()
+        items = []
+        for rid, (rq, _ag, rq_sid) in _web_approval_requests.items():
+            if sid and rq_sid != sid:
+                continue
+            tool_input = getattr(rq, 'tool_input', {}) or {}
+            try:
+                ti_str = json.dumps(tool_input, ensure_ascii=False)[:800]
+            except Exception:
+                ti_str = str(tool_input)[:800]
+            items.append({
+                "request_id": rid,
+                "tool_name": getattr(rq, 'tool_name', ''),
+                "reason": getattr(rq, 'reason', ''),
+                "risk_level": getattr(rq, 'risk_level', 'medium'),
+                "tool_input_preview": ti_str,
+            })
+        return ok(data={"pending": items})
 
     # ─── Agent 控制接口 ──────────────────────────────────────
 
@@ -6189,18 +6231,6 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         except Exception:
             pass
         return ok(data={"tools": []})
-
-    @app.get("/api/agent/approval/pending")
-    async def agent_pending_approvals():
-        from ..harness import get_global_approval_manager
-        am = get_global_approval_manager()
-        items = []
-        for r in am.get_pending():
-            items.append({
-                "id": r.id, "tool_name": r.tool_name, "tool_input": r.tool_input,
-                "reason": r.reason, "risk_level": r.risk_level,
-            })
-        return ok(data={"pending": items})
 
     @app.get("/api/agent/toolgroups")
     async def agent_list_toolgroups(sid: str = ""):

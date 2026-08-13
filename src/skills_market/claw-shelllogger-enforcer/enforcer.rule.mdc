@@ -1,0 +1,182 @@
+---
+description: Claw Shell Logger Enforcer - 强制使用 shell_logger
+alwaysApply: true
+enabled: true
+updatedAt: 2026-03-17T23:55:00Z
+provider: claw-shelllogger-enforcer
+---
+
+# Claw Shell Logger 强制执行规则
+
+## 规则声明
+
+此规则在 **Claw 项目**（`c:/Users/qu/WorkBuddy/Claw`）中强制执行，确保所有系统命令执行都必须通过 `shell_logger.run()` 进行。
+
+## 强制执行条件
+
+在以下情况下，AI 的 `execute_command` 调用会被此规则拦截和检查：
+
+1. **工作目录在 Claw 项目** → 适用此规则
+2. **命令不是纯查询性质** → 需要通过检查
+3. **命令未使用 shell_logger** → 拦截，要求纠正
+
+## 允许通过的情况
+
+✅ 以下情况会**被允许**执行：
+
+```python
+# 方式 1：直接使用 shell_logger
+from shell_logger import run
+run("python test.py")
+
+# 方式 2：纯信息查询命令
+execute_command("dir C:\\Users\\qu\\WorkBuddy\\Claw")
+execute_command("tasklist | findstr python")
+
+# 方式 3：在 Python 脚本内使用 shell_logger
+# （脚本可以通过 shell_logger.run() 执行其他命令）
+
+# 方式 4：同步工作流脚本
+execute_command("python sync_workflows/run_sync.py")
+```
+
+## 拦截的情况
+
+❌ 以下情况会**被拦截**：
+
+```python
+# ❌ 错误 1：直接 execute_command 而非 shell_logger
+execute_command("python test.py")
+
+# ❌ 错误 2：在 Python 脚本中使用 subprocess
+import subprocess
+subprocess.run(["python", "test.py"])
+
+# ❌ 错误 3：使用 os.system
+import os
+os.system("python test.py")
+```
+
+## 拦截时的行为
+
+当命令被拦截时，AI 将：
+
+1. **停止执行** → 不调用 execute_command
+2. **输出错误** → 说明违规原因
+3. **提供纠正** → 展示正确的使用方式
+4. **重新执行** → 使用 shell_logger 重新做一遍
+
+## 豁免列表
+
+以下命令类型**自动豁免**（不需要 shell_logger）：
+
+| 命令类型 | 例子 | 原因 |
+|---------|------|------|
+| 查询命令 | `tasklist`, `dir`, `ls` | 无副作用 |
+| 搜索命令 | `findstr`, `grep`, `find` | 只读操作 |
+| 信息命令 | `echo`, `type`, `cat` | 无系统变更 |
+
+## 日志记录
+
+所有检查结果都会记录到：
+
+```
+Claw/logs/shelllogger_enforcer.log (JSONL 格式)
+```
+
+包含：
+- 检查结果（PASS/FAIL/EXEMPT）
+- 被检查的命令
+- 拦截原因
+- 执行上下文
+
+## 与其他规则的协作
+
+### 执行顺序
+
+```
+shell_logger_enforcer (检查使用方式)
+    ↓
+shell_logger.run() (执行命令，弹窗+日志)
+    ↓
+network_guard.py (检查网络安全)
+    ↓
+security_guard.py (检查命令安全)
+    ↓
+visible_runner.py (实际弹窗执行)
+```
+
+### 与 security-policy.mdc 的关系
+
+- **security_guard.py** 检查"做什么"是否安全（ALLOW/WARN/BLOCK）
+- **shell_logger_enforcer** 检查"怎么做"是否合规（必须用 shell_logger）
+- 两者互不冲突，共同保护 Claw 项目
+
+## 何时激活此规则
+
+✅ 此规则会自动激活：
+
+- AI 在 Claw 工作目录下操作
+- AI 调用 execute_command 工具
+- 命令不属于豁免列表
+
+❌ 此规则不激活：
+
+- AI 在其他项目目录操作
+- 执行纯信息查询命令
+- Python 脚本内部的 shell_logger 调用
+
+## 故障排查
+
+### 问题 1：命令被拦截，显示"Must use shell_logger"
+
+**解决**：用 shell_logger 包装命令
+
+```python
+from shell_logger import run
+result = run("your_command_here")
+```
+
+### 问题 2：同步脚本无法运行
+
+**解决**：确保 run_sync.py 内部使用了 shell_logger
+
+```python
+# run_sync.py
+from shell_logger import run
+r = run("python sync_log_to_wechat.py")
+```
+
+### 问题 3：一直被拦截，没有豁免
+
+**检查**：
+1. 确认工作目录是否在 Claw 下
+2. 检查命令是否属于查询类型
+3. 查看 shelllogger_enforcer.log 了解详情
+
+## 不得绕过此规则
+
+⚠️ **严格禁止**：
+
+1. 修改此规则文件本身
+2. 尝试禁用 shell_logger_enforcer skill
+3. 直接调用 visible_runner 而非 shell_logger
+4. 使用 subprocess/os.system 而非 shell_logger
+
+任何绕过尝试都会被审计日志记录。
+
+## 修改和扩展
+
+此规则的 **检查逻辑不应修改**，但可以：
+
+- 扩展豁免命令列表
+- 增加审计日志详细度
+- 更新错误提示信息
+
+任何逻辑变更必须由用户手动审核并明确同意。
+
+## 相关资源
+
+- [shell_logger.py 源码](../../../Claw/shell_logger.py)
+- [Claw Shell Logging 规则](../../../Claw/.workbuddy/rules/shell-logging.mdc)
+- [强制执行 Enforcer 实现](./claw_shelllogger_enforcer.py)

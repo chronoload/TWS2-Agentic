@@ -1,0 +1,175 @@
+# pack-refs with: peeled fully-peeled sorted 
+bac79da8f13694ebcffe3c361139bea2a1c205fc refs/remotes/origin/add-qwen-readme
+884b1a5960f435e670d0a3f1f5246e4a8fd54b24 refs/remotes/origin/add-worktree-consent-step
+3f78c61cbea394752d54dc71ea3892e464047800 refs/remotes/origin/agentic-end-to-end-testing
+7cefe7498cc2eb66facddd3300e7b7cd1799ba0f refs/remotes/origin/brainstorming-skill-scaling
+16856963f2f011635c30d87858ef63a07bc2f4fb refs/remotes/origin/bump/evals-claude-transcript-capture
+00720702e4215dbac63e8755acf798a0ecefba6d refs/remotes/origin/chore/remove-orphaned-session-start-codex
+36f3883f4ef1b3ca70307fd05509c9a501d772a3 refs/remotes/origin/codex-spinout-fixes
+d180481eb9a68feb33b30e48cf3fb2123184301d refs/remotes/origin/codex/bump-superpowers-evals-e2b3713
+63101959b52594edb2eabedddbf75b6e23c45152 refs/remotes/origin/codex/explore-interactive-prototypes
+019e6b6d08b9b6d1407b9c2e7181788ad405811f refs/remotes/origin/codex/fix-codex-plugin-category
+0276f622d34adcbd48548f58a5c40dd96c977c12 refs/remotes/origin/codex/fix-tdd-anti-patterns-link
+72f0cb4a7e8d62fad172bbaee41f6d6a67e265fa refs/remotes/origin/codex/fix-worktree-step-numbering
+bc20cdaa556dcaea0a8b9b31f8ff5216376820ef refs/remotes/origin/codex/issue-1827-codex-windows-hook
+dc6082d7ff9dcfd15d16c71a883ae6cf51fb51cf refs/remotes/origin/codex/openclaw-native-plugin
+da77169fab491fd562ab3fe48704f66212bcc840 refs/remotes/origin/codex/package-codex-portal-archive
+c5aca8cbd3a56d187bb8dd455305eeb39488f05a refs/remotes/origin/codex/pri-1367-antigravity-docs
+3d7b32ba57417c94cf89f99ba3f21d2d6b350616 refs/remotes/origin/codex/pri-1367-codex-install-docs
+6b09afd8da0f6dc4133eb7844ffd338d3070e40f refs/remotes/origin/codex/pri-1367-codex-manifest-urls
+57aa869f53456ae365c3bb1b63cf7c3e5e73ab39 refs/remotes/origin/codex/pri-1367-opencode-install-docs
+68040f2cde3587766ef3aa9e3de778d4fe632621 refs/remotes/origin/codex/pri-1369-opencode-integration-tests
+f62e538c7beea2a10ca1365df38126c388e28861 refs/remotes/origin/codex/pri-1599-bump-superpowers-evals-sha
+5cd1a9d5f211e572e9d8487ecc064edc87d52a14 refs/remotes/origin/codex/pri-2158-bump-evals-submodule
+3567c68388e6015df879e7999d4d9c4ff48c2d50 refs/remotes/origin/codex/pri-2240-sdd-task-brief-unique-paths
+79d83245aaf4a730555d8f027ed0c1f8d1639e70 refs/remotes/origin/codex/pri-2443-codex-package-hooks
+529e9b287fe51e20d11adf67560092e9f430c99e refs/remotes/origin/codex/readme-quickstart-install-links
+16132fa61fc24e1f00a6eef54216e6a933f638bd refs/remotes/origin/codex/remove-circle-k-signal
+144a85a663600c16a2863d38259652dc9088aa43 refs/remotes/origin/codex/remove-readme-quickstart
+935de5d5ec5d5ce72638050bdc00c6ac8a253af9 refs/remotes/origin/codex/research-codex-plugin-hooks
+cb6bdf9dd3bc2bc67069529e57c620d769667e42 refs/remotes/origin/codex/shell-lint-baseline-fixes
+867238cfc114293ddc51c9a5e235ed3159675e54 refs/remotes/origin/codex/shell-lint-script
+ad2db13001d57250f109a251fbbf199d1d5660b3 refs/remotes/origin/codex/sup-251-superpowers-evals-submodule
+22b1eeec69dbc4d861231599f788f01b4d9f3150 refs/remotes/origin/codex/trim-windows-hook-docs
+b18647194ea744685b9f173a475497fc954efab3 refs/remotes/origin/compress-bootstrap
+f198f1e7d95fb6e913207b3d7bfde6ac4935f5bf refs/remotes/origin/debugging-skill-name
+fd02874aa5c55ba3c2bca431253b48e0e4c8be5a refs/remotes/origin/dev
+2783fb9145190fb2c73b9486461ef0e05ac71cee refs/remotes/origin/docs/add-qwen-code-readme
+e6a4316e11d61d984eb01823f1e142829588cdb4 refs/remotes/origin/docs/codex-portal-packaging
+8a96c967c99306a317280c1aecb0e2c4f2227655 refs/remotes/origin/docs/drill-to-quorum
+1280585826fc8590d8b346e331d1ffac4c3905ef refs/remotes/origin/drew/bump-evals-boundary-scenarios
+458269ac9460d7bd38421cde1b3e20b9b58ad4dd refs/remotes/origin/drew/codex-named-agent-dispatch
+c141508f369e23005af4944dd73b5027b8065bb0 refs/remotes/origin/drew/fix-frontmatter-docs
+b8bced40a5f05e52cbf875a91f922e92cdb9c91a refs/remotes/origin/drew/pri-1147-restore-auto-worktree-triggering
+20fabcd1d76f0b170f8647831f8e8859be589662 refs/remotes/origin/drew/pri-823-codex-app-compat
+0cc80b19d8a7bcb5803048136660438779ef43be refs/remotes/origin/drew/subagent-read-claude-md
+e5f337b89e384526476d3891711f783544d01f1a refs/remotes/origin/drew/sup-333-1-plans-reference-spec
+f9d11b3c2f1260338fbad469320c79242222b0c8 refs/remotes/origin/drew/sup-333-2-sdd-proportionality
+5c3af5f195027f9b7324e24b898753acaa4783d0 refs/remotes/origin/drew/sup-333-3-brainstorming-triviality-gate
+20d56c8a0e95ddf4e72b343926d51d25565d6d5c refs/remotes/origin/exp/controller-diet
+374ea4f14617322bea42d92250584493867dfc7d refs/remotes/origin/exp/loop-econ-r
+d1f1ae1f1ed1e1ee82c65e098694d0fb4bb98446 refs/remotes/origin/exp/loop-econ-rd
+113d18ec28c8a4b6226f40d4a218990d8b9aed50 refs/remotes/origin/f/codex
+0da121fa0503592a35c33d6b91ca0c76e09495d3 refs/remotes/origin/f/codex-instructions
+367f0e81a6e31161cfabad039ddeb629e8e73315 refs/remotes/origin/f/codex-no-hooks
+c66a57751c721d02b8882dbdaaad91b26512a446 refs/remotes/origin/f/no-more-commands
+8c26f9456c0e2d04ba0d6103f3c3481fc7d5375a refs/remotes/origin/f/sp6-relnotes
+2b205cf0e14681f18a291200b7ca4c1fa15858a5 refs/remotes/origin/feat-add-multi-repo-worktree
+2b2a7efa7dc2acbdd19772a772d18ff177f65bba refs/remotes/origin/feat/codex-native-skills
+6e95f8dbdbed7f274cfdb6c9546dc28d8b9bef80 refs/remotes/origin/feat/codex-subagent-skill-leakage
+537d649ab35d6986d6d30304af4e479830e5f28e refs/remotes/origin/feat/tooling-ask-brainstorming
+a45ede8ddc0e0545a788868c83814b9d01fbf312 refs/remotes/origin/feat/verification-floor-tdd
+94dc995719bd02744037ab97b86cc467c3b16790 refs/remotes/origin/finishing-branch-cleanup
+1879a94ac757ef9796d9cbe3b17f98ec83d56f29 refs/remotes/origin/fix-replace-hardcoded-users
+b8d9f06cfb0eb5e43944b7fe1310d5add238754c refs/remotes/origin/fix-sibling-worktree-loophole
+c7b456dd0ecd0eceb111396190c882607f0e974a refs/remotes/origin/fix/claude-code-test-suite
+ded04a41e3b3c7922ffd7799112888d39522edb2 refs/remotes/origin/fix/codex-hook-autodiscovery
+3ff8d15f15cc15408e8b637e4dab1e922ba8af0a refs/remotes/origin/fix/docs-codex-efficiency-campaign
+af025aa35bcd403b15e2b44281304c1e92da0f5d refs/remotes/origin/fix/owner-pid-lifecycle
+02654f93bf723eb1e3c8c4c6e74bd338f990b1c2 refs/remotes/origin/fix/render-graphs-no-shell
+2a500febcc10a07f24df8b72452156a16f277600 refs/remotes/origin/fix/review-base-sha-merge-base
+99f9f00869e3e774e9abe9a29ccfccb8957ec5da refs/remotes/origin/fix/review-package-range-guards
+f2bbe9ff924ceeb5d08d737051cdc98052f3fbaf refs/remotes/origin/fix/run-hook-heredoc
+0be49879b1c51a479d2013a14fe42ed9bd10ce32 refs/remotes/origin/fix/sdd-helpers-no-exec-bit
+0e798e1dc2acd0a078e59755c14e362408896828 refs/remotes/origin/fix/sdd-workspace-ownership
+538d65120be78ad147fc82ea392da2ed0edc4cdc refs/remotes/origin/fix/spec-travels-with-plan
+7c560e048b85e5bfa4d59a7f71d0bd012d7b8343 refs/remotes/origin/fix/t1-sdd-no-worker-reviewers
+4dc71b10b325637e8eba673184d4f57eb70ac865 refs/remotes/origin/fix/t4-brainstorming-three-paths
+e9686d5c09b80323bfdc44be8804081e46ea0986 refs/remotes/origin/fix/t5-codex-spawn-routing
+cda4b15fd68cec5991ab46c1bc8d5bc2b8ec2677 refs/remotes/origin/fix/test-suite-portability
+c3d478dc47c1f5bcc4c8eb85ead8e5a537a9b68f refs/remotes/origin/fix/windows-codex-launcher
+fd12428a5cd63a3a63f12eea6c4ffad780ecf36d refs/remotes/origin/fix/windows-hook-shell-bash
+17b42c8128919944c58d581b1ec690dba3c35655 refs/remotes/origin/fix/worktree-cleanup-untracked-checkin
+80b82abd8d5a43f629b9b0ca55336d63f3da5680 refs/remotes/origin/fix/x13-illegibility
+78cc1892442ceb765b38bc7983553b718b6e95c6 refs/remotes/origin/fix/x6a-sdd-batch-small-tasks
+419dec7755bf93dc5660a37b183cf771fe39643e refs/remotes/origin/fix/x7a-sdd-evidence-bearing-preflight
+7a01a0e83a2e53d2e5e5b70646a938df688d1cc7 refs/remotes/origin/fix/x9a-sdd-never-stall
+7fecd8584297133e01fb34e11d154a02b92622e9 refs/remotes/origin/gs/plan-mode-vs-skills
+695744056ed1338404539aba3fbd98928d78005c refs/remotes/origin/hermes-harness-rebase
+2ea4f36b0f4603479db98d975baffb9253ed18af refs/remotes/origin/improve-skills-from-feedback
+67f513f3468ad2f7dd2d05ed95ce70fce3156e1d refs/remotes/origin/integration-section-cleanup
+b36e0829c6d0140e93cfef2ca599b1b07d4a7797 refs/remotes/origin/main
+c2df7262a716fcc652c5d12b7931c84b4502fbac refs/remotes/origin/minor-adj-to-unload-viz-brainstorm-on-choice
+8bdd47743b123fe72f2cb8209f8de77351460436 refs/remotes/origin/opencode-config-dir-docs
+d525598b321bc514ae62ed768df689f2be7afae3 refs/remotes/origin/opencode-native-skills
+15d3b46614a6091c914548129bbb8816b86d4258 refs/remotes/origin/pi-extension-evals
+bf5530a937139539e8241cc4538aa168559b83e6 refs/remotes/origin/readme-drop-hiring-section
+35464d67c05bd9431a1343cbd76997f45bae6a07 refs/remotes/origin/sdd-e27-stack
+9b6be89aeac7c0391ff654643ff832e78430f9d7 refs/remotes/origin/sdd-l2b-plan-mandated
+5fa1ebc12270e4c249fb59d3872eb3218c174a5a refs/remotes/origin/sdd-plan-scoped-workspace
+db6077bb21b6e4d9e01a3cae46b71999df1b46f1 refs/remotes/origin/sdd-review-dispatch
+67714e036cd0b0ee4f7899a5c87834eb32693c7d refs/remotes/origin/skill-detritus-cleanup
+0e69a4d32c2db00ebc012310d303907cc5507c6f refs/remotes/origin/tdd-writing-good-tests
+505a13e62988e82bc576a039694cb9aee9892f8e refs/remotes/origin/update-porting-harness-doc
+1a9cd9ec4b07b0d76bd57df60da9806909ea6417 refs/remotes/origin/viz-launch-script-tweaks
+03360d1a21847ecde4d0deae6efb17ff489e8462 refs/remotes/origin/wip-for-cl
+b0519329dfc3776fc96ba1d3dd69b7a444845129 refs/remotes/origin/wip/architecture-guidance
+03360d1a21847ecde4d0deae6efb17ff489e8462 refs/remotes/origin/wip/brainstorm-handoff-fix
+84cd6e7c20e38b1941e77b232d17ccb53eb945b7 refs/remotes/origin/wip/project-decomposition
+9a0887169aff02325b01ab7cfaa4e9ef6f18c7b3 refs/remotes/origin/wip/reviewer-workflow-tightening-20260315
+c61f75030f24faf1bcd5c7346a0bb71259ae9bf2 refs/remotes/origin/worktree-worktree-rototill
+9d2b0e971dd2241f9e3b3525491d9e5cdd439fdf refs/remotes/origin/writing-plans-crisp
+e26094cae1a75d9fcb9043867924233c6ad40c26 refs/tags/v3.1.0
+^0bc5a5989d8cf140e9f671af14c76f6a6e6fae79
+14827acb4ecd50a8e25a57bf6f95a928de12e92b refs/tags/v3.2.2
+^17bbc2b130f817f7b2e8aade82284b5887864c51
+19e2997334eef29d0b4ab3c40a4bc124d200d1fb refs/tags/v3.2.3
+31fd7642854d6d3dfd65959fcefabe71ccee86d9 refs/tags/v3.3.1
+b187e75a1ee46f54247b6720ed49a47bdcc7eb2f refs/tags/v3.4.1
+aa6c26749a005f766b3fb26fc94c22dc55f61e6f refs/tags/v3.5.0
+^94089bdce57c7df7c0c8bdbc94aa204e360f6e17
+1bd0a319ff44e5138060cd4babb391f93455a533 refs/tags/v3.5.1
+^9a01a0dcc1a95bde0ffdb9af6d87236b40156a30
+e21e2f1c4f86e6fb1060ab7cd14d4d41e1ce0bcb refs/tags/v3.6.0
+^a0c1e73a1d016b3967f2fa107db995ded9dcbf29
+2901305418fb2e615f46b80a1e13a5aa0dd2ab0f refs/tags/v3.6.1
+^8462c20cce0ca37ff747d80fde4697fd45a98189
+50cdef8aff1cd8b2e605ce786de5af8a13a7022e refs/tags/v3.6.2
+^154d664373569a83289684d7b01742a82cca4eaf
+1d3b055f175127777e18361119bd1fba4c231d5c refs/tags/v4.0.0
+^95c6e1633630a1462679cf1284b95ec458a27a8e
+08f6dd5e8c629ea088fc31253f1f367a2ff63f51 refs/tags/v4.0.1
+^a7a8c08c02d1f20409048ceafc49ed309d570ebf
+7438033d3a5669e380fb41862a3932a72b733d3c refs/tags/v4.0.2
+^131c1f189f75a14faad4227089841d1deee73e2a
+ea6d5ab48b0e1a7b83ceaf8d2e4c45aecc7e2f3c refs/tags/v4.0.3
+^b9e16498b9b6b06defa34cf0d6d345cd2c13ad31
+c2074cfe3c0af56b60b595795500322aff54ad48 refs/tags/v4.1.0
+^19c70afc993ef7f3054ea4f91918e47093bb907b
+469a6d81ebb8b827e284d4afb090c6c622d97747 refs/tags/v4.1.1
+93f4d049a5f897847d7c60c7f4c64da231325b05 refs/tags/v4.2.0
+^a98c5dfc9de0df5318f4980d91d24780a566ee60
+235d005ac4ba882b15ec0fd928dd3aa5e24e2a45 refs/tags/v4.3.0
+^e16d611eee14ac4c3253b4bf4c55a98d905c2e64
+151ac79ccac12d769356da93e6e0513ae736fa13 refs/tags/v4.3.1
+^d2d6cf485286ca9af69b84557e4da4c1d83a58e0
+65106780fef13d3c52d24e3be6ef34c879119671 refs/tags/v5.0.0
+^133a0a80c65c9f71206e31a08511fab1869354f2
+d55f88d961e199faef3723e58caaebfa81728bcd refs/tags/v5.0.1
+^5ef73d25b71e69e63a74eae359fb26c7a6ac8fc0
+69401dee850073fa91da404dc2d9aed366a9980a refs/tags/v5.0.2
+^363923f74aa9cd7b470c0aaa73dee629a8bfdc90
+80021fce41e30e85941841697cf61fe196ceefcc refs/tags/v5.0.4
+^1128a721ca3b7fd76bf12e8392cdeb89cfcfcf2a
+5da4156bdbdcdf98ddf7b7d1931cf9fdc76956e7 refs/tags/v5.0.5
+^7e516434f2a30114300efc9247db32fb37daa5f9
+2f61691413182b99fa2937c6ca0085334176c5d1 refs/tags/v5.0.6
+^eafe962b18f6c5dc70fb7c8cc7e83e61f4cdde06
+dd7a63ac45233dce0a6c6222a77f205ee7c78750 refs/tags/v5.0.7
+^1f20bef3f59b85ad7b52718f822e37c4478a3ff5
+ecbd610fce16d5faabcea997f17031129589b572 refs/tags/v5.1.0
+^f2cbfbefebbfef77321e4c9abc9e949826bea9d7
+a2b2b2685addf349294ae7262ae3c0143be2e75e refs/tags/v6.0.0
+^284be5905ed540d34ce5bcde24728b9b7f413ea0
+7110c2cbf9f195dc10d0ddd7566f3b9da61cb5f6 refs/tags/v6.0.2
+^b62616fc12f6a007c6fd5118146821d748da0d33
+45c3cc5b66cfc5f147a7ddcfb86f7650e47a8ae0 refs/tags/v6.0.3
+^896224c4b1879920ab573417e68fd51d2ccc9072
+61fd6f0ebbb6c6ff58d8cc61ada4073a8df8c35e refs/tags/v6.1.0
+^f268f7c953744036f0fa7e9d4b73535c04e57cb8
+c984ea2e7aeffdcc865784fd6c5e3ab75da0209a refs/tags/v6.1.1
+^d884ae04edebef577e82ff7c4e143debd0bbec99
+0e5cc50e782429b95f933e46443898435b8b37a8 refs/tags/v6.2.0
+^3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9
+86babb696875227929e85420f287d6309374b93f refs/tags/v6.3.0
+^b36e0829c6d0140e93cfef2ca599b1b07d4a7797

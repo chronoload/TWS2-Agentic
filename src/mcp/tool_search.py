@@ -295,6 +295,9 @@ CORE_TOOL_NAMES = {
     "write_server_file", "switch_panel", "navigate_source",
     # macdev 机器驱动开发库（audit/plan/log/requirement/dev/project/patch/doc，取代 plan_cli）
     "macdev",
+    # Cline 兼容工具（已在 get_tools() core 组注册，需确保始终发送给 LLM）
+    "ask_followup_question", "apply_patch", "browser_action",
+    "list_code_definition_names", "access_mcp_resource",
 }
 
 # DataHub 高频工具（始终发送）

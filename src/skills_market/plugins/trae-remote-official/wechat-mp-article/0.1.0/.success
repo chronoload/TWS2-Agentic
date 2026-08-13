@@ -1,0 +1,11 @@
+{
+  "name": "trae-remote-official:wechat-mp-article",
+  "registry": "trae-remote-official",
+  "plugin_name": "wechat-mp-article",
+  "version": "0.1.0",
+  "marketplace_plugin_id": "0e1597e6-382f-4bb4-8c2f-7d6292cb4d4d",
+  "remote_installed_plugin_id": "KY-TQFXYXE5AJ6",
+  "checksum": "a2c9cd8c6f475eeb68b4daf16724b87949ba0c45c09488d24a38be6f5cbf4c3d",
+  "file_size": 91492,
+  "installed_at": 1786609331350
+}

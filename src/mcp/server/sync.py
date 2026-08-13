@@ -823,7 +823,7 @@ class FileSyncEngine:
         搜索文件（按名称匹配，rg 加速枚举，失败回退 Python rglob）。
 
         语义（按 subdir 区分两种 nav）：
-        - subdir 为空 → 文件 nav 全局搜索 → 只扫 EXPOSED_DIRS（文件树本就只暴露这些目录）
+        - subdir 为空 → 文件 nav 全局搜索 → 默认工作区只扫 EXPOSED_DIRS；非默认工作区（EXPOSED_DIRS 为空）全扫整个工作区
         - subdir 非空 → 指定目录搜索（源码浏览器 / 文件 nav 子目录）→ 全扫该目录，不受 EXPOSED_DIRS 限制
         过滤依据：IGNORE_PATTERNS + 隐藏段过滤（.ts2_data/.pytest_cache 等）。
         排序（对标 Windows Explorer）：目录优先，再按 sort_by（name/size/mtime/type）+ order。
@@ -846,18 +846,24 @@ class FileSyncEngine:
             if t.exists():
                 roots.append(t)
         else:
-            for d in getattr(self, "EXPOSED_DIRS", ()) or ():
-                p = self.workspace_dir / d
-                if p.exists():
-                    roots.append(p)
-            # 根级暴露文件（仅 EXPOSED_ROOT_FILES，直接 iterdir 一层即可）
-            root_files = getattr(self, "EXPOSED_ROOT_FILES", ()) or ()
-            try:
-                for item in self.workspace_dir.iterdir():
-                    if item.is_file() and item.name in root_files:
-                        roots.append(item)
-            except OSError:
-                pass
+            exposed = getattr(self, "EXPOSED_DIRS", ()) or ()
+            if exposed:
+                # 默认工作区：仅扫 EXPOSED_DIRS 顶级目录
+                for d in exposed:
+                    p = self.workspace_dir / d
+                    if p.exists():
+                        roots.append(p)
+                # 根级暴露文件（仅 EXPOSED_ROOT_FILES，直接 iterdir 一层即可）
+                root_files = getattr(self, "EXPOSED_ROOT_FILES", ()) or ()
+                try:
+                    for item in self.workspace_dir.iterdir():
+                        if item.is_file() and item.name in root_files:
+                            roots.append(item)
+                except OSError:
+                    pass
+            else:
+                # 非默认工作区（EXPOSED_DIRS 为空 = 暴露全部）：直接枚举整个工作区
+                roots.append(self.workspace_dir)
         if not roots:
             return results
 

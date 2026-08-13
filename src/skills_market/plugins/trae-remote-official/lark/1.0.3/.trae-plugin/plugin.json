@@ -1,0 +1,156 @@
+{
+  "name": "lark",
+  "version": "1.0.3",
+  "description": "Feishu/Lark workflows for messaging, documents, spreadsheets, calendar, tasks, meetings, and enterprise collaboration.",
+  "i18n": {
+    "display_name": {
+      "en": "Feishu",
+      "zh-cn": "飞书",
+      "ja": "Feishu"
+    },
+    "description": {
+      "en": "Connect your Feishu account to let TRAE manage docs, bases, calendars, messages and more",
+      "zh-cn": "连接你的飞书账号，让 TRAE 操作云文档、多维表格、日历、消息等飞书功能",
+      "ja": "Feishu アカウントを接続して、TRAE ドキュメント・テーブル・カレンダー・メッセージなどを操作"
+    }
+  },
+  "author": {
+    "name": "Lark",
+    "url": "https://www.larksuite.com"
+  },
+  "homepage": "https://www.larksuite.com",
+  "repository": "https://github.com/openai/plugins",
+  "license": "MIT",
+  "keywords": [
+    "lark",
+    "feishu",
+    "collaboration",
+    "documents",
+    "spreadsheets",
+    "calendar",
+    "messaging",
+    "tasks",
+    "meetings"
+  ],
+  "binaries": [
+    {
+      "name": "lark-cli",
+      "path": "bin/lark-cli",
+      "required": true,
+      "executable": true,
+      "platforms": {
+        "linux-arm64": {
+          "sha256": "26730b2ca702bd8a705f6d51db6fd21a8fb2fbcf139435ddf4cc8a0c06b58907",
+          "file_size": 11210161,
+          "urls": [
+            {
+              "source_group": "cn",
+              "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/binaries/lark-cli/1.0.68/linux-arm64.zip"
+            },
+            {
+              "source_group": "sg",
+              "url": "https://p16-market-sg.ibyteimg.com/tos-alisg-i-qmhakdvxf5-sg/binaries/lark-cli/1.0.69/linux-arm64-1784086402284791762.zip"
+            }
+          ]
+        },
+        "darwin-x64": {
+          "sha256": "d71750eaa3e7bc3bd92bca554222392f6e4189fa330eb26a046108c6ccef2576",
+          "file_size": 12105136,
+          "urls": [
+            {
+              "source_group": "cn",
+              "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/binaries/lark-cli/1.0.68/darwin-amd64.zip"
+            },
+            {
+              "source_group": "sg",
+              "url": "https://p16-market-sg.ibyteimg.com/tos-alisg-i-qmhakdvxf5-sg/binaries/lark-cli/1.0.69/darwin-x64-1784086377564221452.zip"
+            }
+          ]
+        },
+        "linux-x64": {
+          "sha256": "fbedf22a35ffa0bb25aee86daadd811e20ada078c4ebff6a97da1d683ae88eea",
+          "file_size": 11965749,
+          "urls": [
+            {
+              "source_group": "cn",
+              "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/binaries/lark-cli/1.0.68/linux-amd64.zip"
+            },
+            {
+              "source_group": "sg",
+              "url": "https://p16-market-sg.ibyteimg.com/tos-alisg-i-qmhakdvxf5-sg/binaries/lark-cli/1.0.69/linux-x64-1784086385368816923.zip"
+            }
+          ]
+        },
+        "darwin-arm64": {
+          "sha256": "354a03f45a46d9111aad9d6ec4464a791e3d6a0fcdf0f1c1c6422bc2ea924ed3",
+          "file_size": 11873709,
+          "urls": [
+            {
+              "source_group": "cn",
+              "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/binaries/lark-cli/1.0.68/darwin-arm64.zip"
+            },
+            {
+              "source_group": "sg",
+              "url": "https://p16-market-sg.ibyteimg.com/tos-alisg-i-qmhakdvxf5-sg/binaries/lark-cli/1.0.69/darwin-arm64-1784086394769505699.zip"
+            }
+          ]
+        },
+        "win32-x64": {
+          "sha256": "d593f658151a0de1ab26b89ee8ff1d93a216777b8120db0b048013468ff63a1d",
+          "file_size": 12366509,
+          "urls": [
+            {
+              "source_group": "cn",
+              "url": "https://p11-market.byteimg.com/tos-cn-i-17oceyzymr/binaries/lark-cli/1.0.68/windows-amd64.zip"
+            },
+            {
+              "source_group": "sg",
+              "url": "https://p16-market-sg.ibyteimg.com/tos-alisg-i-qmhakdvxf5-sg/binaries/lark-cli/1.0.69/windows-x64-1784086368245859794.zip"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "env": {
+    "LARKSUITE_CLI_USER_ACCESS_TOKEN": [
+      "${connector.feishu.ACCESS_TOKEN}",
+      "${connector.lark.ACCESS_TOKEN}"
+    ],
+    "LARKSUITE_CLI_BRAND": [
+      "${connector.feishu.Provider}",
+      "${connector.lark.Provider}"
+    ],
+    "LARKSUITE_CLI_APP_ID": [
+      "${connector.feishu.CLIENT_ID}",
+      "${connector.lark.CLIENT_ID}"
+    ]
+  },
+  "skills": "./skills/",
+  "apps": "./.app.json",
+  "connector": "./connector.json",
+  "interface": {
+    "displayName": "Lark",
+    "shortDescription": "Enterprise collaboration powered by Feishu/Lark",
+    "longDescription": "Feishu/Lark workflows for sending messages, managing documents, spreadsheets, calendars, tasks, meetings, OKRs, approvals, and more. Integrates with Lark Base, Drive, Wiki, Slides, Mail, and video conferencing.",
+    "developerName": "Lark",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://www.larksuite.com",
+    "privacyPolicyURL": "https://www.larksuite.com/en_us/privacy-policy",
+    "termsOfServiceURL": "https://www.larksuite.com/en_us/terms-of-service",
+    "defaultPrompt": [
+      "Send a message to a Lark chat",
+      "Create a document in Lark Docs",
+      "Schedule a meeting on Lark Calendar"
+    ],
+    "brandColor": "#3370FF",
+    "composerIcon": "./assets/app-icon.svg",
+    "logo": "./assets/app-icon.svg",
+    "screenshots": []
+  }
+}

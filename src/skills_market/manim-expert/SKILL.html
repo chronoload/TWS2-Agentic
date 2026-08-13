@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.36">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+<meta name="description" content="This skill provides comprehensive expertise in Manim (both 3b1b and Manim Community Edition) for creating mathematical animations and visualizations. It should be used when the user requests help with Manim code generation, animation creation, mathematical visualization, or questions about the Manim animation library. Covers scene construction, camera control, LaTeX rendering, 3D scenes, animation patterns, and the Math-To-Manim AI pipeline. Also includes 55+ example animations from the Math-To-Manim project and 3Blue1Brown’s video creation patterns.">
+
+<title>skill</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="SKILL_files/libs/clipboard/clipboard.min.js"></script>
+<script src="SKILL_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="SKILL_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="SKILL_files/libs/quarto-html/popper.min.js"></script>
+<script src="SKILL_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="SKILL_files/libs/quarto-html/anchor.min.js"></script>
+<link href="SKILL_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="SKILL_files/libs/quarto-html/quarto-syntax-highlighting-845c23b38eaddc0f92fda52bfe77a8c8.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="SKILL_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="SKILL_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="SKILL_files/libs/bootstrap/bootstrap-efbb37e9afcc02144ebbc7afd12a776f.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+
+
+
+<section id="manim-expert-skill" class="level1">
+<h1>Manim Expert Skill</h1>
+<p>Comprehensive guide for creating mathematical animations using Manim (3b1b edition and Manim Community Edition).</p>
+<section id="critical-two-manim-versions" class="level2">
+<h2 class="anchored" data-anchor-id="critical-two-manim-versions">Critical: Two Manim Versions</h2>
+<p>There are <strong>two distinct Manim libraries</strong> with different APIs. Always confirm which version the user is working with before generating code.</p>
+<section id="manim-community-edition-manim" class="level3">
+<h3 class="anchored" data-anchor-id="manim-community-edition-manim">Manim Community Edition (<code>manim</code>)</h3>
+<ul>
+<li><strong>Install</strong>: <code>pip install manim</code></li>
+<li><strong>Run</strong>: <code>manim -pql file.py SceneName</code></li>
+<li><strong>Import</strong>: <code>from manim import *</code></li>
+<li><strong>LaTeX</strong>: Use <code>MathTex()</code> for equations, <code>Tex()</code> for LaTeX text</li>
+<li><strong>Raw strings</strong>: <code>MathTex(r"\frac{a}{b}")</code></li>
+<li><strong>Used by</strong>: Math-To-Manim examples, general public projects</li>
+</ul>
+</section>
+<section id="b1b-manim-manimgl" class="level3">
+<h3 class="anchored" data-anchor-id="b1b-manim-manimgl">3b1b Manim (<code>manimgl</code>)</h3>
+<ul>
+<li><strong>Install</strong>: <code>pip install manimgl</code> (from source)</li>
+<li><strong>Run</strong>: <code>manimgl file.py SceneName</code></li>
+<li><strong>Import</strong>: <code>from manimlib import *</code></li>
+<li><strong>LaTeX</strong>: Use <code>Tex()</code> (NOT <code>MathTex()</code> which is ManimCE only)</li>
+<li><strong>Raw strings</strong>: <code>Tex(R"\frac{a}{b}")</code></li>
+<li><strong>Used by</strong>: 3Blue1Brown videos, <code>videos/</code> directory in this project</li>
+<li><strong>Key difference</strong>: Uses <code>InteractiveScene</code>, <code>checkpoint_paste()</code>, no <code>MathTex</code></li>
+</ul>
+</section>
+</section>
+<section id="quick-reference-commands" class="level2">
+<h2 class="anchored" data-anchor-id="quick-reference-commands">Quick Reference Commands</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 28%">
+<col style="width: 42%">
+<col style="width: 28%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Task</th>
+<th>ManimCE</th>
+<th>3b1b</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Run scene</td>
+<td><code>manim -pql file.py Scene</code></td>
+<td><code>manimgl file.py Scene</code></td>
+</tr>
+<tr class="even">
+<td>High quality</td>
+<td><code>manim -qh file.py Scene</code></td>
+<td><code>manimgl -w file.py Scene</code></td>
+</tr>
+<tr class="odd">
+<td>4K render</td>
+<td><code>manim -qk file.py Scene</code></td>
+<td>N/A</td>
+</tr>
+<tr class="even">
+<td>Interactive</td>
+<td>N/A</td>
+<td><code>manimgl file.py Scene -se &lt;line&gt;</code></td>
+</tr>
+<tr class="odd">
+<td>GIF output</td>
+<td><code>manim -pql --format gif file.py Scene</code></td>
+<td>N/A</td>
+</tr>
+<tr class="even">
+<td>List scenes</td>
+<td><code>manim file.py</code></td>
+<td><code>manimgl file.py</code></td>
+</tr>
+</tbody>
+</table>
+<p>Quality flags (ManimCE): <code>l</code>=low, <code>m</code>=medium, <code>h</code>=high, <code>k</code>=4K</p>
+</section>
+<section id="manimce-code-patterns" class="level2">
+<h2 class="anchored" data-anchor-id="manimce-code-patterns">ManimCE Code Patterns</h2>
+<section id="scene-skeleton" class="level3">
+<h3 class="anchored" data-anchor-id="scene-skeleton">Scene Skeleton</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> manim <span class="im">import</span> <span class="op">*</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MyScene(Scene):</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> construct(<span class="va">self</span>):</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 1. Create mobjects</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>        title <span class="op">=</span> Text(<span class="st">"Title"</span>, font_size<span class="op">=</span><span class="dv">48</span>)</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>        equation <span class="op">=</span> MathTex(<span class="vs">r"</span><span class="ch">\f</span><span class="vs">rac{a}{b}"</span>)</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 2. Animate</span></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.play(Write(title))</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.play(FadeIn(equation))</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.wait(<span class="dv">1</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="d-scene" class="level3">
+<h3 class="anchored" data-anchor-id="d-scene">3D Scene</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> My3DScene(ThreeDScene):</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> construct(<span class="va">self</span>):</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.set_camera_orientation(phi<span class="op">=</span><span class="dv">70</span><span class="op">*</span>DEGREES, theta<span class="op">=-</span><span class="dv">45</span><span class="op">*</span>DEGREES)</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>        axes <span class="op">=</span> ThreeDAxes()</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>        sphere <span class="op">=</span> Sphere(radius<span class="op">=</span><span class="dv">2</span>, resolution<span class="op">=</span>(<span class="dv">30</span>, <span class="dv">30</span>))</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.play(Create(axes), FadeIn(sphere))</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.begin_ambient_camera_rotation(rate<span class="op">=</span><span class="fl">0.1</span>)</span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.wait(<span class="dv">2</span>)</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.stop_ambient_camera_rotation()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="essential-animation-methods" class="level3">
+<h3 class="anchored" data-anchor-id="essential-animation-methods">Essential Animation Methods</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(Write(text))                    <span class="co"># Typewriter effect</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(FadeIn(obj))                    <span class="co"># Fade in</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(FadeOut(obj))                   <span class="co"># Fade out</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(Transform(a, b))               <span class="co"># Transform a into b</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(ReplacementTransform(a, b))    <span class="co"># Strict mapping transform</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(Create(obj))                    <span class="co"># Draw stroke</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(obj.animate.move_to(ORIGIN))   <span class="co"># Animate method</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(obj.animate.set_color(RED))    <span class="co"># Animate property</span></span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(LaggedStart(<span class="op">*</span>anims, lag_ratio<span class="op">=</span><span class="fl">0.1</span>))  <span class="co"># Staggered</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(AnimationGroup(<span class="op">*</span>anims))         <span class="co"># Simultaneous</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="math-typesetting" class="level3">
+<h3 class="anchored" data-anchor-id="math-typesetting">Math Typesetting</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ManimCE</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>MathTex(<span class="vs">r"</span><span class="ch">\f</span><span class="vs">rac{a}{b}"</span>, <span class="vs">r"="</span>, <span class="vs">r"</span><span class="dv">\s</span><span class="vs">qrt{c}"</span>)  <span class="co"># Returns submobjects for each</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>Tex(<span class="vs">r"E = mc</span><span class="dv">^</span><span class="vs">2"</span>)                             <span class="co"># Single LaTeX expression</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>MathTex(<span class="st">"x^2 + y^2 = z^2"</span>, substrings_to_isolate<span class="op">=</span>[<span class="st">"x"</span>, <span class="st">"y"</span>, <span class="st">"z"</span>])</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Color specific parts</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>eq <span class="op">=</span> MathTex(<span class="vs">r"x</span><span class="dv">^</span><span class="vs">2"</span>, <span class="st">"+"</span>, <span class="vs">r"y</span><span class="dv">^</span><span class="vs">2"</span>, <span class="st">"="</span>, <span class="vs">r"z</span><span class="dv">^</span><span class="vs">2"</span>)</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>eq[<span class="dv">0</span>].set_color(BLUE)</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>eq[<span class="dv">2</span>].set_color(RED)</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a><span class="co"># Or use set_color_by_tex</span></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>eq <span class="op">=</span> MathTex(<span class="vs">r"x</span><span class="dv">^</span><span class="vs">2 </span><span class="op">+</span><span class="vs"> y</span><span class="dv">^</span><span class="vs">2 = z</span><span class="dv">^</span><span class="vs">2"</span>)</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>eq.set_color_by_tex(<span class="st">"x^2"</span>, BLUE)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="common-mobjects" class="level3">
+<h3 class="anchored" data-anchor-id="common-mobjects">Common Mobjects</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Text</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>Text(<span class="st">"Hello"</span>), Tex(<span class="vs">r"</span><span class="ch">\a</span><span class="vs">lpha"</span>), MathTex(<span class="vs">r"</span><span class="ch">\f</span><span class="vs">rac</span><span class="op">{1}{2}</span><span class="vs">"</span>)</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>Integer(<span class="dv">42</span>), DecimalNumber(<span class="fl">3.14</span>)</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="co"># Shapes</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>Circle(), Square(), Rectangle(), Polygon([<span class="op">-</span><span class="dv">1</span>,<span class="dv">0</span>,<span class="dv">0</span>], [<span class="dv">1</span>,<span class="dv">0</span>,<span class="dv">0</span>], [<span class="dv">0</span>,<span class="dv">2</span>,<span class="dv">0</span>])</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>Line(LEFT, RIGHT), Arrow(LEFT, RIGHT), DashedLine(LEFT, RIGHT)</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>RoundedRectangle(), SurroundingRectangle(obj)</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a><span class="co"># Math</span></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>NumberPlane(), ComplexPlane(), Axes(), CoordinateSystem()</span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>NumberLine(), NumberLine(x_range<span class="op">=</span>[<span class="dv">0</span>, <span class="dv">10</span>])</span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a>Dot(ORIGIN), VGroup(<span class="op">*</span>items), Group(<span class="op">*</span>items)</span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a><span class="co"># Graphs</span></span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a>Graph(<span class="kw">lambda</span> x: np.sin(x), x_range<span class="op">=</span>[<span class="op">-</span>PI, PI])</span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a>ParametricCurve(<span class="kw">lambda</span> t: [np.cos(t), np.sin(t), <span class="dv">0</span>], t_range<span class="op">=</span>[<span class="dv">0</span>, <span class="dv">2</span><span class="op">*</span>PI])</span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a><span class="co"># 3D</span></span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a>Sphere(), Cube(), Torus(), Cone(), Cylinder()</span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a>ThreeDAxes(), Surface(), ParametricSurface()</span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a><span class="co"># Tables &amp; Charts</span></span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a>Table([[<span class="st">"A"</span>,<span class="st">"B"</span>],[<span class="st">"C"</span>,<span class="st">"D"</span>]]), BarChart(values<span class="op">=</span>[<span class="dv">1</span>,<span class="dv">2</span>,<span class="dv">3</span>])</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="positioning-layout" class="level3">
+<h3 class="anchored" data-anchor-id="positioning-layout">Positioning &amp; Layout</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>obj.to_edge(UP)                    <span class="co"># Move to edge</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>obj.to_corner(UL)                  <span class="co"># Move to corner (UL, UR, DL, DR)</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>obj.next_to(other, RIGHT, buff<span class="op">=</span><span class="fl">0.5</span>)  <span class="co"># Place beside</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>obj.move_to(ORIGIN)                <span class="co"># Move to position</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>obj.shift(LEFT<span class="op">*</span><span class="dv">2</span> <span class="op">+</span> UP)             <span class="co"># Relative shift</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>VGroup(a, b, c).arrange(RIGHT, buff<span class="op">=</span><span class="dv">1</span>)  <span class="co"># Arrange in line</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>VGroup(a, b, c).arrange(DOWN, buff<span class="op">=</span><span class="fl">0.5</span>) <span class="co"># Arrange vertically</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="updaters" class="level3">
+<h3 class="anchored" data-anchor-id="updaters">Updaters</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Simple updater</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>dot.add_updater(<span class="kw">lambda</span> m: m.move_to(point.get_center()))</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>obj.add_updater(<span class="kw">lambda</span> m: m.set_opacity(frame.time))</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="co"># f_always (3b1b)</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>obj.f_always.move_to(reference.get_center)</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a><span class="co"># Remove updater</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>dot.clear_updaters()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="color-constants" class="level3">
+<h3 class="anchored" data-anchor-id="color-constants">Color Constants</h3>
+<p><code>WHITE</code>, <code>BLACK</code>, <code>GREY</code>, <code>GREY_A/B/C/D</code>, <code>BLUE</code>, <code>BLUE_A/E/D/C</code>, <code>RED</code>, <code>RED_A/B/C/D/E</code>, <code>GREEN</code>, <code>GREEN_A/B/C/D/E</code>, <code>YELLOW</code>, <code>YELLOW_A/B/C/D/E</code>, <code>ORANGE</code>, <code>PURPLE</code>, <code>PURPLE_A/B/C/D/E</code>, <code>TEAL</code>, <code>MAROON</code>, <code>GOLD</code>, <code>PINK</code>, <code>LIGHT_GREY</code>, <code>DARK_GREY</code></p>
+</section>
+<section id="background-colors" class="level3">
+<h3 class="anchored" data-anchor-id="background-colors">Background Colors</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb8"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.camera.background_color <span class="op">=</span> <span class="st">"#000000"</span>  <span class="co"># Black (default)</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.camera.background_color <span class="op">=</span> <span class="st">"#1a0a2e"</span>  <span class="co"># Deep purple</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.camera.background_color <span class="op">=</span> WHITE      <span class="co"># White</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="custom-backgrounds-starfields" class="level3">
+<h3 class="anchored" data-anchor-id="custom-backgrounds-starfields">Custom Backgrounds &amp; Starfields</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb9"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> StarField(VGroup):</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, is_3D<span class="op">=</span><span class="va">False</span>, num_stars<span class="op">=</span><span class="dv">200</span>, <span class="op">**</span>kwargs):</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>        <span class="bu">super</span>().<span class="fu">__init__</span>(<span class="op">**</span>kwargs)</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> _ <span class="kw">in</span> <span class="bu">range</span>(num_stars):</span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>            x <span class="op">=</span> np.random.uniform(<span class="op">-</span><span class="dv">7</span>, <span class="dv">7</span>)</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>            y <span class="op">=</span> np.random.uniform(<span class="op">-</span><span class="dv">4</span>, <span class="dv">4</span>)</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>            z <span class="op">=</span> np.random.uniform(<span class="op">-</span><span class="dv">3</span>, <span class="dv">3</span>) <span class="cf">if</span> is_3D <span class="cf">else</span> <span class="dv">0</span></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.add(Dot(point<span class="op">=</span>[x, y, z], color<span class="op">=</span>WHITE, radius<span class="op">=</span><span class="fl">0.02</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+</section>
+<section id="b1b-specific-patterns" class="level2">
+<h2 class="anchored" data-anchor-id="b1b-specific-patterns">3b1b-Specific Patterns</h2>
+<section id="scene-base-classes" class="level3">
+<h3 class="anchored" data-anchor-id="scene-base-classes">Scene Base Classes</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb10"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>InteractiveScene    <span class="co"># Base for most 3b1b scenes (interactive dev)</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>PiCreatureScene    <span class="co"># Scenes with Pi creature</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>TeacherStudentsScene  <span class="co"># Pi creature classroom interactions</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+<section id="interactive-development-workflow" class="level3">
+<h3 class="anchored" data-anchor-id="interactive-development-workflow">Interactive Development Workflow</h3>
+<ol type="1">
+<li><code>manimgl file.py SceneName -se &lt;line&gt;</code> - Drop into interactive mode</li>
+<li>In terminal: <code>checkpoint_paste()</code> - Run clipboard code</li>
+<li><code>checkpoint_paste(skip=True)</code> - Run without animation</li>
+<li><code>checkpoint_paste(record=True)</code> - Record to file</li>
+<li>Use <code>self.frame</code> for camera operations</li>
+</ol>
+</section>
+<section id="b1b-code-style" class="level3">
+<h3 class="anchored" data-anchor-id="b1b-code-style">3b1b Code Style</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb11"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> manim_imports_ext <span class="im">import</span> <span class="op">*</span>  <span class="co"># Universal import for 3b1b videos</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Use Tex() for math, NOT MathTex()</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>formula <span class="op">=</span> Tex(<span class="vs">R"\frac</span><span class="sc">{a}{b}</span><span class="vs">"</span>)</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>formula <span class="op">=</span> Tex(<span class="vs">R"\pi"</span>)</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Text-to-color mapping</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>Tex(formula, t2c<span class="op">=</span>{<span class="st">"x"</span>: BLUE, <span class="st">"y"</span>: RED})</span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a><span class="co"># Camera</span></span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a>frame <span class="op">=</span> <span class="va">self</span>.frame</span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a>frame.save_state()</span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(frame.animate.scale(<span class="fl">0.5</span>))</span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.play(Restore(frame))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+</section>
+<section id="math-to-manim-ai-pipeline" class="level2">
+<h2 class="anchored" data-anchor-id="math-to-manim-ai-pipeline">Math-To-Manim AI Pipeline</h2>
+<p>The Math-To-Manim project (in <code>manim/Math-To-Manim/</code>) provides an AI-driven pipeline that transforms natural language prompts into Manim animations using a six-agent <strong>reverse knowledge tree</strong> approach.</p>
+<section id="pipeline-architecture" class="level3">
+<h3 class="anchored" data-anchor-id="pipeline-architecture">Pipeline Architecture</h3>
+<pre><code>User Prompt -&gt; ConceptAnalyzer -&gt; PrerequisiteExplorer (recursive)
+    -&gt; MathematicalEnricher -&gt; VisualDesigner -&gt; NarrativeComposer
+    -&gt; CodeGenerator -&gt; Manim Python Code</code></pre>
+</section>
+<section id="key-concept-reverse-knowledge-tree" class="level3">
+<h3 class="anchored" data-anchor-id="key-concept-reverse-knowledge-tree">Key Concept: Reverse Knowledge Tree</h3>
+<p>Instead of training on examples, recursively ask “What must I understand BEFORE X?” to build pedagogically sound animations from foundations up.</p>
+</section>
+<section id="three-ai-pipelines-available" class="level3">
+<h3 class="anchored" data-anchor-id="three-ai-pipelines-available">Three AI Pipelines Available</h3>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Pipeline</th>
+<th>Framework</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Claude Sonnet 4.5</td>
+<td>Anthropic SDK</td>
+<td>General purpose, reliable code</td>
+</tr>
+<tr class="even">
+<td>Gemini 3</td>
+<td>Google ADK</td>
+<td>Complex topology, physics</td>
+</tr>
+<tr class="odd">
+<td>Kimi K2.5</td>
+<td>OpenAI-compatible</td>
+<td>LaTeX-heavy, structured reasoning</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="running-the-pipeline" class="level3">
+<h3 class="anchored" data-anchor-id="running-the-pipeline">Running the Pipeline</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb13"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Claude UI</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> src/app_claude.py</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Gemini pipeline</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> Gemini3/run_pipeline.py <span class="st">"Explain the Hopf Fibration"</span></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Run example animations</span></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a><span class="ex">manim</span> <span class="at">-pql</span> examples/physics/quantum/QED.py QEDJourney</span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a><span class="ex">manim</span> <span class="at">-pql</span> examples/mathematics/geometry/pythagorean.py PythagoreanScene</span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a><span class="ex">manim</span> <span class="at">-pql</span> examples/computer_science/machine_learning/AlexNet.py AlexNetIntro</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</section>
+</section>
+<section id="example-animations-catalog" class="level2">
+<h2 class="anchored" data-anchor-id="example-animations-catalog">Example Animations Catalog</h2>
+<p>55+ examples organized by domain in <code>manim/Math-To-Manim/examples/</code>. For complete catalog with difficulty levels, read <code>references/examples_catalog.md</code>.</p>
+<section id="beginner-examples-learn-manim-basics" class="level3">
+<h3 class="anchored" data-anchor-id="beginner-examples-learn-manim-basics">Beginner Examples (Learn Manim Basics)</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 30%">
+<col style="width: 35%">
+<col style="width: 35%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Scene</th>
+<th>Topic</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>mathematics/geometry/pythagorean.py</code></td>
+<td><code>EnhancedPythagorean</code></td>
+<td>Pythagorean theorem visual proof</td>
+</tr>
+<tr class="even">
+<td><code>mathematics/geometry/bouncing_balls.py</code></td>
+<td></td>
+<td>Physics simulation</td>
+</tr>
+<tr class="odd">
+<td><code>misc/stickman.py</code></td>
+<td><code>StickmanScene</code></td>
+<td>Basic character animation</td>
+</tr>
+<tr class="even">
+<td><code>mathematics/trigonometry/TrigInference.py</code></td>
+<td></td>
+<td>Trig identities</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="intermediate-examples" class="level3">
+<h3 class="anchored" data-anchor-id="intermediate-examples">Intermediate Examples</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 30%">
+<col style="width: 35%">
+<col style="width: 35%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Scene</th>
+<th>Topic</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>mathematics/fractals/fractal_scene.py</code></td>
+<td><code>FractalScene</code></td>
+<td>Fractal patterns</td>
+</tr>
+<tr class="even">
+<td><code>computer_science/algorithms/gale_shaply.py</code></td>
+<td><code>GaleShapleyScene</code></td>
+<td>Stable matching</td>
+</tr>
+<tr class="odd">
+<td><code>computer_science/machine_learning/AlexNet.py</code></td>
+<td><code>AlexNetIntro</code></td>
+<td>CNN architecture</td>
+</tr>
+<tr class="even">
+<td><code>finance/optionskew.py</code></td>
+<td><code>OptionSkewScene</code></td>
+<td>Option pricing</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="advanced-examples" class="level3">
+<h3 class="anchored" data-anchor-id="advanced-examples">Advanced Examples</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 30%">
+<col style="width: 35%">
+<col style="width: 35%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Scene</th>
+<th>Topic</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>physics/quantum/QED.py</code></td>
+<td><code>QEDJourney</code></td>
+<td>Quantum Electrodynamics (3D)</td>
+</tr>
+<tr class="even">
+<td><code>physics/quantum/quantum_field_theory.py</code></td>
+<td></td>
+<td>QFT fundamentals</td>
+</tr>
+<tr class="odd">
+<td><code>mathematics/analysis/lorenz_attractor_symphony.py</code></td>
+<td><code>LorenzAttractorSymphony</code></td>
+<td>Chaos theory (3D)</td>
+</tr>
+<tr class="even">
+<td><code>mathematics/analysis/diffusion_optimal_transport.py</code></td>
+<td></td>
+<td>Optimal transport</td>
+</tr>
+<tr class="odd">
+<td><code>mathematics/statistics/information_geometry.py</code></td>
+<td><code>InformationGeometryScene</code></td>
+<td>Information geometry</td>
+</tr>
+<tr class="even">
+<td><code>physics/particle_physics/ElectroweakSymmetryScene.py</code></td>
+<td></td>
+<td>Electroweak symmetry</td>
+</tr>
+<tr class="odd">
+<td><code>misc/epic_hopf.py</code></td>
+<td><code>HopfFibrationEpic</code></td>
+<td>Hopf fibration (3D topology)</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="d-scene-showcase" class="level3">
+<h3 class="anchored" data-anchor-id="d-scene-showcase">3D Scene Showcase</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 27%">
+<col style="width: 31%">
+<col style="width: 40%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Scene</th>
+<th>Feature</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>misc/visual_styles_showcase.py</code></td>
+<td><code>All3DStyles</code></td>
+<td>Custom backgrounds, gradients, starfields</td>
+</tr>
+<tr class="even">
+<td><code>physics/quantum/QED.py</code></td>
+<td><code>QEDJourney</code></td>
+<td>Spacetime grid, light cones, EM waves</td>
+</tr>
+<tr class="odd">
+<td><code>mathematics/analysis/lorenz_attractor_symphony.py</code></td>
+<td><code>LorenzAttractorSymphony</code></td>
+<td>15k+ trajectory points, velocity coloring</td>
+</tr>
+<tr class="even">
+<td><code>mathematics/geometry/rhombicosidodecahedron_flythrough.py</code></td>
+<td></td>
+<td>3D polyhedron fly-through</td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<section id="common-pitfalls" class="level2">
+<h2 class="anchored" data-anchor-id="common-pitfalls">Common Pitfalls</h2>
+<ol type="1">
+<li><strong>Wrong Manim version API</strong>: Using <code>MathTex()</code> with 3b1b or <code>Tex(R"...")</code> with ManimCE</li>
+<li><strong>LaTeX without raw strings</strong>: <code>MathTex("\frac{a}{b}")</code> fails - use <code>MathTex(r"\frac{a}{b}")</code></li>
+<li><strong>Missing <code>np</code> import</strong>: <code>import numpy as np</code> needed for math functions</li>
+<li><strong>3D in 2D scene</strong>: Use <code>ThreeDScene</code> not <code>Scene</code> for 3D content</li>
+<li><strong>Camera not reset</strong>: Always <code>self.stop_ambient_camera_rotation()</code> before other camera moves</li>
+<li><strong>Missing FFmpeg</strong>: Manim requires FFmpeg for video output</li>
+<li><strong>Missing LaTeX</strong>: Manim requires LaTeX installation for equation rendering</li>
+</ol>
+</section>
+<section id="system-dependencies" class="level2">
+<h2 class="anchored" data-anchor-id="system-dependencies">System Dependencies</h2>
+<ul>
+<li><strong>Python</strong>: 3.10+</li>
+<li><strong>FFmpeg</strong>: <code>choco install ffmpeg</code> (Windows), <code>brew install ffmpeg</code> (macOS), <code>apt install ffmpeg</code> (Linux)</li>
+<li><strong>LaTeX</strong>: MiKTeX (Windows), MacTeX (macOS), <code>apt install texlive-full</code> (Linux)</li>
+<li><strong>ManimCE</strong>: <code>pip install manim</code></li>
+<li><strong>3b1b</strong>: <code>pip install manimgl</code> (from source)</li>
+</ul>
+</section>
+<section id="reference-files" class="level2">
+<h2 class="anchored" data-anchor-id="reference-files">Reference Files</h2>
+<ul>
+<li><code>references/examples_catalog.md</code> - Complete catalog of all 55+ examples with descriptions, difficulty levels, and render commands</li>
+<li><code>references/manim_tutorial_CN.md</code> - Chinese manim tutorial covering core concepts</li>
+<li><code>references/3b1b_patterns.md</code> - 3Blue1Brown video creation patterns and code conventions</li>
+</ul>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>
