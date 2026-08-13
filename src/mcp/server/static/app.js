@@ -1586,6 +1586,10 @@ var __libFallbackMap = {
     'https://unpkg.com/vditor@3.10.7/dist/index.min.js',
     'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js'
   ],
+  'Lute': [
+    'https://unpkg.com/vditor@3.10.7/dist/js/lute/lute.min.js',
+    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/js/lute/lute.min.js'
+  ],
   'katex': [
     '/static/vditor/js/katex/katex.min.js',
     'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js',
@@ -1636,6 +1640,25 @@ function ensureLib(globalName, done) {
   load();
 }
 
+/**
+ * 确保 Vditor 实例的 Lute 引擎就绪。
+ * Vditor 内部异步加载 lute（{cdn}/dist/js/lute/lute.min.js），失败时不重试，
+ * 此时 this.lute 为 undefined，setValue → e.lute.Md2VditorDOM 直接崩溃。
+ * 未就绪时按多 CDN 兜底加载（unpkg → jsdelivr）并手动挂载 v.lute。
+ * @param {object} v Vditor 实例
+ * @param {function} done 就绪回调（无论成败都会调用，调用方需再次判空保护）
+ */
+function __ensureVditorLute(v, done) {
+  if (!v || v.lute) { done && done(); return; }
+  ensureLib('Lute', function (ok) {
+    if (ok && window.Lute && v && !v.lute) {
+      try { v.lute = new window.Lute(); } catch (e) { console.warn('Lute() 初始化失败:', e); }
+    }
+    if (!v.lute) console.warn('Lute 加载失败，Markdown 渲染可能不可用');
+    done && done();
+  });
+}
+
 // ─── Vditor Editor ──────────────────────────────────────────
 
 function initVditor() {
@@ -1679,6 +1702,7 @@ function initVditor() {
     theme: _vditorLight ? 'classic' : 'dark',
     icon: 'material',
     cdn: __VDITOR_CDN,
+    _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
     placeholder: '开始输入...',
     math: {
       engine: 'KaTeX',
@@ -1740,25 +1764,27 @@ function initVditor() {
     },
     value: '',
     after: () => {
-      state.vditorReady = true;
-      if (window.EditorChunks && window.EditorChunks.isEnabled()) {
-        var _full = window.EditorChunks.takeFull();
-        // 防御：takeFull 可能返回空（chunk 状态残留但 src 为空），绝不 setValue 覆盖成空白
-        if (_full != null && _full !== '') state.vditor.setValue(_full);
-      }
-      if (state._pendingEditorSource != null) {
-        var _p = state._pendingEditorSource;
-        state._pendingEditorSource = null;
-        _applyEditorSource(_p);
-      }
-      setupCodeBlockPreservation(state.vditor);
-      setupPandocDivPreservation(state.vditor);
-      bindVditorShortcuts(state.vditor);
-      var _cont = document.getElementById('vditor');
-      if (_cont) {
-        if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, state.vditor); } catch (e) {} }
-        if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, state.vditor); } catch (e) {} }
-      }
+      __ensureVditorLute(state.vditor, function () {
+        state.vditorReady = true;
+        if (window.EditorChunks && window.EditorChunks.isEnabled()) {
+          var _full = window.EditorChunks.takeFull();
+          // 防御：takeFull 可能返回空（chunk 状态残留但 src 为空），绝不 setValue 覆盖成空白
+          if (_full != null && _full !== '') state.vditor.setValue(_full);
+        }
+        if (state._pendingEditorSource != null) {
+          var _p = state._pendingEditorSource;
+          state._pendingEditorSource = null;
+          _applyEditorSource(_p);
+        }
+        setupCodeBlockPreservation(state.vditor);
+        setupPandocDivPreservation(state.vditor);
+        bindVditorShortcuts(state.vditor);
+        var _cont = document.getElementById('vditor');
+        if (_cont) {
+          if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, state.vditor); } catch (e) {} }
+          if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, state.vditor); } catch (e) {} }
+        }
+      });
     },
     input: () => {
       if (!state.activeTab) return;
@@ -1898,6 +1924,7 @@ function initPaneVditor(paneId) {
     theme: _vditorLight ? 'classic' : 'dark',
     icon: 'material',
     cdn: __VDITOR_CDN,
+    _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
     placeholder: '开始输入...',
     math: {
       engine: 'KaTeX',
@@ -1918,22 +1945,25 @@ function initPaneVditor(paneId) {
     },
     value: '',
     after: function() {
-      state['paneVditorReady_' + paneId] = true;
-      // 如果当前活动 tab 是 PDF，初始化完成后隐藏 Vditor
-      var activePath = state['paneActiveTab_' + paneId];
-      var activeTab = (state['paneTabs_' + paneId] || []).find(function(t) { return t.path === activePath; });
-      if (activeTab && activeTab._isPdf) {
-        var vditorEl = document.getElementById('paneVditor-' + paneId);
-        if (vditorEl) vditorEl.style.display = 'none';
-      }
-      setupCodeBlockPreservation(state['paneVditor_' + paneId]);
-      setupPandocDivPreservation(state['paneVditor_' + paneId]);
-      bindVditorShortcuts(state['paneVditor_' + paneId]);
-      var _cont = document.getElementById('paneVditor-' + paneId);
-      if (_cont) {
-        if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, state['paneVditor_' + paneId]); } catch (e) {} }
-        if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, state['paneVditor_' + paneId]); } catch (e) {} }
-      }
+      var _pv = state['paneVditor_' + paneId];
+      __ensureVditorLute(_pv, function () {
+        state['paneVditorReady_' + paneId] = true;
+        // 如果当前活动 tab 是 PDF，初始化完成后隐藏 Vditor
+        var activePath = state['paneActiveTab_' + paneId];
+        var activeTab = (state['paneTabs_' + paneId] || []).find(function(t) { return t.path === activePath; });
+        if (activeTab && activeTab._isPdf) {
+          var vditorEl = document.getElementById('paneVditor-' + paneId);
+          if (vditorEl) vditorEl.style.display = 'none';
+        }
+        setupCodeBlockPreservation(_pv);
+        setupPandocDivPreservation(_pv);
+        bindVditorShortcuts(_pv);
+        var _cont = document.getElementById('paneVditor-' + paneId);
+        if (_cont) {
+          if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, _pv); } catch (e) {} }
+          if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, _pv); } catch (e) {} }
+        }
+      });
     },
     input: function() {
       var activePath = state['paneActiveTab_' + paneId];
@@ -22514,15 +22544,17 @@ function initSlidesPanel() {
             linkBase: `${API_BASE}/api/file/download/`,
           },
           after: function() {
-            slidesState.vditorReady = true;  // Vditor 就绪后才置 true，避免 200ms 窗口期内误判
-            slidesState.vditorCreating = false;
-            setupCodeBlockPreservation(slidesState.vditor);
-            bindVditorShortcuts(slidesState.vditor);
-            var _sel = document.getElementById('slidesVditor');
-            if (_sel) {
-              if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_sel, slidesState.vditor); } catch (e) {} }
-              if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_sel, slidesState.vditor); } catch (e) {} }
-            }
+            __ensureVditorLute(slidesState.vditor, function () {
+              slidesState.vditorReady = true;  // Vditor 就绪后才置 true，避免 200ms 窗口期内误判
+              slidesState.vditorCreating = false;
+              setupCodeBlockPreservation(slidesState.vditor);
+              bindVditorShortcuts(slidesState.vditor);
+              var _sel = document.getElementById('slidesVditor');
+              if (_sel) {
+                if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_sel, slidesState.vditor); } catch (e) {} }
+                if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_sel, slidesState.vditor); } catch (e) {} }
+              }
+            });
           },
           input: function(val) {
             if (!slidesState.isSwitching && slidesState.slides[slidesState.currentIndex]) {
@@ -26462,6 +26494,7 @@ function switchPairMode(pairType, field, mode) {
         theme: theme,
         icon: 'material',
         cdn: __VDITOR_CDN,
+        _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
         cache: { enable: false },
         toolbar: ['bold', 'italic', 'strike', '|', 'link', '|', 'undo', 'redo'],
         markdown: {
@@ -26478,17 +26511,19 @@ function switchPairMode(pairType, field, mode) {
             try { vd.destroy(); } catch (e) {}
             return;
           }
-          _pairSetVditor(pairType, field, vd);
-          // 缩小 WYSIWYG 编辑区字体
-          var wrapper = wysiwygEl.querySelector('.vditor-ir, .vditor-wysiwyg');
-          if (wrapper) wrapper.style.fontSize = '13px';
+          __ensureVditorLute(vd, function () {
+            _pairSetVditor(pairType, field, vd);
+            // 缩小 WYSIWYG 编辑区字体
+            var wrapper = wysiwygEl.querySelector('.vditor-ir, .vditor-wysiwyg');
+            if (wrapper) wrapper.style.fontSize = '13px';
+          });
         }
       });
     } else if (vd === '__creating__') {
       // 正在创建中，不重复创建，等 after 钩子完成
       return;
     } else {
-      vd.setValue(sourceEl.value);
+      __ensureVditorLute(vd, function () { vd.setValue(sourceEl.value); });
       // 字体缩小
       var wrapper = wysiwygEl.querySelector('.vditor-ir, .vditor-wysiwyg');
       if (wrapper) wrapper.style.fontSize = '13px';
