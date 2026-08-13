@@ -51,8 +51,8 @@ class CuratedMemoryManager:
         return self._nudge_counter >= self._nudge_interval
 
     def get_memory_context(self, current_input: str) -> str:
-        # 注入白名单：仅高置信类别可进入上下文，避免低质/过程性记忆污染对话
-        HIGH_CONFIDENCE = {"fact", "correction", "insight"}
+        # 注入白名单：高置信类别 + 上下文摘要（压缩时以 category="context" 存储，必须放行才能读回）
+        HIGH_CONFIDENCE = {"fact", "correction", "insight", "context"}
         entries = self.recall(current_input, limit=10)
         if not entries:
             return ""
