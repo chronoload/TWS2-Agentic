@@ -71,3 +71,8 @@ Thumbs.db
 
 # Windows 快捷方式
 *.lnk
+
+# macdev 审计产物 / 系统数据 / 项目产物目录
+audit_out/
+src/.ts2_data/
+*-project/
