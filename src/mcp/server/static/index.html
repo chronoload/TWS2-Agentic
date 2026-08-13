@@ -48,8 +48,8 @@ function __fallbackScript(el, urls) {
   link.id = 'vditorContentTheme';
   link.rel = 'stylesheet';
   link.href = (savedTheme === 'light' || savedTheme === 'chuizi' || savedTheme === 'savor')
-    ? '/static/vditor/css/content-theme/light.css'
-    : '/static/vditor/css/content-theme/dark.css';
+    ? 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/light.css'
+    : 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/dark.css';
   document.head.appendChild(link);
 })();
 </script>
@@ -58,7 +58,7 @@ function __fallbackScript(el, urls) {
 <script src="/static/xterm-addon-fit.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js','https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js'])"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js','https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js'])"></script>
 <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
-<link rel="stylesheet" href="/static/vditor/js/katex/katex.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="/static/vditor/js/katex/katex.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js','https://unpkg.com/katex@0.16.9/dist/katex.min.js'])"></script>
 <script src="/static/vditor/js/katex/mhchem.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/mhchem.min.js','https://unpkg.com/katex@0.16.9/dist/contrib/mhchem.min.js'])"></script>
 <script src="/static/vditor/js/katex/auto-render.min.js" defer onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js','https://unpkg.com/katex@0.16.9/dist/contrib/auto-render.min.js'])"></script>

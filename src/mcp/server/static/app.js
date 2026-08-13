@@ -1577,6 +1577,9 @@ function setupCodeBlockPreservation(v) {
 
 // ─── 第三方依赖 CDN fallback 加载器 ─────────────────────────
 // 本地资源加载失败时按 URL 列表依次回退到 CDN（unpkg → jsdelivr → cdnjs）
+// 注：static/vditor 目录未随仓库部署（缺失），Vditor 内部资源（i18n/css/lute）
+// 统一走 CDN 基址 __VDITOR_CDN（Vditor cdn 参数内部拼 {cdn}/dist/...）。
+var __VDITOR_CDN = 'https://unpkg.com/vditor@3.10.7';
 var __libFallbackMap = {
   'Vditor': [
     '/static/vditor/index.min.js',
@@ -1675,7 +1678,7 @@ function initVditor() {
     mode: 'wysiwyg',
     theme: _vditorLight ? 'classic' : 'dark',
     icon: 'material',
-    cdn: '/static/vditor',
+    cdn: __VDITOR_CDN,
     placeholder: '开始输入...',
     math: {
       engine: 'KaTeX',
@@ -1699,7 +1702,7 @@ function initVditor() {
       },
       theme: {
         current: _vditorLight ? 'light' : 'dark',
-        path: '/static/vditor/css/content-theme',
+        path: __VDITOR_CDN + '/dist/css/content-theme',
       },
       hljs: {
         style: _vditorLight ? 'github' : 'tokyo-night-dark',
@@ -1894,7 +1897,7 @@ function initPaneVditor(paneId) {
     mode: 'wysiwyg',
     theme: _vditorLight ? 'classic' : 'dark',
     icon: 'material',
-    cdn: '/static/vditor',
+    cdn: __VDITOR_CDN,
     placeholder: '开始输入...',
     math: {
       engine: 'KaTeX',
@@ -1909,7 +1912,7 @@ function initPaneVditor(paneId) {
       markdown: {
         linkBase: `${API_BASE}/api/file/download/`,
       },
-      theme: { current: _vditorLight ? 'light' : 'dark', path: '/static/vditor/css/content-theme' },
+      theme: { current: _vditorLight ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' },
       hljs: { style: _vditorLight ? 'github' : 'tokyo-night-dark', lineNumber: true },
       math: { engine: 'KaTeX', inlineDigit: true },
     },
@@ -19230,8 +19233,8 @@ function applyCustomThemeCss(theme) {
 function applyBaseTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   document.getElementById('vditorContentTheme').href = isLightTheme(theme)
-    ? '/static/vditor/css/content-theme/light.css'
-    : '/static/vditor/css/content-theme/dark.css';
+    ? __VDITOR_CDN + '/dist/css/content-theme/light.css'
+    : __VDITOR_CDN + '/dist/css/content-theme/dark.css';
   applyCustomThemeCss(theme);
   // 重新渲染所有 markdown 容器（笔记预览、agent 消息等），适配新主题
   setTimeout(_rerenderMdOnThemeChange, 50);
@@ -19313,7 +19316,7 @@ function toggleGradientTheme() {
     stopGradientTheme();
     document.documentElement.setAttribute('data-theme', 'gradient');
     startGradientTheme();
-    document.getElementById('vditorContentTheme').href = '/static/vditor/css/content-theme/dark.css';
+    document.getElementById('vditorContentTheme').href = __VDITOR_CDN + '/dist/css/content-theme/dark.css';
     applyCustomThemeCss('gradient');
     highlightThemeMenu('gradient');
   } else {
@@ -19987,7 +19990,7 @@ function ensureDiaryLute() {
   if (_diaryLute || window.Lute || _diaryLuteLoading) return;
   _diaryLuteLoading = true;
   var s = document.createElement('script');
-  s.src = '/static/vditor/dist/js/lute/lute.min.js';
+  s.src = __VDITOR_CDN + '/dist/js/lute/lute.min.js';
   s.onload = function() {
     _diaryLuteLoading = false;
     if (_calViewMode === 'diary') refreshDiaryMarkers();
@@ -22505,8 +22508,8 @@ function initSlidesPanel() {
           theme: _vditorLight ? 'classic' : 'dark',
           placeholder: '开始书写...',
           cache: { enable: false },
-          cdn: '/static/vditor',
-          _lutePath: '/static/vditor/dist/js/lute/lute.min.js',
+          cdn: __VDITOR_CDN,
+          _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
           markdown: {
             linkBase: `${API_BASE}/api/file/download/`,
           },
@@ -22537,7 +22540,7 @@ function initSlidesPanel() {
             engine: 'KaTeX',
             inlineDigit: true,
           },
-          preview: { mode: 'editor', markdown: { linkBase: `${API_BASE}/api/file/download/` }, theme: { current: _vditorLight ? 'light' : 'dark', path: '/static/vditor/css/content-theme' }, hljs: { style: _vditorLight ? 'github' : 'tokyo-night-dark', lineNumber: true }, math: { engine: 'KaTeX', inlineDigit: true } },
+          preview: { mode: 'editor', markdown: { linkBase: `${API_BASE}/api/file/download/` }, theme: { current: _vditorLight ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' }, hljs: { style: _vditorLight ? 'github' : 'tokyo-night-dark', lineNumber: true }, math: { engine: 'KaTeX', inlineDigit: true } },
           tab: '\t',
           hint: {
             delay: 200,
@@ -24884,9 +24887,9 @@ function _renderMdInto(el, content, options) {
 
   // 调用 Vditor.preview 异步渲染（内部会处理代码高亮、数学公式、流程图等）
   return Vditor.preview(el, mdContent, {
-    cdn: '/static/vditor',
+    cdn: __VDITOR_CDN,
     mode: vditorMode,
-    theme: { current: isLight ? 'light' : 'dark', path: '/static/vditor/css/content-theme' },
+    theme: { current: isLight ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' },
     hljs: { style: hljsStyle },
     markdown: { autoSpace: true, gfmAutoLink: false, linkBase: `${API_BASE}/api/file/download/` },
     math: { inlineDigit: true, engine: 'KaTeX' }
@@ -26458,14 +26461,14 @@ function switchPairMode(pairType, field, mode) {
         mode: 'wysiwyg',
         theme: theme,
         icon: 'material',
-        cdn: '/static/vditor',
+        cdn: __VDITOR_CDN,
         cache: { enable: false },
         toolbar: ['bold', 'italic', 'strike', '|', 'link', '|', 'undo', 'redo'],
         markdown: {
           linkBase: `${API_BASE}/api/file/download/`,
         },
         math: { engine: 'KaTeX', inlineDigit: true },
-        preview: { markdown: { linkBase: `${API_BASE}/api/file/download/` }, theme: { current: theme === 'classic' ? 'light' : 'dark', path: '/static/vditor/css/content-theme' }, hljs: { style: theme === 'classic' ? 'github' : 'tokyo-night-dark' }, math: { engine: 'KaTeX', inlineDigit: true } },
+        preview: { markdown: { linkBase: `${API_BASE}/api/file/download/` }, theme: { current: theme === 'classic' ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' }, hljs: { style: theme === 'classic' ? 'github' : 'tokyo-night-dark' }, math: { engine: 'KaTeX', inlineDigit: true } },
         placeholder: label + '...',
         value: sourceEl.value,
         after: function () {
