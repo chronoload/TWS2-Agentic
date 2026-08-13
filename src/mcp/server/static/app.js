@@ -10209,7 +10209,9 @@ function _expandBackendMessages(backendMessages) {
   for (const msg of backendMessages) {
     if (msg.role === 'tool') continue;
     if (msg.role === 'system') {
-      ui.push({ role: 'system', content: msg.content });
+      // 压缩摘要 system 消息标记 isCompactSummary → 前端渲染为可折叠卡片（诚实渲染保留，但不平铺大段摘要）
+      var _isComp = typeof msg.content === 'string' && msg.content.indexOf('[对话历史摘要') === 0;
+      ui.push({ role: 'system', content: msg.content, isCompactSummary: _isComp });
     } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length) {
       // 思考( reasoning_content )与内容( content )必须留在同一气泡，
       // 否则思考被丢弃、简短内容被单独提到工具卡上方，顺序失真。
@@ -11882,6 +11884,24 @@ function _fullRenderRange(container, start, end, forceScrollBottom, prevScrollHe
 
 function _renderAgentMessageHtml(msg, mi) {
   let rendered = '';
+  // ── 压缩摘要卡片：诚实渲染但折叠，不平铺大段 [对话历史摘要] ──
+  if (msg.role === 'system' && msg.isCompactSummary) {
+    if (!msg._compactKey) msg._compactKey = 'compact_' + mi + '_' + Date.now();
+    var _cid = msg._compactKey;
+    rendered = '<div class="compact-card" data-cid="' + _cid + '" style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-secondary);font-size:12px">' +
+      '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        '<span>📜</span>' +
+        '<span style="flex:1;color:var(--fg-muted)">较早对话已压缩为摘要（展开可查看摘要，或找回被压缩的具体历史）</span>' +
+        '<span class="compact-toggle" data-cid="' + _cid + '" style="cursor:pointer;color:var(--accent);font-size:11px;flex:0 0 auto">展开摘要</span>' +
+        '<button class="compact-expand-btn" data-cid="' + _cid + '" style="cursor:pointer;color:#fff;background:var(--accent);border:none;border-radius:4px;padding:3px 8px;font-size:11px;flex:0 0 auto">🔍 找回具体历史</button>' +
+      '</div>' +
+      '<div class="compact-summary-body" data-cid="' + _cid + '" style="display:none;margin-top:6px;padding:8px;background:var(--bg);border:1px dashed var(--border);border-radius:6px;white-space:pre-wrap;max-height:260px;overflow-y:auto;font-size:11px;color:var(--fg)">' + escapeHtml(msg.content) + '</div>' +
+    '</div>';
+    return '<div class="agent-msg system" data-index="' + mi + '">' +
+      '<div class="msg-role">📜 历史已压缩</div>' +
+      '<div class="msg-content">' + rendered + '</div>' +
+    '</div>';
+  }
   if (msg.role === 'user') {
     // 技能注入消息：折叠为提示条，不展示全文（保持上下文感知但 UI 简洁）
     var _content = msg.content || '';
@@ -12000,6 +12020,44 @@ function _initGlobalFileClickHandler() {
           _full.style.display = _isOpen ? 'none' : 'block';
           _injToggle.textContent = _isOpen ? '展开' : '收起';
         }
+        return;
+      }
+      // === 压缩摘要卡：展开/收起摘要正文 ===
+      var _compToggle = e.target.closest('.compact-toggle');
+      if (_compToggle) {
+        var _cId = _compToggle.getAttribute('data-cid');
+        var _body = document.querySelector('.compact-summary-body[data-cid="' + _cId + '"]');
+        if (_body) {
+          var _isOpen2 = _body.style.display !== 'none';
+          _body.style.display = _isOpen2 ? 'none' : 'block';
+          _compToggle.textContent = _isOpen2 ? '展开摘要' : '收起摘要';
+        }
+        return;
+      }
+      // === 压缩摘要卡：找回具体历史（调后端展开，替换摘要卡） ===
+      var _compBtn = e.target.closest('.compact-expand-btn');
+      if (_compBtn) {
+        var _cId2 = _compBtn.getAttribute('data-cid');
+        var _sid2 = _getAgentSessionId();
+        if (!_sid2) { _compBtn.textContent = '⚠️ 无会话'; return; }
+        _compBtn.textContent = '⏳ 展开中...';
+        _compBtn.disabled = true;
+        fetch('/api/agent/messages/expand', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: _sid2 })
+        }).then(function(r) { return r.json(); }).then(function(res) {
+          var _exp = (res && res.data && res.data.expanded) || [];
+          if (!_exp.length) { _compBtn.textContent = '⚠️ 无可找回'; return; }
+          var _ui = _expandBackendMessages(_exp);
+          var _ti = -1;
+          for (var _i2 = 0; _i2 < state.agentMessages.length; _i2++) {
+            if (state.agentMessages[_i2] && state.agentMessages[_i2]._compactKey === _cId2) { _ti = _i2; break; }
+          }
+          if (_ti < 0) { _compBtn.textContent = '⚠️ 找不到摘要卡'; return; }
+          state.agentMessages.splice.apply(state.agentMessages, [_ti, 1].concat(_ui));
+          renderAgentMessages();
+        }).catch(function() { _compBtn.textContent = '⚠️ 展开失败'; _compBtn.disabled = false; });
         return;
       }
       // === 排除非 Agent 区域的点击（关键修复）===
@@ -15767,11 +15825,13 @@ async function workflowRefreshInstances() {
     const data = await res.json();
     if (data.code !== 0 || !data.data) {
       list.innerHTML = '<div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:6px">暂无实例</div>';
+      renderWorkflowKanban([]);
       return;
     }
     const insts = data.data.instances || [];
     if (!insts.length) {
       list.innerHTML = '<div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:6px">暂无实例</div>';
+      renderWorkflowKanban([]);
       return;
     }
     list.innerHTML = insts.map(i => {
@@ -15796,6 +15856,7 @@ async function workflowRefreshInstances() {
         </div>
       </div>`;
     }).join('');
+    renderWorkflowKanban(insts);
   } catch (e) {
     list.innerHTML = '<div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:6px">加载失败</div>';
   }
@@ -15806,6 +15867,11 @@ async function workflowControl(action, instId) {
     const res = await fetch(`${API_BASE}/api/workflow/${action}/${instId}`, { method: 'POST' });
     const data = await res.json();
     if (data.code !== 0) { showToast(data.msg || '操作失败', 'error'); return; }
+    // 校验后端实际执行结果字段（paused/resumed/cancelled），避免静默失败：
+    // 例：未开始的 pending 实例 cancel 时后端返回 {cancelled:false}，此处应提示而非假装成功
+    const okField = { pause: 'paused', resume: 'resumed', cancel: 'cancelled' }[action];
+    const applied = okField ? !!(data.data && data.data[okField]) : true;
+    if (!applied) { showToast(`⚠ 操作未生效：实例当前状态不允许 ${action}`, 'error'); return; }
     showToast(`✔ ${action}`, 'info');
     workflowRefreshInstances();
   } catch (e) { showToast('操作失败', 'error'); }
@@ -15858,6 +15924,134 @@ async function workflowShowLogs(instId) {
     const area = document.getElementById('workflowDetailArea');
     area.innerHTML = `<div style="padding:6px;background:var(--bg-tertiary);border-radius:4px;font-size:9px;color:var(--fg-muted);white-space:pre-wrap;word-break:break-all;max-height:180px;overflow-y:auto">${escapeHtml(text)}</div>`;
   } catch (e) { showToast('日志获取失败', 'error'); }
+}
+
+// ─── 工作流实例看板（列表/看板可切换） ─────────────────────
+let _workflowKanbanView = false;
+
+const _WF_KANBAN_COLUMNS = [
+  { key: 'pending', title: '未开始', icon: '⏳', statuses: ['pending'] },
+  { key: 'running', title: '进行中', icon: '🔄', statuses: ['running'] },
+  { key: 'paused', title: '已暂停', icon: '⏸️', statuses: ['paused'] },
+  { key: 'archived', title: '归档', icon: '🗂️', statuses: ['completed', 'failed', 'cancelled'] }
+];
+
+// 切换列表/看板视图，看板与列表共用同一份实例数据
+function toggleWorkflowView() {
+  _workflowKanbanView = !_workflowKanbanView;
+  const btn = document.getElementById('workflowViewToggle');
+  const list = document.getElementById('workflowInstList');
+  const kanban = document.getElementById('workflowKanban');
+  if (!btn || !list || !kanban) return;
+  btn.textContent = _workflowKanbanView ? '列表' : '看板';
+  list.style.display = _workflowKanbanView ? 'none' : 'flex';
+  kanban.style.display = _workflowKanbanView ? 'flex' : 'none';
+  if (_workflowKanbanView) workflowRefreshInstances();
+}
+
+// 渲染工作流看板：按列 statuses 分组；容器隐藏时仅更新内部 DOM 不显示
+function renderWorkflowKanban(insts) {
+  const board = document.getElementById('workflowKanban');
+  if (!board) return;
+  const byCol = {};
+  _WF_KANBAN_COLUMNS.forEach(c => { byCol[c.key] = []; });
+  (insts || []).forEach(i => {
+    const col = _WF_KANBAN_COLUMNS.find(c => c.statuses.indexOf(i.status) !== -1);
+    byCol[col ? col.key : 'archived'].push(i);
+  });
+  _WF_KANBAN_COLUMNS.forEach(col => {
+    const body = board.querySelector(`.kanban-column-body[data-col="${col.key}"]`);
+    const countEl = board.querySelector(`.kanban-column[data-col="${col.key}"] .count`);
+    if (countEl) countEl.textContent = byCol[col.key].length;
+    if (!body) return;
+    if (!byCol[col.key].length) {
+      body.innerHTML = '<div class="empty-state"><span class="empty-icon">📋</span><span>暂无实例</span></div>';
+      return;
+    }
+    body.innerHTML = byCol[col.key].map(i => {
+      const instId = i.instance_id || '';
+      const st = i.status || '';
+      const icon = _WF_STATUS_ICON[st] || '❓';
+      const progress = Math.round((i.progress || 0) * 100);
+      const stepName = i.current_step_name || i.current_step_id || '';
+      const draggable = (st === 'completed' || st === 'cancelled') ? 'false' : 'true';
+      return `<div class="task-card wf-card" draggable="${draggable}" data-inst-id="${instId}" data-status="${st}">
+        <div class="task-title">${icon} ${escapeHtml(i.workflow_id || '')}</div>
+        <div style="font-size:10px;color:var(--fg-muted)">${escapeHtml(instId.slice(0, 8))} · ${progress}%</div>
+        <div style="height:4px;background:var(--bg-tertiary);border-radius:2px;margin:4px 0;overflow:hidden"><div style="width:${progress}%;height:100%;background:var(--accent);border-radius:2px"></div></div>
+        ${stepName ? `<div style="font-size:9px;color:var(--fg-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(stepName)}</div>` : ''}
+      </div>`;
+    }).join('');
+  });
+  // 点击卡片查看步骤详情
+  board.querySelectorAll('.wf-card').forEach(card => {
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      workflowShowDetail(card.dataset.instId);
+    });
+  });
+  setupWorkflowKanbanDragDrop();
+}
+
+// 拖拽动作映射：返回动作字符串（'pause'/'resume'/'cancel'）或 null（无操作）
+function _wfDropAction(srcStatus, targetCol) {
+  if (targetCol === 'archived') {
+    if (srcStatus === 'running' || srcStatus === 'paused' || srcStatus === 'pending') return 'cancel';
+    return null; // failed/completed/cancelled 已在归档
+  }
+  if (targetCol === 'paused') {
+    if (srcStatus === 'running') return 'pause';
+    return null; // pending → 已暂停：请先启动
+  }
+  if (targetCol === 'running') {
+    if (srcStatus === 'paused' || srcStatus === 'failed') return 'resume';
+    return null; // pending → 进行中：请先启动
+  }
+  return null; // 拖回未开始等其余组合：无操作
+}
+
+// 看板拖拽：drop 时按映射执行 pause/resume/cancel
+function setupWorkflowKanbanDragDrop() {
+  const board = document.getElementById('workflowKanban');
+  if (!board) return;
+  const cards = board.querySelectorAll('.task-card');
+  const columns = board.querySelectorAll('.kanban-column-body');
+
+  cards.forEach(card => {
+    card.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('application/x-wf-inst', card.dataset.instId || '');
+      e.dataTransfer.setData('application/x-wf-status', card.dataset.status || '');
+      card.classList.add('dragging');
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      columns.forEach(c => c.classList.remove('drag-over'));
+    });
+  });
+
+  columns.forEach(col => {
+    col.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      col.classList.add('drag-over');
+    });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', (e) => {
+      e.preventDefault();
+      col.classList.remove('drag-over');
+      const instId = e.dataTransfer.getData('application/x-wf-inst');
+      const srcStatus = e.dataTransfer.getData('application/x-wf-status');
+      const targetCol = col.dataset.col;
+      if (!instId) return;
+      const action = _wfDropAction(srcStatus, targetCol);
+      if (!action) {
+        if (srcStatus === 'pending' && (targetCol === 'running' || targetCol === 'paused')) {
+          showToast('⏳ 实例尚未开始，请先在定义处启动', 'info');
+        }
+        return;
+      }
+      workflowControl(action, instId);
+    });
+  });
 }
 
 // ─── WebSocket Message Handler ──────────────────────────────
