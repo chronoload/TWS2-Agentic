@@ -80,20 +80,20 @@ class StepDefinition:
 
 ### 2.3 StepType（步骤类型）
 
-| 枚举 | 值 | 用途 |
-|---|---|---|
-| `AGENT` | `"agent"` | 调 LLM（prompt_template + tools） |
-| `TOOL` | `"tool"` | 直接执行工具（config.tool_name + args） |
-| `CONDITION` | `"condition"` | 条件分支（condition_expr → true/false_steps） |
-| `PARALLEL` | `"parallel"` | 并行执行子步骤 |
-| `LOOP` | `"loop"` | 循环执行（loop_items / max_iterations） |
-| `WAIT` | `"wait"` | 等待 |
-| `NOTIFY` | `"notify"` | 通知/推送 |
-| `GT_PROVE` | `"gt_prove"` | 数学证明（GT 系统） |
-| `LEAN_CHECK` | `"lean_check"` | Lean4 校验 |
-| `MANIM_GEN` | `"manim_gen"` | Manim 动画生成 |
-| `MATHLENS` | `"mathlens"` | MathLens 视频 |
-| `AUTORESEARCH` | `"autoresearch"` | 自动研究管线 |
+| 枚举             | 值                 | 用途                                           |
+| ---------------- | ------------------ | ---------------------------------------------- |
+| `AGENT`        | `"agent"`        | 调 LLM（prompt_template + tools）              |
+| `TOOL`         | `"tool"`         | 直接执行工具（config.tool_name + args）        |
+| `CONDITION`    | `"condition"`    | 条件分支（condition_expr → true/false_steps） |
+| `PARALLEL`     | `"parallel"`     | 并行执行子步骤                                 |
+| `LOOP`         | `"loop"`         | 循环执行（loop_items / max_iterations）        |
+| `WAIT`         | `"wait"`         | 等待                                           |
+| `NOTIFY`       | `"notify"`       | 通知/推送                                      |
+| `GT_PROVE`     | `"gt_prove"`     | 数学证明（GT 系统）                            |
+| `LEAN_CHECK`   | `"lean_check"`   | Lean4 校验                                     |
+| `MANIM_GEN`    | `"manim_gen"`    | Manim 动画生成                                 |
+| `MATHLENS`     | `"mathlens"`     | MathLens 视频                                  |
+| `AUTORESEARCH` | `"autoresearch"` | 自动研究管线                                   |
 
 ---
 
