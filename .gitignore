@@ -6,7 +6,7 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+/dist/   # 仅忽略根目录构建产物；static/vditor/dist 等静态资源需提交
 downloads/
 eggs/
 .eggs/

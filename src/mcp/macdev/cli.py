@@ -33,6 +33,7 @@ def build_engine() -> Engine:
     patch.register(reg)
     # 插件平级哲学：扫描捕捉所有已导入模块中的 Plugin 子类并装配
     from .audit import strategy_ts2  # noqa: F401（import 即登记 ts2 策略）
+    from .audit import strategy_dsh  # noqa: F401（import 即登记 dsh 策略：TS monorepo 语义表）
     reg.discover()
     return Engine(reg, EventBus())
 

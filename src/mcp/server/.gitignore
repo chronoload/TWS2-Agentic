@@ -5,10 +5,10 @@ __pycache__/
 .env
 *.db
 
-# Node / frontend build
+# Node / frontend build（锚定 mcp/server 根目录，避免误伤 static/vditor/dist 等静态资源）
 node_modules/
-dist/
-build/
+/dist/
+/build/
 
 # Large / unrelated bundled subprojects (not part of core TS2 server)
 static_electron/node_modules/
