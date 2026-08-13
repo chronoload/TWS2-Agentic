@@ -1575,12 +1575,70 @@ function setupCodeBlockPreservation(v) {
   };
 }
 
+// ─── 第三方依赖 CDN fallback 加载器 ─────────────────────────
+// 本地资源加载失败时按 URL 列表依次回退到 CDN（unpkg → jsdelivr → cdnjs）
+var __libFallbackMap = {
+  'Vditor': [
+    '/static/vditor/index.min.js',
+    'https://unpkg.com/vditor@3.10.7/dist/index.min.js',
+    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js'
+  ],
+  'katex': [
+    '/static/vditor/js/katex/katex.min.js',
+    'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js',
+    'https://unpkg.com/katex@0.16.9/dist/katex.min.js'
+  ],
+  'Terminal': [
+    '/static/xterm.min.js',
+    'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/lib/xterm.min.js',
+    'https://unpkg.com/@xterm/xterm@5.3.0/lib/xterm.min.js'
+  ],
+  'cytoscape': [
+    '/static/cytoscape.min.js',
+    'https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js',
+    'https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js'
+  ],
+  'pdfjsLib': [
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+    'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js',
+    'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js'
+  ]
+};
+
+/**
+ * 按全局对象名确保第三方库已加载；缺失时按 URL 列表依次动态加载（本地 → CDN 兜底）。
+ * @param {string} globalName  全局对象名（如 'Vditor' / 'katex' / 'Terminal'）
+ * @param {function(boolean)} done 加载完成回调（ok=true 表示可用）
+ */
+function ensureLib(globalName, done) {
+  try {
+    if (window[globalName]) { done && done(true); return; }
+  } catch (e) { /* fallthrough */ }
+  var urls = __libFallbackMap[globalName] || [];
+  if (!urls.length) { done && done(false); return; }
+  var idx = 0;
+  function load() {
+    if (idx >= urls.length) { done && done(false); return; }
+    var s = document.createElement('script');
+    s.src = urls[idx++];
+    s.async = true;
+    s.onload = function() {
+      var ok = false;
+      try { ok = !!window[globalName]; } catch (e) {}
+      done && done(ok);
+    };
+    s.onerror = function() { s.remove(); load(); };
+    document.head.appendChild(s);
+  }
+  load();
+}
+
 // ─── Vditor Editor ──────────────────────────────────────────
 
 function initVditor() {
   if (state.vditorReady) return;
 
-  // If Vditor is not loaded yet, load the script dynamically
+  // If Vditor is not loaded yet, load the script dynamically（本地失败 → CDN fallback）
   if (typeof Vditor === 'undefined') {
     const existingScript = document.getElementById('vditorScriptTag');
     if (existingScript) {
@@ -1589,10 +1647,19 @@ function initVditor() {
       newScript.src = existingScript.src;
       newScript.onload = () => initVditor();
       newScript.onerror = () => {
-        showToast('Vditor 加载失败，切换到原生编辑器', 'error');
-        state.editorMode = 'plain';
-        document.getElementById('vditor').style.display = 'none';
-        document.getElementById('plainEditor').style.display = 'block';
+        // 本地加载失败：CDN 回退（unpkg → jsdelivr），全部失败才切原生编辑器
+        showToast('本地 Vditor 加载失败，尝试 CDN 回退…', 'info');
+        ensureLib('Vditor', function(ok) {
+          if (ok) {
+            showToast('已通过 CDN 加载 Vditor', 'success');
+            initVditor();
+          } else {
+            showToast('Vditor 加载失败，切换到原生编辑器', 'error');
+            state.editorMode = 'plain';
+            document.getElementById('vditor').style.display = 'none';
+            document.getElementById('plainEditor').style.display = 'block';
+          }
+        });
       };
       existingScript.replaceWith(newScript);
       return;
