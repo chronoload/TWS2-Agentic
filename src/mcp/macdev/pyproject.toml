@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macdev"
+version = "0.1.0"
+description = "Machine-Driven Development: 插件总线微内核引擎（静态审计 + 开发流程）"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+packages = ["macdev", "macdev.core", "macdev.audit", "macdev.plan", "macdev.patch",
+            "macdev.requirement", "macdev.dev", "macdev.log", "macdev.project"]
+
+[tool.setuptools.package-data]
+macdev = ["doc/*.md"]
