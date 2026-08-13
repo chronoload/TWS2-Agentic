@@ -6677,6 +6677,18 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 if not messages_source:
                     return None
                 
+                # 【压缩视图】若当前消息含 [对话历史摘要] system 消息，预计算展开历史，
+                # 随每条摘要 system 消息附带 expanded（前端同步拼接完整历史，不显示摘要提示卡）
+                compact_expanded = None
+                if _has_compact_summary(messages_source):
+                    try:
+                        from ..cache.context_reloader import get_context_reloader
+                        _rel = get_context_reloader()
+                        compact_expanded = _expand_for_snapshot(_rel, messages_source)
+                    except Exception as _ce:
+                        logger.debug(f"[session-get] compact expand 失败: {_ce}")
+                        compact_expanded = None
+                
                 # 构造 UI 消息列表
                 ui_messages = []
                 for msg in messages_source:
@@ -6686,10 +6698,14 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     # 此前直接 continue 跳过 system，前端永远看不到 system，
                     # 会话 UI 与后端 agent.messages 不一致，掩盖真实状态。
                     if role == "system":
-                        ui_messages.append({
+                        entry = {
                             "role": "system",
                             "content": content if isinstance(content, str) else str(content),
-                        })
+                        }
+                        # 压缩摘要：附带展开历史 → 前端默认找回拼接
+                        if isinstance(content, str) and content.startswith("[对话历史摘要") and compact_expanded:
+                            entry["expanded"] = compact_expanded
+                        ui_messages.append(entry)
                     elif role == "tool":
                         tool_call_id = msg.get("tool_call_id", "")
                         tool_content = content if isinstance(content, str) else str(content)
@@ -8635,6 +8651,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         response = await call_next(request)
         if request.url.path.startswith("/static"):
             response.headers["Cache-Control"] = "no-cache"
+            # 修正 Windows mimetypes 对模块脚本的 MIME 误判（collab loro_wasm 等）
+            _p = request.url.path
+            if _p.endswith(".wasm"):
+                response.headers["Content-Type"] = "application/wasm"
+            elif _p.endswith(".js") and (response.headers.get("content-type") or "").startswith("application/json"):
+                response.headers["Content-Type"] = "text/javascript; charset=utf-8"
         return response
 
     # ─── SaberSystem 路由挂载（必须在 SPA fallback 之前）──────────────

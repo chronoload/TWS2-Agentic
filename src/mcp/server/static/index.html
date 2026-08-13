@@ -13,7 +13,32 @@
   }
 })();
 </script>
-<link rel="stylesheet" href="/static/vditor/index.css">
+<script>
+// ─── 第三方依赖 CDN fallback（HTML 层第一道防线）───
+// 本地 script 加载失败 → 按 URL 列表依次回退到 CDN（unpkg → jsdelivr → cdnjs）
+function __fallbackScript(el, urls) {
+  try {
+    var idx = parseInt((el && el.getAttribute && el.getAttribute('data-fb-idx')) || '0', 10);
+    if (idx >= urls.length) { console.error('[CDN fallback] 全部源失败:', el && (el.id || el.src)); return; }
+    var s = document.createElement('script');
+    s.src = urls[idx];
+    if (el) {
+      if (el.async !== undefined) s.async = el.async;
+      if (el.defer !== undefined) s.defer = el.defer;
+      s.charset = el.charset || 'utf-8';
+    }
+    s.onload = function() { console.log('[CDN fallback] 成功:', urls[idx]); };
+    s.onerror = function() {
+      try { s.remove(); } catch (e) {}
+      if (el) el.setAttribute('data-fb-idx', String(idx + 1));
+      __fallbackScript(el, urls);
+    };
+    if (el) { try { el.setAttribute('data-fb-idx', String(idx)); el.remove(); } catch (e) {} }
+    document.head.appendChild(s);
+  } catch (e) { console.error('[CDN fallback] 异常:', e); }
+}
+</script>
+<link rel="stylesheet" href="https://unpkg.com/vditor@3.10.7/dist/index.css">
 <script>
 // 立即应用主题并加载对应的 content-theme CSS
 (function() {
@@ -23,20 +48,20 @@
   link.id = 'vditorContentTheme';
   link.rel = 'stylesheet';
   link.href = (savedTheme === 'light' || savedTheme === 'chuizi' || savedTheme === 'savor')
-    ? '/static/vditor/css/content-theme/light.css'
-    : '/static/vditor/css/content-theme/dark.css';
+    ? 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/light.css'
+    : 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/dark.css';
   document.head.appendChild(link);
 })();
 </script>
 <link rel="stylesheet" href="/static/xterm.min.css" data-name="opencode-xterm">
-<script src="/static/xterm.min.js"></script>
-<script src="/static/xterm-addon-fit.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="/static/xterm.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/lib/xterm.min.js','https://unpkg.com/@xterm/xterm@5.3.0/lib/xterm.min.js'])"></script>
+<script src="/static/xterm-addon-fit.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js','https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js'])"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js','https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js'])"></script>
 <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
-<link rel="stylesheet" href="/static/vditor/js/katex/katex.min.css">
-<script src="/static/vditor/js/katex/katex.min.js"></script>
-<script src="/static/vditor/js/katex/mhchem.min.js"></script>
-<script src="/static/vditor/js/katex/auto-render.min.js" defer></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="/static/vditor/js/katex/katex.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js','https://unpkg.com/katex@0.16.9/dist/katex.min.js'])"></script>
+<script src="/static/vditor/js/katex/mhchem.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/mhchem.min.js','https://unpkg.com/katex@0.16.9/dist/contrib/mhchem.min.js'])"></script>
+<script src="/static/vditor/js/katex/auto-render.min.js" defer onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js','https://unpkg.com/katex@0.16.9/dist/contrib/auto-render.min.js'])"></script>
 <link rel="stylesheet" href="/static/style.css?v=tc14">
 <link rel="preload" href="/static/theme/Cliff%20Dark/cliff_bg.jpg" as="image">
 </head>
@@ -1801,12 +1826,13 @@
   <div style="font-size:13px;opacity:0.3;position:absolute;bottom:40px">点击任意位置跳过</div>
 </div>
 
-<script id="vditorScriptTag" src="/static/vditor/index.min.js" defer></script>
-<script src="/static/cytoscape.min.js"></script>
+<script id="vditorScriptTag" src="/static/vditor/index.min.js" defer
+  onerror="__fallbackScript(event.target,['https://unpkg.com/vditor@3.10.7/dist/index.min.js','https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js'])"></script>
+<script src="/static/cytoscape.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js','https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js'])"></script>
 <script src="/static/autosave-scheduler.js"></script>
  <script src="/static/rmd-chunk.js"></script>
 <script src="/static/editor-chunks.js"></script>
-<script src="/static/app.js?v=tc19"></script>
+<script src="/static/app.js?v=tc24"></script>
 <script src="/static/office.js"></script>
 <script type="module" src="/static/collab-client.js"></script>
 <script type="module" src="/static/collab-editor.js"></script>

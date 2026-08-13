@@ -1575,12 +1575,102 @@ function setupCodeBlockPreservation(v) {
   };
 }
 
+// ─── 第三方依赖 CDN fallback 加载器 ─────────────────────────
+// 本地资源加载失败时按 URL 列表依次回退到 CDN（unpkg → jsdelivr → cdnjs）
+// 注：static/vditor 目录未随仓库部署（缺失），Vditor 内部资源（i18n/css/lute）
+// 统一走 CDN 基址 __VDITOR_CDN（Vditor cdn 参数内部拼 {cdn}/dist/...）。
+var __VDITOR_CDN = 'https://unpkg.com/vditor@3.10.7';
+var __libFallbackMap = {
+  'Vditor': [
+    '/static/vditor/index.min.js',
+    'https://unpkg.com/vditor@3.10.7/dist/index.min.js',
+    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js'
+  ],
+  'Lute': [
+    'https://unpkg.com/vditor@3.10.7/dist/js/lute/lute.min.js',
+    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/js/lute/lute.min.js'
+  ],
+  'katex': [
+    '/static/vditor/js/katex/katex.min.js',
+    'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js',
+    'https://unpkg.com/katex@0.16.9/dist/katex.min.js'
+  ],
+  'Terminal': [
+    '/static/xterm.min.js',
+    'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/lib/xterm.min.js',
+    'https://unpkg.com/@xterm/xterm@5.3.0/lib/xterm.min.js'
+  ],
+  'cytoscape': [
+    '/static/cytoscape.min.js',
+    'https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js',
+    'https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js'
+  ],
+  'pdfjsLib': [
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+    'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js',
+    'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js'
+  ]
+};
+
+/**
+ * 按全局对象名确保第三方库已加载；缺失时按 URL 列表依次动态加载（本地 → CDN 兜底）。
+ * @param {string} globalName  全局对象名（如 'Vditor' / 'katex' / 'Terminal'）
+ * @param {function(boolean)} done 加载完成回调（ok=true 表示可用）
+ */
+function ensureLib(globalName, done) {
+  try {
+    if (window[globalName]) { done && done(true); return; }
+  } catch (e) { /* fallthrough */ }
+  var urls = __libFallbackMap[globalName] || [];
+  if (!urls.length) { done && done(false); return; }
+  var idx = 0;
+  function load() {
+    if (idx >= urls.length) { done && done(false); return; }
+    var s = document.createElement('script');
+    s.src = urls[idx++];
+    s.async = true;
+    s.onload = function() {
+      var ok = false;
+      try { ok = !!window[globalName]; } catch (e) {}
+      done && done(ok);
+    };
+    s.onerror = function() { s.remove(); load(); };
+    document.head.appendChild(s);
+  }
+  load();
+}
+
+/**
+ * 确保 Vditor 实例的 Lute 引擎就绪。
+ * Vditor 内部异步加载 lute（{cdn}/dist/js/lute/lute.min.js），失败时不重试，
+ * 此时 this.lute 为 undefined，setValue → e.lute.Md2VditorDOM 直接崩溃。
+ * 未就绪时按多 CDN 兜底加载（unpkg → jsdelivr）并手动挂载 v.lute。
+ * @param {object} v Vditor 实例
+ * @param {function} done 就绪回调（无论成败都会调用，调用方需再次判空保护）
+ */
+function __ensureVditorLute(v, done) {
+  if (!v || v.lute) { done && done(); return; }
+  ensureLib('Lute', function (ok) {
+    if (ok && window.Lute && v && !v.lute) {
+      try {
+        var L = window.Lute;
+        // GopherJS 编译产物：window.Lute 是命名空间对象，用 New() 工厂创建实例
+        if (L && typeof L.New === 'function') { v.lute = L.New(); }
+        else if (typeof L === 'function') { v.lute = new L(); }
+        else if (L && typeof L.default === 'function') { v.lute = new L.default(); }
+      } catch (e) { console.warn('Lute 初始化失败:', e); }
+    }
+    if (!v.lute) console.warn('Lute 加载失败，Markdown 渲染可能不可用');
+    done && done();
+  });
+}
+
 // ─── Vditor Editor ──────────────────────────────────────────
 
 function initVditor() {
   if (state.vditorReady) return;
 
-  // If Vditor is not loaded yet, load the script dynamically
+  // If Vditor is not loaded yet, load the script dynamically（本地失败 → CDN fallback）
   if (typeof Vditor === 'undefined') {
     const existingScript = document.getElementById('vditorScriptTag');
     if (existingScript) {
@@ -1589,10 +1679,19 @@ function initVditor() {
       newScript.src = existingScript.src;
       newScript.onload = () => initVditor();
       newScript.onerror = () => {
-        showToast('Vditor 加载失败，切换到原生编辑器', 'error');
-        state.editorMode = 'plain';
-        document.getElementById('vditor').style.display = 'none';
-        document.getElementById('plainEditor').style.display = 'block';
+        // 本地加载失败：CDN 回退（unpkg → jsdelivr），全部失败才切原生编辑器
+        showToast('本地 Vditor 加载失败，尝试 CDN 回退…', 'info');
+        ensureLib('Vditor', function(ok) {
+          if (ok) {
+            showToast('已通过 CDN 加载 Vditor', 'success');
+            initVditor();
+          } else {
+            showToast('Vditor 加载失败，切换到原生编辑器', 'error');
+            state.editorMode = 'plain';
+            document.getElementById('vditor').style.display = 'none';
+            document.getElementById('plainEditor').style.display = 'block';
+          }
+        });
       };
       existingScript.replaceWith(newScript);
       return;
@@ -1608,7 +1707,8 @@ function initVditor() {
     mode: 'wysiwyg',
     theme: _vditorLight ? 'classic' : 'dark',
     icon: 'material',
-    cdn: '/static/vditor',
+    cdn: __VDITOR_CDN,
+    _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
     placeholder: '开始输入...',
     math: {
       engine: 'KaTeX',
@@ -1632,7 +1732,7 @@ function initVditor() {
       },
       theme: {
         current: _vditorLight ? 'light' : 'dark',
-        path: '/static/vditor/css/content-theme',
+        path: __VDITOR_CDN + '/dist/css/content-theme',
       },
       hljs: {
         style: _vditorLight ? 'github' : 'tokyo-night-dark',
@@ -1670,25 +1770,27 @@ function initVditor() {
     },
     value: '',
     after: () => {
-      state.vditorReady = true;
-      if (window.EditorChunks && window.EditorChunks.isEnabled()) {
-        var _full = window.EditorChunks.takeFull();
-        // 防御：takeFull 可能返回空（chunk 状态残留但 src 为空），绝不 setValue 覆盖成空白
-        if (_full != null && _full !== '') state.vditor.setValue(_full);
-      }
-      if (state._pendingEditorSource != null) {
-        var _p = state._pendingEditorSource;
-        state._pendingEditorSource = null;
-        _applyEditorSource(_p);
-      }
-      setupCodeBlockPreservation(state.vditor);
-      setupPandocDivPreservation(state.vditor);
-      bindVditorShortcuts(state.vditor);
-      var _cont = document.getElementById('vditor');
-      if (_cont) {
-        if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, state.vditor); } catch (e) {} }
-        if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, state.vditor); } catch (e) {} }
-      }
+      __ensureVditorLute(state.vditor, function () {
+        state.vditorReady = true;
+        if (window.EditorChunks && window.EditorChunks.isEnabled()) {
+          var _full = window.EditorChunks.takeFull();
+          // 防御：takeFull 可能返回空（chunk 状态残留但 src 为空），绝不 setValue 覆盖成空白
+          if (_full != null && _full !== '') state.vditor.setValue(_full);
+        }
+        if (state._pendingEditorSource != null) {
+          var _p = state._pendingEditorSource;
+          state._pendingEditorSource = null;
+          _applyEditorSource(_p);
+        }
+        setupCodeBlockPreservation(state.vditor);
+        setupPandocDivPreservation(state.vditor);
+        bindVditorShortcuts(state.vditor);
+        var _cont = document.getElementById('vditor');
+        if (_cont) {
+          if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, state.vditor); } catch (e) {} }
+          if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, state.vditor); } catch (e) {} }
+        }
+      });
     },
     input: () => {
       if (!state.activeTab) return;
@@ -1827,7 +1929,8 @@ function initPaneVditor(paneId) {
     mode: 'wysiwyg',
     theme: _vditorLight ? 'classic' : 'dark',
     icon: 'material',
-    cdn: '/static/vditor',
+    cdn: __VDITOR_CDN,
+    _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
     placeholder: '开始输入...',
     math: {
       engine: 'KaTeX',
@@ -1842,28 +1945,31 @@ function initPaneVditor(paneId) {
       markdown: {
         linkBase: `${API_BASE}/api/file/download/`,
       },
-      theme: { current: _vditorLight ? 'light' : 'dark', path: '/static/vditor/css/content-theme' },
+      theme: { current: _vditorLight ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' },
       hljs: { style: _vditorLight ? 'github' : 'tokyo-night-dark', lineNumber: true },
       math: { engine: 'KaTeX', inlineDigit: true },
     },
     value: '',
     after: function() {
-      state['paneVditorReady_' + paneId] = true;
-      // 如果当前活动 tab 是 PDF，初始化完成后隐藏 Vditor
-      var activePath = state['paneActiveTab_' + paneId];
-      var activeTab = (state['paneTabs_' + paneId] || []).find(function(t) { return t.path === activePath; });
-      if (activeTab && activeTab._isPdf) {
-        var vditorEl = document.getElementById('paneVditor-' + paneId);
-        if (vditorEl) vditorEl.style.display = 'none';
-      }
-      setupCodeBlockPreservation(state['paneVditor_' + paneId]);
-      setupPandocDivPreservation(state['paneVditor_' + paneId]);
-      bindVditorShortcuts(state['paneVditor_' + paneId]);
-      var _cont = document.getElementById('paneVditor-' + paneId);
-      if (_cont) {
-        if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, state['paneVditor_' + paneId]); } catch (e) {} }
-        if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, state['paneVditor_' + paneId]); } catch (e) {} }
-      }
+      var _pv = state['paneVditor_' + paneId];
+      __ensureVditorLute(_pv, function () {
+        state['paneVditorReady_' + paneId] = true;
+        // 如果当前活动 tab 是 PDF，初始化完成后隐藏 Vditor
+        var activePath = state['paneActiveTab_' + paneId];
+        var activeTab = (state['paneTabs_' + paneId] || []).find(function(t) { return t.path === activePath; });
+        if (activeTab && activeTab._isPdf) {
+          var vditorEl = document.getElementById('paneVditor-' + paneId);
+          if (vditorEl) vditorEl.style.display = 'none';
+        }
+        setupCodeBlockPreservation(_pv);
+        setupPandocDivPreservation(_pv);
+        bindVditorShortcuts(_pv);
+        var _cont = document.getElementById('paneVditor-' + paneId);
+        if (_cont) {
+          if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_cont, _pv); } catch (e) {} }
+          if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_cont, _pv); } catch (e) {} }
+        }
+      });
     },
     input: function() {
       var activePath = state['paneActiveTab_' + paneId];
@@ -10209,9 +10315,30 @@ function _expandBackendMessages(backendMessages) {
   for (const msg of backendMessages) {
     if (msg.role === 'tool') continue;
     if (msg.role === 'system') {
-      // 压缩摘要 system 消息标记 isCompactSummary → 前端渲染为可折叠卡片（诚实渲染保留，但不平铺大段摘要）
+      // 压缩摘要 system 消息：
+      // 1) 后端已附带 expanded（默认找回）→ 同步拼接完整历史，不显示摘要提示卡
+      // 2) 已自动展开过的会话 → 直接跳过（保持展开后的视图稳定）
+      // 3) 兜底：标记 isCompactSummary → 渲染折叠卡（点击/自动找回）
       var _isComp = typeof msg.content === 'string' && msg.content.indexOf('[对话历史摘要') === 0;
-      ui.push({ role: 'system', content: msg.content, isCompactSummary: _isComp });
+      if (_isComp) {
+        if (msg.expanded && msg.expanded.length) {
+          var _exUi = _expandBackendMessages(msg.expanded);
+          // 先保留摘要提示卡（提示"这段被压缩过 + 已找回 N 条"，可展开对比摘要确认无遗漏），
+          // 再拼接展开找回的具体历史
+          ui.push({ role: 'system', content: msg.content, isCompactSummary: true, expandedCount: _exUi.length });
+          for (var _ei = 0; _ei < _exUi.length; _ei++) {
+            if (!(_exUi[_ei] && _exUi[_ei].isCompactSummary)) ui.push(_exUi[_ei]);
+          }
+          continue;
+        }
+        // 兜底路径（后端未附 expanded）：已通过 API 展开过 → 跳过；否则标记摘要卡
+        if (window.__compactExpandedSession === _getAgentSessionId()) {
+          continue;
+        }
+        ui.push({ role: 'system', content: msg.content, isCompactSummary: true });
+      } else {
+        ui.push({ role: 'system', content: msg.content });
+      }
     } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length) {
       // 思考( reasoning_content )与内容( content )必须留在同一气泡，
       // 否则思考被丢弃、简短内容被单独提到工具卡上方，顺序失真。
@@ -10262,6 +10389,13 @@ function _renderBackendHonestly(data) {
   const backendMessages = (data && data.messages) || [];
   if (!backendMessages.length) return false;
   const ui = _expandBackendMessages(backendMessages);
+  // ── 默认找回：检测到压缩摘要 system 消息 → 自动展开拼接完整历史（保留摘要提示卡）──
+  const _hasCompact = ui.some(function(m) { return m && m.isCompactSummary; });
+  const _curSid = _getAgentSessionId();
+  if (_hasCompact && window.__compactExpandedSession !== _curSid && window.__compactExpandFailedSession !== _curSid) {
+    // 异步展开：成功后摘要卡保留 + 拼接历史；失败标记失败（不重试），摘要卡仍显示
+    _autoExpandCompact(_curSid, ui);
+  }
   // 完全一致则跳过（去掉渲染期附加的 _streaming 等瞬时键后比较）
   if (_messagesEqual(ui, state.agentMessages)) return false;
   // 防御：后端重渲染可能丢失 checkpoint_hash（来源差异/序列化裁剪）——
@@ -10286,6 +10420,65 @@ function _renderBackendHonestly(data) {
   renderAgentMessages();
   updateSessionInfo(ui.length + '条消息');
   return true;
+}
+
+// ─── 默认找回压缩历史：自动展开拼接（保留摘要提示卡，找回失败也显示）───
+function _autoExpandCompact(sessionId, ui) {
+  if (!sessionId) { window.__compactExpandFailedSession = ''; return; }
+  fetch('/api/agent/messages/expand', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId })
+  }).then(function(r) { return r.json(); }).then(function(res) {
+    var _exp = (res && res.data && res.data.expanded) || [];
+    if (!_exp.length) {
+      // 找回失败：标记失败（不再重试），摘要卡下次轮询仍显示（提示"这段被压缩过"）
+      window.__compactExpandFailedSession = sessionId;
+      console.log('[Agent] 压缩历史找回失败（无可用归档），保留摘要卡');
+      return;
+    }
+    // 展开历史 → UI 结构（剔除可能残留的摘要 system）
+    var _expandedUi = _expandBackendMessages(_exp);
+    _expandedUi = _expandedUi.filter(function(m) { return !(m && m.isCompactSummary); });
+    // 本地消息流：摘要卡保留（标注找回条数）+ 其后拼接展开历史
+    var _newArr = [];
+    var _replaced = false;
+    for (var _i = 0; _i < state.agentMessages.length; _i++) {
+      var _m = state.agentMessages[_i];
+      if (_m && _m.isCompactSummary) {
+        _m.expandedCount = _expandedUi.length;
+        _newArr.push(_m); // 保留摘要提示卡
+        _newArr.push.apply(_newArr, _expandedUi); // 拼接找回的具体历史
+        _replaced = true;
+      } else {
+        _newArr.push(_m);
+      }
+    }
+    if (!_replaced) {
+      // 本地视图尚未渲染摘要卡（如刚进入会话），按 ui 顺序插入
+      _newArr = [];
+      for (var _j = 0; _j < ui.length; _j++) {
+        if (ui[_j] && ui[_j].isCompactSummary) {
+          ui[_j].expandedCount = _expandedUi.length;
+          _newArr.push(ui[_j]);
+          _newArr.push.apply(_newArr, _expandedUi);
+        } else {
+          _newArr.push(ui[_j]);
+        }
+      }
+    }
+    state.agentMessages = _newArr;
+    window.__compactExpandedSession = sessionId;
+    console.log('[Agent] 默认找回：自动展开压缩历史', _expandedUi.length, '条消息（摘要卡保留）');
+    _resetFlowNav();
+    for (var _k = 0; _k < _newArr.length; _k++) {
+      _addFlowNavBlock(_newArr[_k].role, _newArr[_k].content, _k, _newArr[_k]);
+    }
+    renderAgentMessages();
+  }).catch(function() {
+    // 找回失败：标记失败（不重试），摘要卡保留显示
+    window.__compactExpandFailedSession = sessionId;
+  });
 }
 
 function _messagesEqual(a, b) {
@@ -11884,16 +12077,22 @@ function _fullRenderRange(container, start, end, forceScrollBottom, prevScrollHe
 
 function _renderAgentMessageHtml(msg, mi) {
   let rendered = '';
-  // ── 压缩摘要卡片：诚实渲染但折叠，不平铺大段 [对话历史摘要] ──
+  // ── 压缩摘要卡片：提示"这段被压缩过 + 已找回 N 条"，可展开摘要对比确认无遗漏 ──
   if (msg.role === 'system' && msg.isCompactSummary) {
     if (!msg._compactKey) msg._compactKey = 'compact_' + mi + '_' + Date.now();
     var _cid = msg._compactKey;
+    var _countTip = msg.expandedCount
+      ? '（已自动找回 <b>' + msg.expandedCount + '</b> 条具体历史，点开可对比摘要确认无遗漏）'
+      : '（点开可查看摘要内容）';
+    var _btn = msg.expandedCount
+      ? ''
+      : '<button class="compact-expand-btn" data-cid="' + _cid + '" style="cursor:pointer;color:#fff;background:var(--accent);border:none;border-radius:4px;padding:3px 8px;font-size:11px;flex:0 0 auto">🔍 找回具体历史</button>';
     rendered = '<div class="compact-card" data-cid="' + _cid + '" style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-secondary);font-size:12px">' +
       '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
         '<span>📜</span>' +
-        '<span style="flex:1;color:var(--fg-muted)">较早对话已压缩为摘要（展开可查看摘要，或找回被压缩的具体历史）</span>' +
+        '<span style="flex:1;color:var(--fg-muted)">这段对话曾被压缩为摘要' + _countTip + '</span>' +
         '<span class="compact-toggle" data-cid="' + _cid + '" style="cursor:pointer;color:var(--accent);font-size:11px;flex:0 0 auto">展开摘要</span>' +
-        '<button class="compact-expand-btn" data-cid="' + _cid + '" style="cursor:pointer;color:#fff;background:var(--accent);border:none;border-radius:4px;padding:3px 8px;font-size:11px;flex:0 0 auto">🔍 找回具体历史</button>' +
+        _btn +
       '</div>' +
       '<div class="compact-summary-body" data-cid="' + _cid + '" style="display:none;margin-top:6px;padding:8px;background:var(--bg);border:1px dashed var(--border);border-radius:6px;white-space:pre-wrap;max-height:260px;overflow-y:auto;font-size:11px;color:var(--fg)">' + escapeHtml(msg.content) + '</div>' +
     '</div>';
@@ -19070,8 +19269,8 @@ function applyCustomThemeCss(theme) {
 function applyBaseTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   document.getElementById('vditorContentTheme').href = isLightTheme(theme)
-    ? '/static/vditor/css/content-theme/light.css'
-    : '/static/vditor/css/content-theme/dark.css';
+    ? __VDITOR_CDN + '/dist/css/content-theme/light.css'
+    : __VDITOR_CDN + '/dist/css/content-theme/dark.css';
   applyCustomThemeCss(theme);
   // 重新渲染所有 markdown 容器（笔记预览、agent 消息等），适配新主题
   setTimeout(_rerenderMdOnThemeChange, 50);
@@ -19153,7 +19352,7 @@ function toggleGradientTheme() {
     stopGradientTheme();
     document.documentElement.setAttribute('data-theme', 'gradient');
     startGradientTheme();
-    document.getElementById('vditorContentTheme').href = '/static/vditor/css/content-theme/dark.css';
+    document.getElementById('vditorContentTheme').href = __VDITOR_CDN + '/dist/css/content-theme/dark.css';
     applyCustomThemeCss('gradient');
     highlightThemeMenu('gradient');
   } else {
@@ -19827,7 +20026,7 @@ function ensureDiaryLute() {
   if (_diaryLute || window.Lute || _diaryLuteLoading) return;
   _diaryLuteLoading = true;
   var s = document.createElement('script');
-  s.src = '/static/vditor/dist/js/lute/lute.min.js';
+  s.src = __VDITOR_CDN + '/dist/js/lute/lute.min.js';
   s.onload = function() {
     _diaryLuteLoading = false;
     if (_calViewMode === 'diary') refreshDiaryMarkers();
@@ -22345,21 +22544,23 @@ function initSlidesPanel() {
           theme: _vditorLight ? 'classic' : 'dark',
           placeholder: '开始书写...',
           cache: { enable: false },
-          cdn: '/static/vditor',
-          _lutePath: '/static/vditor/dist/js/lute/lute.min.js',
+          cdn: __VDITOR_CDN,
+          _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
           markdown: {
             linkBase: `${API_BASE}/api/file/download/`,
           },
           after: function() {
-            slidesState.vditorReady = true;  // Vditor 就绪后才置 true，避免 200ms 窗口期内误判
-            slidesState.vditorCreating = false;
-            setupCodeBlockPreservation(slidesState.vditor);
-            bindVditorShortcuts(slidesState.vditor);
-            var _sel = document.getElementById('slidesVditor');
-            if (_sel) {
-              if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_sel, slidesState.vditor); } catch (e) {} }
-              if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_sel, slidesState.vditor); } catch (e) {} }
-            }
+            __ensureVditorLute(slidesState.vditor, function () {
+              slidesState.vditorReady = true;  // Vditor 就绪后才置 true，避免 200ms 窗口期内误判
+              slidesState.vditorCreating = false;
+              setupCodeBlockPreservation(slidesState.vditor);
+              bindVditorShortcuts(slidesState.vditor);
+              var _sel = document.getElementById('slidesVditor');
+              if (_sel) {
+                if (window.enhanceRmdChunks) { try { window.enhanceRmdChunks(_sel, slidesState.vditor); } catch (e) {} }
+                if (window.initRmdChunksWatcher) { try { window.initRmdChunksWatcher(_sel, slidesState.vditor); } catch (e) {} }
+              }
+            });
           },
           input: function(val) {
             if (!slidesState.isSwitching && slidesState.slides[slidesState.currentIndex]) {
@@ -22377,7 +22578,7 @@ function initSlidesPanel() {
             engine: 'KaTeX',
             inlineDigit: true,
           },
-          preview: { mode: 'editor', markdown: { linkBase: `${API_BASE}/api/file/download/` }, theme: { current: _vditorLight ? 'light' : 'dark', path: '/static/vditor/css/content-theme' }, hljs: { style: _vditorLight ? 'github' : 'tokyo-night-dark', lineNumber: true }, math: { engine: 'KaTeX', inlineDigit: true } },
+          preview: { mode: 'editor', markdown: { linkBase: `${API_BASE}/api/file/download/` }, theme: { current: _vditorLight ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' }, hljs: { style: _vditorLight ? 'github' : 'tokyo-night-dark', lineNumber: true }, math: { engine: 'KaTeX', inlineDigit: true } },
           tab: '\t',
           hint: {
             delay: 200,
@@ -24724,9 +24925,9 @@ function _renderMdInto(el, content, options) {
 
   // 调用 Vditor.preview 异步渲染（内部会处理代码高亮、数学公式、流程图等）
   return Vditor.preview(el, mdContent, {
-    cdn: '/static/vditor',
+    cdn: __VDITOR_CDN,
     mode: vditorMode,
-    theme: { current: isLight ? 'light' : 'dark', path: '/static/vditor/css/content-theme' },
+    theme: { current: isLight ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' },
     hljs: { style: hljsStyle },
     markdown: { autoSpace: true, gfmAutoLink: false, linkBase: `${API_BASE}/api/file/download/` },
     math: { inlineDigit: true, engine: 'KaTeX' }
@@ -26298,14 +26499,15 @@ function switchPairMode(pairType, field, mode) {
         mode: 'wysiwyg',
         theme: theme,
         icon: 'material',
-        cdn: '/static/vditor',
+        cdn: __VDITOR_CDN,
+        _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
         cache: { enable: false },
         toolbar: ['bold', 'italic', 'strike', '|', 'link', '|', 'undo', 'redo'],
         markdown: {
           linkBase: `${API_BASE}/api/file/download/`,
         },
         math: { engine: 'KaTeX', inlineDigit: true },
-        preview: { markdown: { linkBase: `${API_BASE}/api/file/download/` }, theme: { current: theme === 'classic' ? 'light' : 'dark', path: '/static/vditor/css/content-theme' }, hljs: { style: theme === 'classic' ? 'github' : 'tokyo-night-dark' }, math: { engine: 'KaTeX', inlineDigit: true } },
+        preview: { markdown: { linkBase: `${API_BASE}/api/file/download/` }, theme: { current: theme === 'classic' ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' }, hljs: { style: theme === 'classic' ? 'github' : 'tokyo-night-dark' }, math: { engine: 'KaTeX', inlineDigit: true } },
         placeholder: label + '...',
         value: sourceEl.value,
         after: function () {
@@ -26315,17 +26517,19 @@ function switchPairMode(pairType, field, mode) {
             try { vd.destroy(); } catch (e) {}
             return;
           }
-          _pairSetVditor(pairType, field, vd);
-          // 缩小 WYSIWYG 编辑区字体
-          var wrapper = wysiwygEl.querySelector('.vditor-ir, .vditor-wysiwyg');
-          if (wrapper) wrapper.style.fontSize = '13px';
+          __ensureVditorLute(vd, function () {
+            _pairSetVditor(pairType, field, vd);
+            // 缩小 WYSIWYG 编辑区字体
+            var wrapper = wysiwygEl.querySelector('.vditor-ir, .vditor-wysiwyg');
+            if (wrapper) wrapper.style.fontSize = '13px';
+          });
         }
       });
     } else if (vd === '__creating__') {
       // 正在创建中，不重复创建，等 after 钩子完成
       return;
     } else {
-      vd.setValue(sourceEl.value);
+      __ensureVditorLute(vd, function () { vd.setValue(sourceEl.value); });
       // 字体缩小
       var wrapper = wysiwygEl.querySelector('.vditor-ir, .vditor-wysiwyg');
       if (wrapper) wrapper.style.fontSize = '13px';
