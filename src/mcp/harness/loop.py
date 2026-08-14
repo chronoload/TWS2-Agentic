@@ -64,8 +64,9 @@ class LoopTask:
     # 会话化：完整消息流（{role: user/assistant/tool, content, tool_calls, ts}）
     # loop 作为 autonomous 对话模式，前端像普通会话那样审核（决策①A：内存 + snapshot 暴露）
     messages: List[Dict[str, Any]] = field(default_factory=list)
-    # 审核介入挂起输入：intervene() 设置，下一回合消费为 user 消息（决策③C）
-    pending_input: Optional[str] = None
+    # 审核介入消息队列（spec id=6）：enqueue_input() 追加，下一回合 pop(0) 消费为 user 消息
+    # （FIFO：连续插入互不覆盖；旧 intervene 单条语义 = 队列首元素，自动兼容）
+    pending_inputs: List[str] = field(default_factory=list)
     # 会话级模式切换（决策A）：归属会话（Agent 面板普通会话 session_id）
     session_id: Optional[str] = None
     # 交接笔记（handoff）：终态生成结构化接力笔记 {goal, status, turns, summary,
@@ -86,6 +87,8 @@ class LoopTask:
             "result": self.result,
             "error": self.error,
             "messages": list(self.messages),
+            "pending_inputs": list(self.pending_inputs),
+            "queue_len": len(self.pending_inputs),
             "session_id": self.session_id,
             "handoff": self.handoff,
         }
@@ -224,21 +227,22 @@ class AgentLoop:
     # ────────────────────────── 审核介入（会话化，决策③C） ──────────────────────────
 
     def intervene(self, task_id: str, message: str) -> LoopTask:
-        """审核介入：插入 user 消息，下一回合喂给模型。
+        """审核介入：追加 user 消息入队（FIFO），下一回合 pop(0) 喂给模型。
 
         loop 是 autonomous 对话模式，审核者可像普通会话一样追加 user 消息。
-        约束：loop PAUSED/STOPPED → ValueError（API 层映射 409）；
+        spec id=6：连续插入互不覆盖（旧单条 pending_input 语义 = 队列首元素，自动兼容）。
+        约束：loop STOPPED → ValueError（API 层映射 409，PAUSED 允许入队等 resume 消费）；
         任务不存在 → KeyError（API 层映射 404）；已终态（COMPLETED/FAILED）→ ValueError。
         """
         with self._lock:
-            if self._status in (LoopStatus.PAUSED, LoopStatus.STOPPED):
-                raise ValueError("loop 处于 PAUSED/STOPPED，无法介入")
+            if self._status == LoopStatus.STOPPED:
+                raise ValueError("loop 已 STOPPED，无法介入")
             task = self._tasks.get(task_id)
             if task is None:
                 raise KeyError(task_id)
             if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 raise ValueError(f"任务已结束（{task.status.value}），无法介入")
-            task.pending_input = message
+            task.pending_inputs.append(message)
             task.messages.append(
                 {"role": "user", "content": message, "ts": datetime.now().isoformat()}
             )
@@ -258,6 +262,20 @@ class AgentLoop:
             if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.HALTED):
                 raise ValueError("任务已结束，无法调整轮次")
             task.max_turns = max_turns if (max_turns is None or max_turns > 0) else None
+            return task
+
+    def update_max_duration(self, task_id: str, max_duration_seconds: Optional[float]) -> LoopTask:
+        """运行中调整时长预算（灵活时长）：None/<=0 = 不限（达成/轮次停机）；正数 = 新预算（秒）。
+
+        时长检查每回合读取 task.max_duration_seconds → 立即生效。
+        终态任务不可调整。"""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.HALTED):
+                raise ValueError("任务已结束，无法调整时长")
+            task.max_duration_seconds = max_duration_seconds if (max_duration_seconds is None or max_duration_seconds > 0) else None
             return task
 
     def _build_handoff(self, task: LoopTask) -> Dict[str, Any]:
@@ -347,13 +365,13 @@ class AgentLoop:
         _written = len(task.messages)  # 已回写会话的消息数（回合产物增量回写）
         # 轮次预算：max_turns=None 时不限（仅靠达成/时长停机）；运行中 update_max_turns 动态生效
         while task.turn_count < (task.max_turns if task.max_turns else 10**9):
-            # ── 审核介入消息：追加为 user 消息喂给模型（决策③C） ──
-            if task.pending_input:
+            # ── 审核介入消息：pop(0) 消费队首为 user 消息喂给模型（spec id=6 FIFO）──
+            if task.pending_inputs:
+                _msg = task.pending_inputs.pop(0)
                 task.messages.append(
-                    {"role": "user", "content": task.pending_input, "ts": datetime.now().isoformat()}
+                    {"role": "user", "content": _msg, "ts": datetime.now().isoformat()}
                 )
-                messages.append({"role": "user", "content": task.pending_input})
-                task.pending_input = None
+                messages.append({"role": "user", "content": _msg})
 
             # ── 时长预算检查（超时 → 挂起，等待人工） ──
             if task.max_duration_seconds and task.started_at:
@@ -397,7 +415,7 @@ class AgentLoop:
                     "ts": datetime.now().isoformat(),
                 })
                 messages.append({"role": "assistant", "content": f"⚠️ 回合异常：{task.error}"})
-                if task.turn_count >= task.max_turns:
+                if task.max_turns and task.turn_count >= task.max_turns:
                     task.status = TaskStatus.FAILED
                     break
                 messages.append({
@@ -421,7 +439,9 @@ class AgentLoop:
             # ── 达成即停机（硬约束，spec id=5）：content 或工具调用参数声明「🎯 目标已达成」
             # → 立即 COMPLETED 停机，即使本回合还带工具调用也不执行（防止达成后多余迭代） ──
             _content = getattr(result, "content", "") or ""
-            _loop_goal_mode = session_msgs is not None
+            # 达成判定统一（修复"发送即完成"）：所有 loop 任务都须声明 🎯 才算完成，
+            # 不再依赖 session 模式——独立任务无 tool_calls 也续跑（达成前不停）
+            _loop_goal_mode = True
             _tc_arg_blob = ""
             for _e in (getattr(result, "tool_calls", None) or []):
                 _tc = _e.get("tool_call", _e) if isinstance(_e, dict) else _e
@@ -489,10 +509,10 @@ class AgentLoop:
                         pass
                 continue
 
-            # 无 tool_calls：目标达成判定（spec id=5）——loop 目标模式须声明「🎯 目标已达成」才完成，
-            # 否则目标达成前不停（续跑）；非 loop 目标模式保持「无 tool_calls → 自然完成」（兼容旧行为）
+            # 无 tool_calls：目标达成判定（spec id=5）——所有 loop 任务须声明「🎯 目标已达成」才完成，
+            # 否则目标达成前不停（续跑，修复"发送即完成"）
             _content = getattr(result, "content", "") or ""
-            _loop_goal_mode = session_msgs is not None
+            _loop_goal_mode = True
             if _loop_goal_mode and "🎯 目标已达成" not in _content:
                 # 目标达成前不停：记录回复 + 追加继续推进指令，续跑
                 task.messages.append({

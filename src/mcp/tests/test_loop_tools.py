@@ -18,7 +18,7 @@ from mcp.ws2_tools import (  # noqa: E402
 class FakeRunner:
     def run_turn(self, messages, tools=None, session_id=None):
         return TurnResult(
-            id="t", status=TurnStatus.COMPLETED, content="完成", tool_calls=[],
+            id="t", status=TurnStatus.COMPLETED, content="🎯 目标已达成：完成", tool_calls=[],
         )
 
 

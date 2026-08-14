@@ -44,6 +44,11 @@ class MaxTurnsRequest(BaseModel):
     max_turns: Optional[int] = None
 
 
+class MaxDurationRequest(BaseModel):
+    """运行中调整时长预算：None/<=0 = 不限；正数 = 新预算（秒）"""
+    max_duration_seconds: Optional[float] = None
+
+
 def _set_loop_for_test(loop):
     """测试专用：覆盖默认 loop 实例"""
     global _override_loop
@@ -189,7 +194,7 @@ def loop_audit(task_id: str):
 
 @router.post("/task/{task_id}/message")
 def loop_task_message(task_id: str, req: TaskMessageRequest):
-    """审核介入（决策③C）：插入 user 消息，喂给 loop 下一回合"""
+    """审核介入（决策③C + spec id=6）：追加 user 消息入队（FIFO），喂给 loop 下一回合"""
     loop = _get_loop()
     try:
         task = loop.intervene(task_id, req.content)
@@ -197,7 +202,12 @@ def loop_task_message(task_id: str, req: TaskMessageRequest):
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return {"ok": True, "task_id": task_id, "pending_input": task.pending_input}
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "pending_inputs": list(task.pending_inputs),
+        "queue_len": len(task.pending_inputs),
+    }
 
 
 @router.post("/task/{task_id}/max_turns")
@@ -212,6 +222,19 @@ def loop_task_max_turns(task_id: str, req: MaxTurnsRequest):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "task_id": task_id, "max_turns": task.max_turns}
+
+
+@router.post("/task/{task_id}/max_duration")
+def loop_task_max_duration(task_id: str, req: MaxDurationRequest):
+    """运行中调整时长预算（灵活时长）：None/<=0 = 不限；正数 = 新预算（秒）。"""
+    loop = _get_loop()
+    try:
+        task = loop.update_max_duration(task_id, req.max_duration_seconds)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "task_id": task_id, "max_duration_seconds": task.max_duration_seconds}
 
 
 @router.post("/control")

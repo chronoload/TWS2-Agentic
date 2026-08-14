@@ -23,7 +23,8 @@ from mcp.server.loop_api import (  # noqa: E402
 class FakeRunner:
     def run_turn(self, messages, tools=None, session_id=None):
         return TurnResult(
-            id="t", status=TurnStatus.COMPLETED, content="完成", tool_calls=[],
+            id="t", status=TurnStatus.COMPLETED,
+            content="🎯 目标已达成：完成", tool_calls=[],
         )
 
 
@@ -80,12 +81,42 @@ def test_task_message_intervene():
     _set_loop_for_test(loop)
     body = loop_submit(SubmitRequest(goal="介入任务", auto_start=False))
     tid = body["task_id"]
-    # 审核介入：插入 user 消息（喂给下一回合）
-    loop_task_message(tid, TaskMessageRequest(content="注意细节"))
+    # 审核介入：插入 user 消息（喂给下一回合）——FIFO 队列语义（spec id=6）
+    res = loop_task_message(tid, TaskMessageRequest(content="注意细节"))
     task = loop.get_task(tid)
     assert task.messages[-1]["role"] == "user"
     assert task.messages[-1]["content"] == "注意细节"
-    assert task.pending_input == "注意细节"
+    assert task.pending_inputs == ["注意细节"]
+    # 响应暴露队列
+    assert res["queue_len"] == 1
+    assert res["pending_inputs"] == ["注意细节"]
+
+
+def test_task_message_enqueues_multiple():
+    """连续介入两条 → 队列长度 2，互不覆盖（旧单条覆盖 bug 修复）"""
+    loop = AgentLoop(runner=FakeRunner())
+    _set_loop_for_test(loop)
+    body = loop_submit(SubmitRequest(goal="多介入", auto_start=False))
+    tid = body["task_id"]
+    loop_task_message(tid, TaskMessageRequest(content="指令1"))
+    loop_task_message(tid, TaskMessageRequest(content="指令2"))
+    task = loop.get_task(tid)
+    assert task.pending_inputs == ["指令1", "指令2"]
+    assert task.snapshot()["queue_len"] == 2
+
+
+def test_task_message_allowed_when_paused():
+    """PAUSED 时允许入队（决策D2=A），不再 409"""
+    loop = AgentLoop(runner=FakeRunner())
+    _set_loop_for_test(loop)
+    loop.start()
+    loop.pause()
+    body = loop_submit(SubmitRequest(goal="暂停介入", auto_start=False))
+    tid = body["task_id"]
+    res = loop_task_message(tid, TaskMessageRequest(content="暂停插入"))
+    assert res["ok"] is True
+    assert res["queue_len"] == 1
+    assert loop.get_task(tid).pending_inputs == ["暂停插入"]
 
 
 # ── macdev 回审（交接第二轨，对抗性）：验证 handoff artifacts 断言 ──

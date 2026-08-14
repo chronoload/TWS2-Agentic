@@ -43,13 +43,13 @@ def make_loop(runner, **kw):
 
 # ── 1) 完成语义：一回合无 tool_calls → completed, turn_count=1 ──
 def test_task_completes_when_no_tool_calls():
-    runner = FakeRunner([([], "最终答案")])
+    runner = FakeRunner([([], "🎯 目标已达成：最终答案")])
     loop = make_loop(runner)
     task_id = loop.submit("计算 1+1", auto_start=False)
     assert loop.step() == task_id
     task = loop.get_task(task_id)
     assert task.status == TaskStatus.COMPLETED
-    assert task.result == "最终答案"
+    assert "最终答案" in task.result
     assert task.turn_count == 1
     assert len(runner.calls) == 1
 
@@ -59,7 +59,7 @@ def test_task_runs_multiple_turns_until_done():
     runner = FakeRunner(
         [
             ([{"name": "calculate", "arguments": "1+1"}], ""),
-            ([], "结果是 2"),
+            ([], "🎯 目标已达成：结果是 2"),
         ]
     )
     loop = make_loop(runner)
@@ -74,7 +74,7 @@ def test_task_runs_multiple_turns_until_done():
 
 # ── 3) 串行 FIFO：先提交先完成 ──
 def test_fifo_order():
-    runner = FakeRunner([([], "A"), ([], "B")])
+    runner = FakeRunner([([], "🎯 目标已达成 A"), ([], "🎯 目标已达成 B")])
     loop = make_loop(runner)
     id_a = loop.submit("任务A", auto_start=False)
     id_b = loop.submit("任务B", auto_start=False)
@@ -87,7 +87,7 @@ def test_fifo_order():
 
 # ── 4) 状态机：paused 不 drain，resume 恢复 ──
 def test_pause_resume():
-    runner = FakeRunner([([], "x")])
+    runner = FakeRunner([([], "🎯 目标已达成 x")])
     loop = make_loop(runner)
     loop.pause()
     task_id = loop.submit("t", auto_start=False)
@@ -100,7 +100,7 @@ def test_pause_resume():
 
 # ── 5) 停止：stop 后 step 不再处理 ──
 def test_stop_halts_processing():
-    runner = FakeRunner([([], "x")])
+    runner = FakeRunner([([], "🎯 目标已达成 x")])
     loop = make_loop(runner)
     loop.start()
     try:
@@ -162,7 +162,7 @@ def test_event_broadcast_completed_and_halted():
     events = []
     bus.subscribe("agent_loop.*", lambda e: events.append(e.event_type))
 
-    loop = make_loop(FakeRunner([([], "ok")]), event_bus=bus)
+    loop = make_loop(FakeRunner([([], "🎯 目标已达成：ok")]), event_bus=bus)
     loop.submit("任务", auto_start=False)
     loop.step()
     assert "agent_loop.task_started" in events
@@ -199,7 +199,7 @@ def test_middleware_chain_invoked():
     mw = CountingMW()
     chain = MiddlewareChain()
     chain.add(mw)
-    loop = make_loop(FakeRunner([([], "x")]), middleware_chain=chain)
+    loop = make_loop(FakeRunner([([], "🎯 目标已达成 x")]), middleware_chain=chain)
     loop.submit("m", auto_start=False)
     loop.step()
     assert mw.before >= 1
@@ -209,18 +209,18 @@ def test_middleware_chain_invoked():
 # ── 8) 提交即自主（修复：submit 自动启动后台线程，任务不再永久 pending）──
 def test_submit_auto_starts_background_execution():
     import time
-    runner = FakeRunner([([], "自动完成")])
+    runner = FakeRunner([([], "🎯 目标已达成：自动完成")])
     loop = make_loop(runner)
     task_id = loop.submit("自动任务", max_turns=2)  # 默认 auto_start=True
     time.sleep(1.0)  # 等后台线程 drain 队列
     task = loop.get_task(task_id)
     assert task.status == TaskStatus.COMPLETED
-    assert task.result == "自动完成"
+    assert "自动完成" in task.result
     assert len(runner.calls) == 1
 
 # ── 9) 状态机守卫：PAUSED 时 auto_start 不启动执行（任务保持 pending）──
 def test_submit_auto_start_respects_paused():
-    runner = FakeRunner([([], "x")])
+    runner = FakeRunner([([], "🎯 目标已达成 x")])
     loop = make_loop(runner)
     loop.start()   # 先 RUNNING
     loop.pause()   # 再 PAUSED（pause 仅在 RUNNING→PAUSED 生效）
@@ -233,7 +233,7 @@ def test_task_records_message_flow():
     """loop 会话化（决策①A）：LoopTask.messages 记录完整消息流，snapshot 暴露"""
     runner = FakeRunner([
         ([{"name": "calc", "arguments": "1+1"}], ""),
-        ([], "结果是 2"),
+        ([], "🎯 目标已达成：结果是 2"),
     ])
     loop = make_loop(runner)
     task_id = loop.submit("计算", max_turns=5, auto_start=False)
@@ -255,7 +255,7 @@ def test_task_records_message_flow():
 
 # ── 11) 会话级模式切换：session_id 关联 + 每回合 turn 事件 ──
 def test_submit_with_session_id():
-    runner = FakeRunner([([], "完成")])
+    runner = FakeRunner([([], "🎯 目标已达成：完成")])
     loop = make_loop(runner)
     task_id = loop.submit("目标", session_id="sess-1", auto_start=False)
     task = loop.get_task(task_id)
@@ -269,7 +269,7 @@ def test_turn_event_emitted_per_round():
     bus = EventBus()
     events = []
     bus.subscribe("agent_loop.*", lambda e: events.append(e.event_type))
-    runner = FakeRunner([([], "完成")])
+    runner = FakeRunner([([], "🎯 目标已达成：完成")])
     loop = make_loop(runner, event_bus=bus)
     task_id = loop.submit("目标", session_id="sess-1", auto_start=False)
     loop.step()
@@ -281,7 +281,7 @@ def test_turn_event_emitted_per_round():
 def test_task_generates_handoff():
     runner = FakeRunner([
         ([{"name": "write_file", "arguments": '{"path": "x.py"}'}], ""),
-        ([], "完成：已写入 x.py"),
+        ([], "🎯 目标已达成：已写入 x.py"),
     ])
     loop = make_loop(runner)
     task_id = loop.submit("写文件", auto_start=False)
@@ -292,7 +292,7 @@ def test_task_generates_handoff():
     assert h["goal"] == "写文件"
     assert h["status"] == "completed"
     assert h["turns"] == 2
-    assert h["summary"] == "完成：已写入 x.py"
+    assert "已写入 x.py" in h["summary"]
     # artifacts 从 write_file 调用提取 path 断言
     assert any("x.py" in a for a in h["artifacts"])
     # decisions 含工具名
@@ -334,14 +334,14 @@ def test_loop_uses_session_context_when_available():
     assert len(ctx.appended) >= 1
     assert ctx.appended[0][0] == "sess-1"
     # 无 session_id 时保持独立上下文（兼容旧用法）
-    runner2 = FakeRunner([([], "ok")])
+    runner2 = FakeRunner([([], "🎯 目标已达成：ok")])
     loop2 = make_loop(runner2, session_context=ctx)
     tid2 = loop2.submit("独立任务", auto_start=False)
     loop2.step()
     assert runner2.calls[0][0]["content"] == "独立任务"
 
     # 无 session_id 时保持独立上下文（兼容旧用法）
-    runner2 = FakeRunner([([], "ok")])
+    runner2 = FakeRunner([([], "🎯 目标已达成：ok")])
     loop2 = make_loop(runner2, session_context=ctx)
     tid2 = loop2.submit("独立任务", auto_start=False)
     loop2.step()
@@ -434,7 +434,7 @@ def test_goal_reached_in_tool_arguments_stops():
 
 # ── 15) 轮次灵活：默认不限 + 运行中可调 ──
 def test_default_max_turns_unlimited():
-    loop = make_loop(FakeRunner([([], "完成")]))
+    loop = make_loop(FakeRunner([([], "🎯 目标已达成：完成")]))
     task_id = loop.submit("默认轮次", auto_start=False)
     task = loop.get_task(task_id)
     assert task.max_turns is None  # 默认不限（达成/时长停机）
@@ -467,3 +467,59 @@ def test_update_max_turns_runtime():
     # 已终态任务不可再调（ValueError）
     with pytest.raises(ValueError):
         loop.update_max_turns(task_id, 5)
+
+
+# ── 16) FIFO 消息队列（spec id=6）：pending_inputs 多条不覆盖 + 顺序消费 + PAUSED 可入队 ──
+def test_intervene_enqueues_multiple_no_override():
+    """连续 intervene 两条 → pending_inputs 长度 2，前一条不被覆盖（旧单条覆盖 bug）"""
+    runner = FakeRunner([([], "完成")])
+    loop = make_loop(runner)
+    task_id = loop.submit("队列任务", auto_start=False)
+    loop.intervene(task_id, "第一条指令")
+    loop.intervene(task_id, "第二条指令")
+    task = loop.get_task(task_id)
+    assert len(task.pending_inputs) == 2
+    assert task.pending_inputs[0] == "第一条指令"
+    assert task.pending_inputs[1] == "第二条指令"
+    # snapshot 暴露队列
+    snap = task.snapshot()
+    assert snap["pending_inputs"] == ["第一条指令", "第二条指令"]
+    assert snap["queue_len"] == 2
+
+
+def test_pending_inputs_consumed_fifo_order():
+    """FIFO：两回合消费两条，按入队顺序喂给模型（pop(0)）"""
+    runner = FakeRunner([([], "答1"), ([], "🎯 目标已达成：答2")])
+    loop = make_loop(runner)
+    task_id = loop.submit("队列消费", auto_start=False)
+    loop.intervene(task_id, "指令A")
+    loop.intervene(task_id, "指令B")
+    loop.step()
+    task = loop.get_task(task_id)
+    # 两条 user 指令都进入消息流，且顺序为 A → B
+    user_msgs = [m["content"] for m in task.messages if m["role"] == "user"]
+    assert "指令A" in user_msgs
+    assert "指令B" in user_msgs
+    assert user_msgs.index("指令A") < user_msgs.index("指令B")
+
+
+def test_intervene_allowed_when_paused():
+    """PAUSED 时允许入队（决策D2=A：RUNNING/HALTED/PAUSED 均可入队）"""
+    runner = FakeRunner([([], "完成")])
+    loop = make_loop(runner)
+    loop.pause()
+    task_id = loop.submit("暂停入队", auto_start=False)
+    # PAUSED 下不再抛 ValueError（旧行为 409）
+    task = loop.intervene(task_id, "暂停时插入")
+    assert task.pending_inputs == ["暂停时插入"]
+
+
+def test_intervene_rejected_when_terminal():
+    """终态（COMPLETED）仍拒绝入队（ValueError）"""
+    runner = FakeRunner([([], "🎯 目标已达成：最终")])
+    loop = make_loop(runner)
+    task_id = loop.submit("终态拒绝", auto_start=False)
+    loop.step()
+    assert loop.get_task(task_id).status == TaskStatus.COMPLETED
+    with pytest.raises(ValueError):
+        loop.intervene(task_id, "太迟了")
