@@ -10218,10 +10218,13 @@ function _stopLoopPolling() {
   }
 }
 
-// 自主模式提交（spec id=5）：loop 目标注入 agent 会话上下文（同一上下文迭代器），
-// agent 自身循环推进；注入后 agent 下一条消息自动带目标执行
+// 自主模式提交（方案A：注入 + 自动建 LoopTask 保障，spec id=4/5 + handoff/回审闭环）：
+// 1) loop-goal 注入目标到 agent 会话上下文（同一上下文迭代器）
+// 2) loop/submit 建 LoopTask(session_id) → 后台自主推进：防打断 + 达成判定 + handoff + macdev 回审
+// 解耦：注入失败不影响普通对话；保障任务创建失败仅降级提示（agent 仍自然推进）
 async function _submitLoopTask(goal) {
   const sid = _getAgentSessionId() || '';
+  // 1) 注入目标（spec id=5）
   try {
     const res = await fetch(API_BASE + '/api/agent/loop-goal', {
       method: 'POST',
@@ -10237,8 +10240,48 @@ async function _submitLoopTask(goal) {
     showToast('目标注入失败：' + (e.message || e), 'error');
     return;
   }
-  addAgentMessage('loop', goal, { loopKind: 'submitted', loopTaskId: '' });
-  showToast('⚡ Loop 目标已注入会话，agent 将自主循环推进（直接发消息或说"继续推进"开始）', 'success');
+  // 2) 建 LoopTask（保障层）
+  let taskId = null;
+  try {
+    const res = await fetch(API_BASE + '/api/loop/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: goal, session_id: sid }),
+    });
+    const data = await res.json();
+    taskId = data.task_id || null;
+  } catch (e) {
+    showToast('⚠️ 保障任务创建失败（目标已注入，agent 仍会自然推进）：' + (e.message || e), 'error');
+  }
+  addAgentMessage('loop', goal, { loopKind: 'submitted', loopTaskId: taskId || '' });
+  if (taskId) { _seenLoopTaskIds[taskId] = true; _seenLoopTasks[taskId] = 0; }
+  showToast(taskId
+    ? '⚡ Loop 目标已注入 + 保障任务已启动（防打断/达成判定/交接回审）'
+    : '⚡ Loop 目标已注入（保障任务未创建，agent 自然推进）', 'success');
+}
+
+// macdev 回审（交接第二轨）：验证 handoff artifacts 断言（对抗性，不采信模型自述）
+async function _runLoopAudit(taskId) {
+  if (!taskId) { showToast('⚠️ 无保障任务，无法回审（纯注入模式无 handoff）', 'error'); return; }
+  try {
+    const res = await fetch(API_BASE + '/api/loop/audit/' + encodeURIComponent(taskId), { method: 'POST' });
+    const data = await res.json();
+    if (!data || data.task_id === undefined) {
+      showToast('⚠️ 回审失败：' + ((data && data.detail) || '未知错误'), 'error');
+      return;
+    }
+    const verified = (data.verified || []).length;
+    const failed = (data.failed || []).length;
+    const skipped = (data.skipped || []).length;
+    const failedList = (data.failed || []).join('；') || '无';
+    showToast(
+      '🔍 macdev 回审：✅' + verified + ' / ❌' + failed + ' / ⏭' + skipped
+      + (failed ? '｜失败：' + failedList.slice(0, 120) : ''),
+      failed > 0 ? 'error' : 'success'
+    );
+  } catch (e) {
+    showToast('回审失败：' + (e.message || e), 'error');
+  }
 }
 
 // 轮询：拉取当前会话的 loop 任务，新任务/新回合追加到会话流（同流显示）
@@ -12326,9 +12369,13 @@ function _renderAgentMessageHtml(msg, mi) {
   if (msg.role === 'loop') {
     var _loopTid = msg.loopTaskId ? '<code style="font-size:10px;opacity:.8">' + escapeHtml(String(msg.loopTaskId).slice(0, 8)) + '</code>' : '';
     if (msg.loopKind === 'submitted') {
+      var _auditBtn = msg.loopTaskId
+        ? '<span class="lp-audit-btn" data-tid="' + escapeHtml(String(msg.loopTaskId))
+          + '" onclick="event.stopPropagation();_runLoopAudit(this.dataset.tid)" style="cursor:pointer;color:var(--accent);font-size:11px;border:1px solid var(--accent);border-radius:4px;padding:1px 6px;opacity:.85">🔍 回审</span>'
+        : '';
       rendered = '<div class="loop-submitted" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
         + '<span>⚡</span><span style="flex:1">已提交自主任务：<b>' + escapeHtml(msg.content || '') + '</b></span>'
-        + _loopTid + '</div>';
+        + _loopTid + _auditBtn + '</div>';
       return '<div class="agent-msg loop" data-index="' + mi + '" data-mid="' + _mid + '">' +
         '<div class="msg-role">⚡ 自主任务</div><div class="msg-content">' + rendered + '</div></div>';
     }
