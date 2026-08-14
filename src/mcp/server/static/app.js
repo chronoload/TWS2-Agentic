@@ -13932,63 +13932,84 @@ function _renderDiscoverList(preserveSel) {
     return;
   }
   let html = '';
-  // 搜索匹配 + 排序：名字命中排最前，其次描述命中；无关键词时保持原序
-  const rank = (name, desc) => {
-    if (!kw) return 0;
-    const n = ((name || '') + '').toLowerCase();
-    const d = ((desc || '') + '').toLowerCase();
-    if (n.includes(kw)) return 0; // 名字匹配 → 最前
-    if (d.includes(kw)) return 1; // 仅描述匹配 → 次之
-    return 2;                     // 不匹配 → 过滤
+  const groupHeader = (name, count) =>
+    `<div style="padding:5px 12px 2px;color:var(--fg-muted);font-weight:600;font-size:11px">${escapeHtml(name)} · ${count}</div>`;
+  const mru = (window._discoverMRU || (window._discoverMRU = createMRU({ storage: _discoverStorage(), key: 'discover-mru', max: 20 })));
+  const TYPE_ICONS = { skill: '⚡', mcp: '🔌', workflow: '⚙️', plugin: '🧩' };
+  // 单字符降级 includes（fuzzyMatch 词长≥2 会全空）
+  const includesKw = (name, desc) => !kw || ((name || '') + ' ' + (desc || '')).toLowerCase().includes(kw);
+  // 平铺 tab（skill/mcp/workflow/plugin）：fuzzy 排序分组 + MRU 置顶；渲染纯文本（无 mark 高亮）
+  const renderFlatTab = (items, type) => {
+    const raw = items.map((it) => ({ name: it.name, description: it.description || '', group: it.group || type, _raw: it }));
+    let groups;
+    if (!kw) {
+      const keys = mru.list();
+      const rankIdx = (it) => { const k = type + ':' + it.name; const i = keys.indexOf(k); return i < 0 ? 9999 : i; };
+      const sorted = raw.slice().sort((a, b) => rankIdx(a) - rankIdx(b));
+      const hit = sorted.filter((it) => rankIdx(it) < 9999);
+      const rest = sorted.filter((it) => rankIdx(it) >= 9999);
+      groups = [];
+      if (hit.length) groups.push({ group: '最近使用', items: hit.map((it) => ({ item: it, score: 0, ranges: null })) });
+      groups = groups.concat(rankAndGroup(rest, ''));
+    } else if (kw.length < 2) {
+      groups = rankAndGroup(raw.filter((it) => includesKw(it.name, it.description)), '');
+    } else {
+      groups = rankAndGroup(raw, kw);
+    }
+    groups.forEach((g) => {
+      if (!g.items || !g.items.length) return;
+      html += groupHeader(g.group, g.items.length);
+      g.items.forEach((s) => {
+        const t = {
+          type: type,
+          name: s.item.name,
+          description: s.item.description || '',
+          skillName: type === 'skill' ? s.item.name : '',
+          workflowId: type === 'workflow' ? (s.item.workflow_id || '') : '',
+        };
+        _discoverItems.push(t);
+        html += _discoverRow((TYPE_ICONS[type] || '') + ' ' + t.name, t.description || '', _discoverItems.length - 1);
+      });
+    });
+    if (!groups.length) html = '<div style="padding:14px;color:var(--fg-muted);text-align:center">无匹配项</div>';
   };
-  const rankFilter = (name, desc) => rank(name, desc) <= 1;
-  const rankSort = (a, b) => rank(a.name, a.description) - rank(b.name, b.description);
 
   if (_discoverTab === 'skill') {
-    const items = (_discoverData.skills || []).filter((s) => rankFilter(s.name, s.description)).sort(rankSort);
-    items.forEach((s) => {
-      _discoverItems.push({ type: 'skill', name: s.name, skillName: s.name, description: s.description || '' });
-      html += _discoverRow(`⚡ ${s.name}`, s.description || '', _discoverItems.length - 1);
-    });
-    if (!items.length) html = _discoverEmpty();
+    renderFlatTab(_discoverData.skills || [], 'skill');
   } else if (_discoverTab === 'tool') {
     const groups = _discoverData.tools || {};
     Object.entries(groups).forEach(([g, info]) => {
       if (!info || !info.count) return;
-      const tools = (info.tools || []).filter((t) => !kw || t.toLowerCase().includes(kw));
+      let tools = info.tools || [];
+      if (kw) tools = tools.filter((t) => (kw.length < 2 ? t.toLowerCase().includes(kw) : fuzzyMatch(kw, t)));
       if (!tools.length) return;
-      html += `<div style="padding:5px 12px 2px;color:var(--fg-muted);font-weight:600;font-size:11px">${escapeHtml(info.label || g)} · ${tools.length}</div>`;
+      html += groupHeader(info.label || g, tools.length);
       tools.forEach((t) => {
         _discoverItems.push({ type: 'tool', name: t });
-        html += _discoverRow(`🔧 ${t}`, '', _discoverItems.length - 1);
+        html += _discoverRow('🔧 ' + t, '', _discoverItems.length - 1);
       });
     });
-    if (!html) html = _discoverEmpty();
+    if (!html) html = '<div style="padding:14px;color:var(--fg-muted);text-align:center">无匹配项</div>';
   } else if (_discoverTab === 'mcp') {
-    const items = (_discoverData.mcp || []).filter((m) => rankFilter(m.name, m.description)).sort(rankSort);
-    items.forEach((m) => {
-      _discoverItems.push({ type: 'mcp', name: m.name, description: m.description || '' });
-      html += _discoverRow(`🔌 ${m.name}`, m.description || '', _discoverItems.length - 1);
-    });
-    if (!items.length) html = _discoverEmpty();
+    renderFlatTab(_discoverData.mcp || [], 'mcp');
   } else if (_discoverTab === 'workflow') {
-    const items = (_discoverData.workflows || []).filter((w) => rankFilter(w.name, w.description)).sort(rankSort);
-    items.forEach((w) => {
-      const sub = [w.description, w.version ? `v${w.version}` : ''].filter(Boolean).join(' · ');
-      _discoverItems.push({ type: 'workflow', name: w.name, workflowId: w.workflow_id || '', description: w.description || '' });
-      html += _discoverRow(`⚙️ ${w.name}`, sub, _discoverItems.length - 1);
-    });
-    if (!items.length) html = _discoverEmpty();
+    renderFlatTab(_discoverData.workflows || [], 'workflow');
   } else if (_discoverTab === 'plugin') {
-    const items = (_discoverData.plugins || []).filter((p) => rankFilter(p.name, p.description)).sort(rankSort);
-    items.forEach((p) => {
-      const sub = p.description || '';
-      _discoverItems.push({ type: 'plugin', name: p.name, description: p.description || '' });
-      html += _discoverRow(`🧩 ${p.name}`, sub, _discoverItems.length - 1);
-    });
-    if (!items.length) html = _discoverEmpty();
+    renderFlatTab(_discoverData.plugins || [], 'plugin');
+  } else if (_discoverTab === 'loop') {
+    // AgentLoop 长程任务面板（复用 loop-panel.js；挂载见 _mountLoopPanelInDiscover）
+    html = '<div class="lp-root" style="padding:8px 12px">'
+      + '<div class="lp-form" style="display:flex;gap:6px;margin-bottom:8px">'
+      + '<input id="loopGoalInput" type="text" placeholder="输入长程任务目标…（提交后后台自主执行）" '
+      + 'style="flex:1;padding:4px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:11px;outline:none"/>'
+      + '<button id="loopSubmitBtn" style="padding:4px 10px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px">提交</button>'
+      + '</div>'
+      + '<div id="loopListWrap"></div>'
+      + '<div style="color:var(--fg-muted);font-size:10px;padding:6px 2px 0">长程任务后台自主执行 · 完成✅/挂起⏸️ 自动通知 · 轮询 /api/loop/state</div>'
+      + '</div>';
   }
   box.innerHTML = html;
+  if (_discoverTab === 'loop') _mountLoopPanelInDiscover();
   // 选中态恢复（键盘导航后保留高亮）
   if (_discoverSelIdx >= 0 && _discoverSelIdx < _discoverItems.length) {
     const selEl = box.querySelector(`.discover-item[data-idx="${_discoverSelIdx}"]`);
@@ -14024,6 +14045,17 @@ function _discoverPick(idx, send) {
   if (send) sendAgentMessage();
 }
 
+// 记录最近使用（MRU，discover-utils）
+function _discoverMruAdd(it) {
+  if (typeof createMRU === 'undefined' || !it) return;
+  const mru = (window._discoverMRU || (window._discoverMRU = createMRU({ storage: _discoverStorage(), key: 'discover-mru', max: 20 })));
+  mru.add((it.type || 'x') + ':' + (it.name || ''));
+}
+
+function _discoverStorage() {
+  try { return window.localStorage; } catch (e) { return null; }
+}
+
 // ─── 命令面板式发现（所有 tab 统一：↑↓选择 / ←→切tab / 回车注入）────────
 let _pendingInjectId = 0;
 let _discoverSelIdx = -1;   // 当前选中行索引
@@ -14032,6 +14064,7 @@ let _discoverSelIdx = -1;   // 当前选中行索引
 function _injectItem(idx) {
   const it = _discoverItems[idx];
   if (!it) return;
+  _discoverMruAdd(it);
   const key = it.type + ':' + (it.skillName || it.name);
   if (state.pendingSkillInjects.some(p => p.key === key)) {
     showToast(`「${it.name}」已在待注入队列`, 'info');
@@ -14065,18 +14098,55 @@ function _discoverKeydown(e) {
     case 'Enter':
       if (_discoverSelIdx >= 0) _injectItem(_discoverSelIdx);
       e.preventDefault(); break;
+    case 'Tab':
+      if (_discoverSelIdx >= 0) _injectItem(_discoverSelIdx);
+      e.preventDefault(); break;
+    case 'Home':
+      _discoverSelIdx = 0; _renderDiscoverList(true); e.preventDefault(); break;
+    case 'End':
+      _discoverSelIdx = _discoverItems.length - 1; _renderDiscoverList(true); e.preventDefault(); break;
     case 'Escape':
       _hideDiscoverPanel(); e.preventDefault(); break;
   }
 }
 
 function _discoverSwitchTabDelta(delta) {
-  const order = ['skill', 'tool', 'mcp', 'workflow', 'plugin'];
+  const order = ['skill', 'tool', 'mcp', 'workflow', 'plugin', 'loop'];
   const cur = order.indexOf(_discoverTab);
   const next = order[(cur + delta + order.length) % order.length];
   _discoverSelIdx = -1;
   _switchDiscoverTab(next);
   document.getElementById('discoverSearch').focus();
+}
+
+function _mountLoopPanelInDiscover() {
+  // 在发现面板的 #loopListWrap 挂载 AgentLoop 面板（幂等：已挂载则仅刷新）
+  if (typeof createLoopPanel === 'undefined') return;
+  const wrap = document.getElementById('loopListWrap');
+  if (!wrap) return;
+  if (window._loopPanelInDiscover) {
+    try { window._loopPanelInDiscover.refresh(); } catch (e) {}
+    return;
+  }
+  const sched = (typeof createFrontendScheduler !== 'undefined') ? createFrontendScheduler() : null;
+  const panel = createLoopPanel({
+    container: wrap,
+    scheduler: sched,
+    stateUrl: '/api/loop/state',
+    submitUrl: '/api/loop/submit',
+    intervalMs: 3000,
+  });
+  window._loopPanelInDiscover = panel;
+  panel.refresh();
+  const btn = document.getElementById('loopSubmitBtn');
+  const input = document.getElementById('loopGoalInput');
+  const doSubmit = function () {
+    const goal = (input && input.value || '').trim();
+    if (!goal) return;
+    panel.submit(goal).then(function () { if (input) input.value = ''; panel.refresh(); });
+  };
+  if (btn) btn.addEventListener('click', doSubmit);
+  if (input) input.addEventListener('keydown', function (e) { if (e.key === 'Enter') doSubmit(); });
 }
 
 // 渲染待注入队列（悬浮预览条：技能/工具/MCP/工作流/插件 chips + 移除）
@@ -19622,7 +19692,8 @@ function applyCustomThemeCss(theme) {
 
 function applyBaseTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
-  document.getElementById('vditorContentTheme').href = isLightTheme(theme)
+  var _vct = document.getElementById('vditorContentTheme');
+  if (_vct) _vct.href = isLightTheme(theme)
     ? __VDITOR_CDN + '/dist/css/content-theme/light.css'
     : __VDITOR_CDN + '/dist/css/content-theme/dark.css';
   applyCustomThemeCss(theme);
@@ -19649,7 +19720,8 @@ function refreshVditorInstanceThemes() {
   for (var k in state) {
     if (/^paneVditor_/.test(k)) trySet(state[k]);
   }
-  trySet(slidesState.vditor);
+  // slidesState 定义在文件后部（22181 行），initOnLoad 阶段可能尚未初始化（var 提升为 undefined）→ 需存在性保护
+  trySet((typeof slidesState !== 'undefined' && slidesState) ? slidesState.vditor : null);
   // 协同编辑器实例（含 content-theme link 切换）
   if (window.CollabEditor && typeof window.CollabEditor.refreshThemes === 'function') {
     try { window.CollabEditor.refreshThemes(); } catch (e) {}
@@ -19706,7 +19778,8 @@ function toggleGradientTheme() {
     stopGradientTheme();
     document.documentElement.setAttribute('data-theme', 'gradient');
     startGradientTheme();
-    document.getElementById('vditorContentTheme').href = __VDITOR_CDN + '/dist/css/content-theme/dark.css';
+    var _vct2 = document.getElementById('vditorContentTheme');
+    if (_vct2) _vct2.href = __VDITOR_CDN + '/dist/css/content-theme/dark.css';
     applyCustomThemeCss('gradient');
     highlightThemeMenu('gradient');
   } else {
@@ -25623,6 +25696,7 @@ function _renderMdInto(el, content, options) {
 
 // 主题切换时重新渲染所有已渲染的 markdown 容器
 function _rerenderMdOnThemeChange() {
+  if (!_mdRenderedContainers || !_mdRenderedContainers.length) return; // 未初始化/无容器则跳过
   var containers = _mdRenderedContainers.slice();
   _mdRenderedContainers = [];
   containers.forEach(function(info) {

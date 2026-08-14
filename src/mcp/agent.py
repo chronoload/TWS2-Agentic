@@ -1131,7 +1131,10 @@ class Agent:
                 original_count = len(self.messages)
                 compacted, did_compact = auto_compact(self.messages, self.config.model_id or "gpt-4o", context_window_override=self.model_context_window, force=True)
                 if did_compact:
-                    self.messages = compacted
+                    # 双保险：压缩后再次 sanitize（tool 配对修复 + 空消息清理），
+                    # 确保发给 API 的消息序列结构合法（auto_compact 已按轮分组保证
+                    # user/assistant 交替，sanitize 兜底 tool_calls/tool 配对）
+                    self.messages = sanitize_messages(compacted)
                 compacted_count = len(self.messages)
                 removed = original_count - compacted_count
                 logger.info(

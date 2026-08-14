@@ -3,12 +3,22 @@
 20260814_Agent-分屏-pane-重构-C-kanban-式,Agent 分屏 pane 重构（C+kanban 式）,open,2026-08-14 02:36:16,2,实现 Agent 分屏 pane（方案C+kanban）,done,,,,
 20260814_Agent-分屏-pane-重构-C-kanban-式,Agent 分屏 pane 重构（C+kanban 式）,open,2026-08-14 02:36:16,3,2.0 升级：模式切换+一比一复刻+看板式横向滚动,done,,,,
 20260814_Agent-分屏-pane-重构-C-kanban-式,Agent 分屏 pane 重构（C+kanban 式）,open,2026-08-14 02:36:16,4,2.1 修复：单实例去污染+工具卡片复刻+嵌套看板,done,,,,
+20260814_AgentLoop-自主循环-前端定时任务,AgentLoop 自主循环 + 前端定时任务,open,2026-08-14 17:34:37,14,T1(P0) AgentLoop 核心: LoopTask + 状态机 + queue 消息泵 + 串行FIFO + 完成语义,done,1,1,T1红: 写 AgentLoop 失败测试(确定性/完成语义/状态机/FIFO) 并确认 FAIL,done
+20260814_AgentLoop-自主循环-前端定时任务,AgentLoop 自主循环 + 前端定时任务,open,2026-08-14 17:34:37,14,T1(P0) AgentLoop 核心: LoopTask + 状态机 + queue 消息泵 + 串行FIFO + 完成语义,done,2,2,T1绿: 实现 mcp/harness/loop.py (AgentLoop/LoopTask/TaskStatus/状态机/queue消息泵) 9 测试通过,done
+20260814_AgentLoop-自主循环-前端定时任务,AgentLoop 自主循环 + 前端定时任务,open,2026-08-14 17:34:37,15,T2(P1) 防失控 + automation 初始化接线,done,3,1,T2红绿: 预算强制停(max_turns/时长)+EventBus广播+middleware横切测试 红(3失败)→绿(9passed); 修复 ws2_tools 3处 ..automation 越界导入 + _get_engine 幂等start(),done
+20260814_AgentLoop-自主循环-前端定时任务,AgentLoop 自主循环 + 前端定时任务,open,2026-08-14 17:34:37,16,T3(P2) FrontendScheduler 前端定时任务框架 + pollState 轮询器,done,4,1,T3红绿: FrontendScheduler 前端定时框架 + pollState 轮询器 测试(假timer) 红(模块不存在)→绿(5PASS); harness/__init__ 导出 AgentLoop,done
+20260814_AgentLoop-面板接线-T4,AgentLoop 面板接线 T4,open,2026-08-14 17:48:16,17,T4a 后端 ws2_loop_* 工具,done,5,1,T4a红绿: ws2_loop_submit/list/control 工具 + AgentLoop.set_runner + get_ws2_tools 注册; 红(工具不存在)→绿(13passed 含回归),done
+20260814_AgentLoop-面板接线-T4,AgentLoop 面板接线 T4,open,2026-08-14 17:48:16,18,T4b FastAPI /api/loop/* 端点,done,6,1,T4b红绿: mcp/server/loop_api.py (state/submit/control 三端点) + app.py include_router + PUBLIC_ENDPOINTS; 红(模块不存在)→绿(4passed + 挂载验证3端点),done
+20260814_AgentLoop-面板接线-T4,AgentLoop 面板接线 T4,open,2026-08-14 17:48:16,19,T4c 前端 loop-panel 组件,done,7,1,T4c红绿: loop-panel.js 组件(renderTasks/statusBadge纯函数 + createLoopPanel mount/refresh/submit) + loop-panel-init.js 引导 + index.html 引入; 红(模块不存在)→绿(9node PASS),done
+20260814_AgentLoop-面板接线-T4,AgentLoop 面板接线 T4,open,2026-08-14 17:48:16,19,T4c 前端 loop-panel 组件,done,8,2,T4c调整: 按用户指示改为集成进发现面板(agentDiscoverPanel) - 加 Loop tab(index.html) + _renderDiscoverList loop分支 + _mountLoopPanelInDiscover(app.js) + loop-panel-init 兜底化; 移除独立容器方案; 全量验证绿,done
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,5,T3 PLAN.md 更新,done,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,6,T2 skills/ 14 个子技能文档,done,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,7,T1 SKILL.md 流程编排重写,done,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,8,T5 验证+提交推送,done,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,9,T4 publish.py 更新,done,,,,
-20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,10,T1 建 skills/langdriven/SKILL.md,open,,,,
-20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,11,T2 注册 langdriven_engine_v1 workflow,open,,,,
-20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,12,T4 验证+提交+同步私有部署,open,,,,
-20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,13,T3 注册 langdriven teammate,open,,,,
+20260814_指令面板完善-命令总线化,指令面板完善-命令总线化,open,2026-08-14 18:01:17,20,T5a discover-utils 纯函数模块,done,9,1,T5a红绿: discover-utils.js(fuzzyMatch/highlightHtml/rankAndGroup/createMRU) 红(模块不存在)→绿(6PASS); 修正测试1处ranges位置,done
+20260814_指令面板完善-命令总线化,指令面板完善-命令总线化,open,2026-08-14 18:01:17,21,T5b app.js 指令面板增量接入,done,10,1,T5b红绿: app.js 接入(模糊搜索+高亮+分组徽章+MRU置顶+详情预览+空状态引导+Tab/Home/End+loop纳入切tab); index.html 加 discover-utils.js 前置加载 + discoverPreview 条; 全量验证绿,done
+20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,10,T1 建 skills/langdriven/SKILL.md,done,,,,
+20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,11,T2 注册 langdriven_engine_v1 workflow,done,,,,
+20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,12,T4 验证+提交+同步私有部署,done,,,,
+20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,13,T3 注册 langdriven teammate,done,,,,

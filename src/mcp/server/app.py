@@ -461,6 +461,7 @@ PUBLIC_ENDPOINTS = {
     "/api/system/sourceAuth",
     "/api/system/stats",
     "/api/system/version",
+    "/api/loop/state",
 }
 
 def _get_all_auth_codes(config: dict) -> set:
@@ -648,6 +649,13 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         description="TS2 本地文件同步分发服务（参考思源笔记架构）",
         version="1.0.0",
     )
+
+    # ─── AgentLoop 长程任务 API ─────────────────────────────
+    try:
+        from .loop_api import router as loop_router
+        app.include_router(loop_router)
+    except Exception:
+        pass  # loop_api 缺失时不阻塞服务启动
 
     # ─── 自定义 CORS 中间件 ──────────────────────────────
     # 反射 Origin + credentials=True，methods/headers 用显式值（w3c 规范要求）
@@ -1094,7 +1102,10 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     async def index():
         index_file = static_dir / "index.html"
         if index_file.exists():
-            return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
+            return HTMLResponse(
+                content=index_file.read_text(encoding="utf-8"),
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
         return HTMLResponse(content="<h1>TS2 Server</h1><p>Frontend not found</p>")
 
     # ─── 系统 API ────────────────────────────────────────────

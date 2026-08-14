@@ -2828,6 +2828,10 @@ def get_ws2_tools(
         CreateAutomationTaskTool(**common_kwargs),
         ToggleAutomationTaskTool(**common_kwargs),
         RunAutomationTaskTool(**common_kwargs),
+        # AgentLoop 长程任务工具
+        SubmitLoopTaskTool(**common_kwargs),
+        LoopTaskListTool(**common_kwargs),
+        LoopControlTool(**common_kwargs),
         # 课程系统工具
         GetCourseTimetableTool(**common_kwargs),
         AddCourseToTimetableTool(**common_kwargs),
@@ -2901,14 +2905,129 @@ class AutomationBaseTool(WS2BaseTool):
         self._event_bus = event_bus
 
     def _get_engine(self):
-        """获取自动化引擎"""
+        """获取自动化引擎（懒加载 + 幂等启动）"""
         if self._automation_engine:
             return self._automation_engine
         try:
-            from ..automation.engine import get_automation_engine
-            return get_automation_engine()
+            from .automation.engine import get_automation_engine
+            engine = get_automation_engine()
+            engine.start()  # 幂等：确保调度线程已启动
+            return engine
         except Exception:
             return None
+
+
+class AgentLoopBaseTool(WS2BaseTool):
+    """AgentLoop 工具基类（懒加载 loop + runner 注入）
+
+    runner 注入：loop 无 runner 时，尝试用 model_selector 装配真实 HarnessRunner；
+    无 LLM 环境则保持 runner=None（提交任务会 FAILED: runner 未配置），可后续注入。
+    """
+
+    def __init__(self, ws2_system=None, project_manager=None, task_board_manager=None, base_dir=None,
+                 bookmark_manager=None, loop_engine=None):
+        super().__init__(ws2_system, project_manager, task_board_manager, base_dir, bookmark_manager)
+        self._loop_engine = loop_engine
+
+    def _get_loop(self):
+        if self._loop_engine:
+            return self._loop_engine
+        from .harness.loop import get_agent_loop
+        loop = get_agent_loop()
+        if loop.runner is None:
+            try:
+                from .harness.runner import HarnessRunner
+                from .model_selector import get_model_selector
+                loop.set_runner(
+                    HarnessRunner(use_model_selector=True,
+                                  _model_selector=get_model_selector())
+                )
+            except Exception:
+                pass
+        return loop
+
+
+class SubmitLoopTaskTool(AgentLoopBaseTool):
+    name = "ws2_loop_submit"
+    category = "ws2_loop"
+    keywords = ["ws2", "loop", "长程任务", "自主", "agent loop"]
+    description = "提交长程任务给 AgentLoop 自主执行（提交即返回 task_id，后台自动跑完，完成/挂起会广播）"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "goal": {"type": "string", "description": "任务目标（自然语言指令）"},
+            "max_turns": {"type": "integer", "description": "最大回合数（可选，默认 30）"},
+        },
+        "required": ["goal"],
+    }
+
+    def execute(self, goal: str, max_turns: int = None) -> str:
+        loop = self._get_loop()
+        if not loop:
+            return self._make_result(False, {}, "AgentLoop 未初始化")
+        try:
+            task_id = loop.submit(goal=goal, max_turns=max_turns)
+            return self._make_result(True, {"task_id": task_id, "goal": goal})
+        except Exception as e:
+            return self._make_result(False, {}, f"{type(e).__name__}: {e}")
+
+
+class LoopTaskListTool(AgentLoopBaseTool):
+    name = "ws2_loop_list"
+    category = "ws2_loop"
+    keywords = ["ws2", "loop", "任务列表", "状态"]
+    description = "列出 AgentLoop 的长程任务（可按状态过滤）"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "description": "状态过滤: pending/running/completed/failed/halted（可选）"},
+        },
+    }
+
+    def execute(self, status: str = "") -> str:
+        loop = self._get_loop()
+        if not loop:
+            return self._make_result(False, {}, "AgentLoop 未初始化")
+        try:
+            from .harness.loop import TaskStatus
+            tasks = loop.list_tasks(status=TaskStatus(status) if status else None)
+            return self._make_result(True, {
+                "loop_status": loop.status.value,
+                "tasks": [t.snapshot() for t in tasks],
+            })
+        except Exception as e:
+            return self._make_result(False, {}, f"{type(e).__name__}: {e}")
+
+
+class LoopControlTool(AgentLoopBaseTool):
+    name = "ws2_loop_control"
+    category = "ws2_loop"
+    keywords = ["ws2", "loop", "暂停", "恢复", "停止", "启动"]
+    description = "控制 AgentLoop 生命周期: start/pause/resume/stop"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["start", "pause", "resume", "stop"],
+                       "description": "控制动作"},
+        },
+        "required": ["action"],
+    }
+
+    def execute(self, action: str) -> str:
+        loop = self._get_loop()
+        if not loop:
+            return self._make_result(False, {}, "AgentLoop 未初始化")
+        if action == "start":
+            loop.start()
+        elif action == "pause":
+            loop.pause()
+        elif action == "resume":
+            loop.resume()
+        elif action == "stop":
+            loop.stop()
+        else:
+            return self._make_result(False, {}, f"未知动作: {action}")
+        return self._make_result(True, {"loop_status": loop.status.value})
 
 
 class ListAutomationTasksTool(AutomationBaseTool):
@@ -3106,7 +3225,7 @@ class AddCourseToTimetableTool(WS2BaseTool):
             return self._make_result(False, {}, "课程系统未初始化")
 
         try:
-            from ..automation.course_simulation import TimetableSlot, PERIODS
+            from .automation.course_simulation import TimetableSlot, PERIODS
 
             period_idx = 0
             for idx, p in enumerate(PERIODS):
@@ -4083,7 +4202,7 @@ class CreateTimetableTool(WS2BaseTool):
             return self._make_result(False, {}, "课程系统未初始化")
 
         try:
-            from ..automation.course_simulation import Timetable
+            from .automation.course_simulation import Timetable
             import uuid
             
             engine = self.ws2_system._course_sim_engine

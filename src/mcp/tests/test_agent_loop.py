@@ -1,0 +1,206 @@
+# -*- coding: utf-8 -*-
+"""AgentLoop T1(P0) 测试：loop 确定性 + 完成语义 + 状态机 + 串行 FIFO
+
+用 FakeRunner 替代真实 HarnessRunner（确定性脚本驱动），
+使 AgentLoop 核心逻辑（step）可同步、可断言地测试。
+"""
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from mcp.harness.loop import AgentLoop, LoopStatus, TaskStatus  # noqa: E402
+from mcp.harness.turn import TurnResult, TurnStatus  # noqa: E402
+
+
+class FakeRunner:
+    """确定性 fake runner：按脚本依次返回预定义回合结果。
+
+    每个脚本项 = (tool_calls, content)；调用顺序即回合顺序。
+    """
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []  # 每次 run_turn 收到的 messages
+
+    def run_turn(self, messages, tools=None, session_id=None):
+        self.calls.append(list(messages))
+        tool_calls, content = self.script.pop(0)
+        return TurnResult(
+            id=f"turn-{len(self.calls)}",
+            status=TurnStatus.COMPLETED,
+            content=content,
+            tool_calls=list(tool_calls),
+        )
+
+
+def make_loop(runner, **kw):
+    return AgentLoop(runner=runner, **kw)
+
+
+# ── 1) 完成语义：一回合无 tool_calls → completed, turn_count=1 ──
+def test_task_completes_when_no_tool_calls():
+    runner = FakeRunner([([], "最终答案")])
+    loop = make_loop(runner)
+    task_id = loop.submit("计算 1+1")
+    assert loop.step() == task_id
+    task = loop.get_task(task_id)
+    assert task.status == TaskStatus.COMPLETED
+    assert task.result == "最终答案"
+    assert task.turn_count == 1
+    assert len(runner.calls) == 1
+
+
+# ── 2) 多回合：先 tool_calls 后无 tool_calls → completed, turn_count=2 ──
+def test_task_runs_multiple_turns_until_done():
+    runner = FakeRunner(
+        [
+            ([{"name": "calculate", "arguments": "1+1"}], ""),
+            ([], "结果是 2"),
+        ]
+    )
+    loop = make_loop(runner)
+    task_id = loop.submit("算一下")
+    assert loop.step() == task_id
+    task = loop.get_task(task_id)
+    assert task.status == TaskStatus.COMPLETED
+    assert task.turn_count == 2
+    # 第二轮 messages 应包含 assistant 与 tool 回合（历史被拼接）
+    assert len(runner.calls[1]) >= 3
+
+
+# ── 3) 串行 FIFO：先提交先完成 ──
+def test_fifo_order():
+    runner = FakeRunner([([], "A"), ([], "B")])
+    loop = make_loop(runner)
+    id_a = loop.submit("任务A")
+    id_b = loop.submit("任务B")
+    assert loop.step() == id_a
+    assert loop.get_task(id_a).status == TaskStatus.COMPLETED
+    assert loop.get_task(id_b).status == TaskStatus.PENDING
+    assert loop.step() == id_b
+    assert loop.get_task(id_b).status == TaskStatus.COMPLETED
+
+
+# ── 4) 状态机：paused 不 drain，resume 恢复 ──
+def test_pause_resume():
+    runner = FakeRunner([([], "x")])
+    loop = make_loop(runner)
+    loop.pause()
+    task_id = loop.submit("t")
+    assert loop.step() is None  # paused 时 step 不处理
+    assert loop.get_task(task_id).status == TaskStatus.PENDING
+    loop.resume()
+    assert loop.step() == task_id
+    assert loop.get_task(task_id).status == TaskStatus.COMPLETED
+
+
+# ── 5) 停止：stop 后 step 不再处理 ──
+def test_stop_halts_processing():
+    runner = FakeRunner([([], "x")])
+    loop = make_loop(runner)
+    loop.start()
+    try:
+        loop.stop()
+        task_id = loop.submit("t2")
+        assert loop.step() is None  # stopped 后不处理
+        assert loop.get_task(task_id).status == TaskStatus.PENDING
+    finally:
+        loop.stop()
+
+
+# ══════════════ T2(P1): 防失控 + 广播 + middleware 横切 ══════════════
+
+class InfiniteToolRunner:
+    """永不自然完成：每回合都返回 tool_calls，用于预算测试"""
+
+    def run_turn(self, messages, tools=None, session_id=None):
+        return TurnResult(
+            id="t", status=TurnStatus.COMPLETED, content="",
+            tool_calls=[{"name": "loop", "arguments": "{}"}],
+        )
+
+
+# ── 6) max_turns 预算：用尽 → HALTED ──
+def test_max_turns_budget_halted():
+    runner = InfiniteToolRunner()
+    loop = make_loop(runner, max_turns=3)
+    task_id = loop.submit("循环任务", max_turns=3)
+    assert loop.step() == task_id
+    task = loop.get_task(task_id)
+    assert task.status == TaskStatus.HALTED
+    assert task.turn_count == 3
+    assert "max_turns" in (task.error or "")
+
+
+# ── 7) 时长预算：max_duration 超时 → HALTED ──
+def test_max_duration_budget_halted():
+    class SlowRunner:
+        def run_turn(self, messages, tools=None, session_id=None):
+            time.sleep(0.05)
+            return TurnResult(
+                id="t", status=TurnStatus.COMPLETED, content="",
+                tool_calls=[{"name": "slow", "arguments": "{}"}],
+            )
+
+    loop = make_loop(SlowRunner(), max_turns=100, max_duration_seconds=0.08)
+    task_id = loop.submit("慢任务", max_turns=100)
+    assert loop.step() == task_id
+    task = loop.get_task(task_id)
+    assert task.status == TaskStatus.HALTED
+    assert "max_duration" in (task.error or "")
+
+
+# ── 8) EventBus 广播：started / completed / halted ──
+def test_event_broadcast_completed_and_halted():
+    from mcp.automation.event_bus import EventBus
+
+    bus = EventBus()
+    events = []
+    bus.subscribe("agent_loop.*", lambda e: events.append(e.event_type))
+
+    loop = make_loop(FakeRunner([([], "ok")]), event_bus=bus)
+    loop.submit("任务")
+    loop.step()
+    assert "agent_loop.task_started" in events
+    assert "agent_loop.task_completed" in events
+
+    events.clear()
+    loop2 = make_loop(InfiniteToolRunner(), max_turns=2, event_bus=bus)
+    loop2.submit("任务2", max_turns=2)
+    loop2.step()
+    assert "agent_loop.task_halted" in events
+
+
+# ── 9) MiddlewareChain 横切被调用 ──
+def test_middleware_chain_invoked():
+    from mcp.middleware.base import AgentMiddleware, MiddlewareResult
+    from mcp.middleware.chain import MiddlewareChain
+
+    class CountingMW(AgentMiddleware):
+        name = "counting"
+        order = 1
+
+        def __init__(self):
+            self.before = 0
+            self.after = 0
+
+        def before_agent(self, messages, context):
+            self.before += 1
+            return MiddlewareResult()
+
+        def after_agent(self, messages, context):
+            self.after += 1
+            return MiddlewareResult()
+
+    mw = CountingMW()
+    chain = MiddlewareChain()
+    chain.add(mw)
+    loop = make_loop(FakeRunner([([], "x")]), middleware_chain=chain)
+    loop.submit("m")
+    loop.step()
+    assert mw.before >= 1
+    assert mw.after >= 1

@@ -61,6 +61,7 @@ function __fallbackLink(el, urls) {
 <script>
 // 立即应用主题并加载对应的 content-theme CSS（本地优先 → CDN fallback）
 (function() {
+  try {
   var savedTheme = localStorage.getItem('ts2_static_theme') || 'dark';
   document.documentElement.setAttribute('data-theme', savedTheme);
   var link = document.createElement('link');
@@ -89,6 +90,7 @@ function __fallbackLink(el, urls) {
     }
   };
   document.head.appendChild(link);
+  } catch (e) { console.warn('[theme] 内联主题初始化失败，降级：', e); }
 })();
 </script>
 <link rel="stylesheet" href="/static/xterm.min.css" data-name="opencode-xterm">
@@ -682,6 +684,7 @@ function __fallbackLink(el, urls) {
             <div class="discover-tab" data-tab="mcp" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">MCP</div>
             <div class="discover-tab" data-tab="workflow" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">Workflow</div>
             <div class="discover-tab" data-tab="plugin" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">Plugin</div>
+            <div class="discover-tab" data-tab="loop" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent" title="AgentLoop 长程任务">Loop</div>
           </div>
           <div id="discoverList" style="overflow-y:auto;max-height:calc(70vh - 80px);padding:6px 0"></div>
         </div>
@@ -1870,16 +1873,21 @@ function __fallbackLink(el, urls) {
   <div style="font-size:13px;opacity:0.3;position:absolute;bottom:40px">点击任意位置跳过</div>
 </div>
 
-<script id="vditorScriptTag" src="/static/vditor/index.min.js" defer
+<script id="vditorScriptTag" src="/static/vditor/dist/index.min.js" defer
   onerror="__fallbackScript(event.target,['https://unpkg.com/vditor@3.10.7/dist/index.min.js','https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js'])"></script>
 <script src="/static/cytoscape.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js','https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js'])"></script>
 <script src="/static/autosave-scheduler.js"></script>
  <script src="/static/rmd-chunk.js"></script>
 <script src="/static/editor-chunks.js"></script>
 <script src="/static/theme/manifest.js"></script>
-<script src="/static/app.js?v=tc24"></script>
+<script src="/static/discover-utils.js?v=1"></script>
+<script src="/static/app.js?v=tc29"></script>
 <script src="/static/office.js"></script>
 <script type="module" src="/static/collab-client.js"></script>
 <script type="module" src="/static/collab-editor.js"></script>
+<!-- AgentLoop 长程任务面板 -->
+<script src="/static/frontend-scheduler.js?v=1"></script>
+<script src="/static/loop-panel.js?v=1"></script>
+<script src="/static/loop-panel-init.js?v=1"></script>
 </body>
 </html>
