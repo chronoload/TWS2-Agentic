@@ -10182,7 +10182,7 @@ function _initAgentLoopMode() {
   function render() {
     if (!sel) return;
     if (_agentLoopMode) {
-      if (input) input.placeholder = '输入自主任务目标… 后台执行，回合与对话同流显示（可随时切回普通对话）';
+      if (input) input.placeholder = '输入自主任务目标… 注入会话，agent 自主循环推进（可随时切回普通对话）';
     } else {
       if (input) input.placeholder = '输入消息... (可粘贴/拖拽图片或视频，右键呼出方法菜单，输入 / 唤醒技能发现)';
     }
@@ -10190,7 +10190,8 @@ function _initAgentLoopMode() {
   // 初始值对齐（普通对话）
   if (sel) sel.value = _agentLoopMode ? 'loop' : 'normal';
   render();
-  _startLoopPolling();
+  // 解耦：默认普通对话，仅自主模式才启动 loop 轮询
+  if (_agentLoopMode) _startLoopPolling();
 }
 
 // 门控面板「对话模式」切换（onchange）：普通对话 ↔ 自主 loop
@@ -10198,35 +10199,54 @@ window.setAgentLoopMode = function (value) {
   _agentLoopMode = (value === 'loop');
   const input = document.getElementById('agentInput');
   if (input) input.placeholder = _agentLoopMode
-    ? '输入自主任务目标… 后台执行，回合与对话同流显示（可随时切回普通对话）'
+    ? '输入自主任务目标… 注入会话，agent 自主循环推进（可随时切回普通对话）'
     : '输入消息... (可粘贴/拖拽图片或视频，右键呼出方法菜单，输入 / 唤醒技能发现)';
+  // 解耦：自主模式启动轮询（同流追加），普通对话停止轮询并清残留（零 loop 流量/零干扰）
+  if (_agentLoopMode) {
+    _startLoopPolling();
+  } else {
+    _stopLoopPolling();
+    _seenLoopTasks = {};
+    _seenLoopTaskIds = {};
+  }
 };
 
-// 自主模式提交：POST /api/loop/submit {goal, session_id} → 流中插入「⚡ 已提交自主任务」卡片
+function _stopLoopPolling() {
+  if (_agentLoopPollTimer) {
+    clearInterval(_agentLoopPollTimer);
+    _agentLoopPollTimer = null;
+  }
+}
+
+// 自主模式提交（spec id=5）：loop 目标注入 agent 会话上下文（同一上下文迭代器），
+// agent 自身循环推进；注入后 agent 下一条消息自动带目标执行
 async function _submitLoopTask(goal) {
   const sid = _getAgentSessionId() || '';
-  let taskId = null;
   try {
-    const res = await fetch(API_BASE + '/api/loop/submit', {
+    const res = await fetch(API_BASE + '/api/agent/loop-goal', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ goal: goal, session_id: sid }),
     });
     const data = await res.json();
-    taskId = data.task_id || null;
+    if (!data || data.code !== 0) {
+      showToast('⚠️ 目标注入失败：' + ((data && data.msg) || '未知错误'), 'error');
+      return;
+    }
   } catch (e) {
-    showToast('自主任务提交失败：' + (e.message || e), 'error');
+    showToast('目标注入失败：' + (e.message || e), 'error');
     return;
   }
-  addAgentMessage('loop', goal, { loopKind: 'submitted', loopTaskId: taskId || '' });
-  if (taskId) { _seenLoopTaskIds[taskId] = true; _seenLoopTasks[taskId] = 0; }
-  showToast('⚡ 已提交自主任务' + (taskId ? '（' + taskId + '）' : ''), 'success');
+  addAgentMessage('loop', goal, { loopKind: 'submitted', loopTaskId: '' });
+  showToast('⚡ Loop 目标已注入会话，agent 将自主循环推进（直接发消息或说"继续推进"开始）', 'success');
 }
 
 // 轮询：拉取当前会话的 loop 任务，新任务/新回合追加到会话流（同流显示）
 function _startLoopPolling() {
   if (_agentLoopPollTimer) return;
   _agentLoopPollTimer = setInterval(function () {
+    // 解耦：非自主模式立即停止（普通对话零 loop 流量）
+    if (!_agentLoopMode) { _stopLoopPolling(); return; }
     const sid = _getAgentSessionId();
     if (!sid) return;
     fetch(API_BASE + '/api/loop/tasks?session=' + encodeURIComponent(sid))
