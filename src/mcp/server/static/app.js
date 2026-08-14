@@ -12659,12 +12659,25 @@ function updateLastAssistantMessage(content, forceIdx) {
   }
 }
 
-// 流式完成后重置索引，并进行最终渲染（确保 Markdown/KaTeX 正确）
+// 流式完成后重置索引；流式中已通过 _applyStreamContent 实时渲染 Markdown，
+// 不再全量重建避免"脱掉"闪烁——仅对最后一条消息幂等补收尾渲染 + KaTeX。
 function finalizeStreamingMessage() {
+  const lastIdx = _agentStreamMsgIndex;
   _agentStreamMsgIndex = -1;
-  if (_agentRenderTimer) clearTimeout(_agentRenderTimer);
-  _agentRenderTimer = null;
-  // 最终全量渲染一次，确保格式正确
+  if (_agentRenderTimer) { clearTimeout(_agentRenderTimer); _agentRenderTimer = null; }
+  if (lastIdx >= 0 && state.agentMessages[lastIdx] && state.agentMessages[lastIdx].role === 'assistant') {
+    const container = document.getElementById('agentMessages');
+    const el = container ? container.querySelector('.agent-msg[data-index="' + lastIdx + '"] .msg-content') : null;
+    if (el) {
+      const content = state.agentMessages[lastIdx].content || '';
+      // 幂等补一次最终内容（_streamRendered 防重：已渲染则跳过）+ KaTeX 收尾
+      _applyStreamContent(el, content, container);
+      if (el._streamKatexTimer) { clearTimeout(el._streamKatexTimer); el._streamKatexTimer = null; }
+      _renderKatex(el);
+      return;  // 已实时渲染，跳过全量重建（避免脱掉闪烁）
+    }
+  }
+  // 兜底：DOM 未就绪/索引异常时才全量重建
   renderAgentMessages();
 }
 
