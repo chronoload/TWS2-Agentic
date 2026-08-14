@@ -12550,6 +12550,50 @@ function _ensureMsgVisible(msgIndex, cb) {
 var _agentRenderTimer = null;
 var _agentStreamMsgIndex = -1;  // 记录当前流式消息的索引，避免每次查找
 
+// ── 流式 Markdown 渲染（适当激进 + 无感 + 计算量小）──
+// 结构未完成（代码围栏/行内公式未闭合）→ 保守纯文本，避免不完整块反复重排闪烁；
+// 结构完整 → 直接 renderSimpleMarkdown（轻量行级解析）流式渲染，公式 KaTeX 节流。
+function _mdStructuralIncomplete(text) {
+  if (!text) return false;
+  var lines = text.split('\n');
+  var fences = 0;
+  for (var i = 0; i < lines.length; i++) {
+    var t = lines[i].trim();
+    if (/^```/.test(t)) fences++;
+    else if (/^~~~/.test(t)) fences++;
+  }
+  if (fences % 2 === 1) return true;
+  // 行内公式 $...$ 未闭合（奇数个未转义单 $，排除 $$）
+  var dollars = text.match(/(?<!\$)\$(?!\$)/g);
+  if (dollars && dollars.length % 2 === 1) return true;
+  return false;
+}
+
+function _applyStreamContent(el, content, container) {
+  if (!el) return;
+  var renderKey;
+  if (_mdStructuralIncomplete(content)) {
+    renderKey = 'TEXT:' + content;
+    if (el._streamRendered !== renderKey) {
+      el._streamRendered = renderKey;
+      el.textContent = content;
+    }
+  } else if (el._streamRendered !== content) {
+    el._streamRendered = content;
+    el.innerHTML = renderSimpleMarkdown(content);
+    // KaTeX 节流（350ms）：流式中公式不必逐 token 渲染，渲染成本集中在停顿间隙
+    if (!el._streamKatexTimer) {
+      el._streamKatexTimer = setTimeout(function() {
+        el._streamKatexTimer = null;
+        _renderKatex(el);
+      }, 350);
+    }
+  }
+  if (container.scrollHeight - container.scrollTop - container.clientHeight < 100) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
 function updateLastAssistantMessage(content, forceIdx) {
   // 找到最后一条 assistant 消息并更新内容
   let targetIdx = -1;
@@ -12595,18 +12639,12 @@ function updateLastAssistantMessage(content, forceIdx) {
           container.querySelectorAll('.agent-msg').length) {
         _ensureMsgVisible(targetIdx, function() {
           const el = container.querySelector('.agent-msg[data-index="' + targetIdx + '"] .msg-content');
-          if (el) el.textContent = content;
-          if (container.scrollHeight - container.scrollTop - container.clientHeight < 100) {
-            container.scrollTop = container.scrollHeight;
-          }
+          _applyStreamContent(el, content, container);
         });
       } else {
         const msgEl = container.querySelector('.agent-msg[data-index="' + targetIdx + '"] .msg-content');
         if (msgEl) {
-          msgEl.textContent = content;
-          if (container.scrollHeight - container.scrollTop - container.clientHeight < 100) {
-            container.scrollTop = container.scrollHeight;
-          }
+          _applyStreamContent(msgEl, content, container);
         } else {
           // 极端兜底：DOM 完全未就绪时才全量渲染
           renderAgentMessages();
