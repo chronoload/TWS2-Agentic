@@ -1,5 +1,0 @@
-﻿file,line,kind,value,context
-app.py,14,key,sk-secret-demo-value,API_KEY
-app.py,15,port,8123,PORT
-client\app.js,3,path,/api/a,path_literal
-client\app.js,6,path,/api/b,path_literal

@@ -1,2 +1,0 @@
-﻿kind,attr,file,line,detail
-clear_without_set,_chat_active,macdev-skill\examples\sample_project\app.py,27,方法内 clear() 该 Event 标志但无 set() 恢复；若该处后续有 wait() 或跨调用依赖，可能永久阻塞或状态残留（需 finally 兜底）

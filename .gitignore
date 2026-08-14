@@ -76,3 +76,6 @@ Thumbs.db
 audit_out/
 src/.ts2_data/
 *-project/
+
+# 技能市场镜像（模仿 git：主仓库不跟踪远程克隆/市场副本，自演化权威在 skills/）
+src/skills_market/
