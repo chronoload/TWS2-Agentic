@@ -39,6 +39,11 @@ class TaskMessageRequest(BaseModel):
     content: str
 
 
+class MaxTurnsRequest(BaseModel):
+    """运行中调整轮次预算：None/<=0 = 不限；正数 = 新预算"""
+    max_turns: Optional[int] = None
+
+
 def _set_loop_for_test(loop):
     """测试专用：覆盖默认 loop 实例"""
     global _override_loop
@@ -193,6 +198,20 @@ def loop_task_message(task_id: str, req: TaskMessageRequest):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "task_id": task_id, "pending_input": task.pending_input}
+
+
+@router.post("/task/{task_id}/max_turns")
+def loop_task_max_turns(task_id: str, req: MaxTurnsRequest):
+    """运行中调整轮次预算（灵活轮次）：None/<=0 = 不限（达成/时长停机）；正数 = 新预算。
+    达成即停机约束下，轮次只是上限兜底——实际由「🎯 目标已达成」自主停机。"""
+    loop = _get_loop()
+    try:
+        task = loop.update_max_turns(task_id, req.max_turns)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "task_id": task_id, "max_turns": task.max_turns}
 
 
 @router.post("/control")

@@ -54,7 +54,7 @@ class LoopTask:
     goal: str
     status: TaskStatus = TaskStatus.PENDING
     turn_count: int = 0
-    max_turns: int = 30
+    max_turns: Optional[int] = None  # None=不限轮次（达成/时长停机）；运行中可 update_max_turns 灵活调整
     max_duration_seconds: Optional[float] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     started_at: Optional[str] = None
@@ -99,7 +99,7 @@ class AgentLoop:
         runner=None,
         middleware_chain=None,
         heartbeat: float = 1.0,
-        max_turns: int = 30,
+        max_turns: Optional[int] = None,  # None=默认不限轮次（达成/时长停机，灵活轮次）
         max_duration_seconds: float = 1800.0,
         event_bus=None,
         session_context=None,
@@ -191,7 +191,7 @@ class AgentLoop:
         task = LoopTask(
             task_id=uuid.uuid4().hex[:12],
             goal=goal,
-            max_turns=max_turns or self.default_max_turns,
+            max_turns=max_turns if max_turns is not None else self.default_max_turns,
             max_duration_seconds=max_duration_seconds or self.default_max_duration,
             session_id=session_id,
         )
@@ -245,6 +245,20 @@ class AgentLoop:
         # 唤醒：入队（后台线程 drain 或下次 start 时处理）
         self._queue.put(task_id)
         return task
+
+    def update_max_turns(self, task_id: str, max_turns: Optional[int]) -> LoopTask:
+        """运行中调整轮次预算（灵活轮次）：None/<=0 = 不限（达成/时长停机）；正数 = 新预算。
+
+        运行中的 while 条件每回合读取 task.max_turns → 立即生效（可增可减）。
+        终态任务不可调整。"""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.HALTED):
+                raise ValueError("任务已结束，无法调整轮次")
+            task.max_turns = max_turns if (max_turns is None or max_turns > 0) else None
+            return task
 
     def _build_handoff(self, task: LoopTask) -> Dict[str, Any]:
         """生成结构化交接笔记（loop 交接 + macdev 回审双轨，冗余保障）：
@@ -331,7 +345,8 @@ class AgentLoop:
             if not task.messages:
                 task.messages.append({"role": "user", "content": task.goal, "ts": datetime.now().isoformat()})
         _written = len(task.messages)  # 已回写会话的消息数（回合产物增量回写）
-        while task.turn_count < task.max_turns:
+        # 轮次预算：max_turns=None 时不限（仅靠达成/时长停机）；运行中 update_max_turns 动态生效
+        while task.turn_count < (task.max_turns if task.max_turns else 10**9):
             # ── 审核介入消息：追加为 user 消息喂给模型（决策③C） ──
             if task.pending_input:
                 task.messages.append(
@@ -402,6 +417,40 @@ class AgentLoop:
                     self.middleware_chain.run_after_agent(messages, mw_context)
                 except Exception as e:
                     logger.warning("AgentLoop middleware after_agent error: %s", e)
+
+            # ── 达成即停机（硬约束，spec id=5）：content 或工具调用参数声明「🎯 目标已达成」
+            # → 立即 COMPLETED 停机，即使本回合还带工具调用也不执行（防止达成后多余迭代） ──
+            _content = getattr(result, "content", "") or ""
+            _loop_goal_mode = session_msgs is not None
+            _tc_arg_blob = ""
+            for _e in (getattr(result, "tool_calls", None) or []):
+                _tc = _e.get("tool_call", _e) if isinstance(_e, dict) else _e
+                _a = _tc.get("arguments", "") if isinstance(_tc, dict) else getattr(_tc, "arguments", "")
+                if isinstance(_a, dict):
+                    _a = str(_a)
+                _tc_arg_blob += str(_a or "")
+            if _loop_goal_mode and ("🎯 目标已达成" in _content or "🎯 目标已达成" in _tc_arg_blob):
+                # 达成即停机：标记完成 + 收尾（回写 + turn 事件 + break），不执行工具迭代
+                task.result = _content or "🎯 目标已达成"
+                task.status = TaskStatus.COMPLETED
+                task.completed_at = datetime.now().isoformat()
+                task.messages.append({
+                    "role": "assistant",
+                    "content": _content,
+                    "tool_calls": getattr(result, "tool_calls", None),
+                    "ts": datetime.now().isoformat(),
+                })
+                messages.append({"role": "assistant", "content": _content})
+                if session_msgs is not None and task.session_id and self.session_context:
+                    try:
+                        new_msgs = task.messages[_written:]
+                        if new_msgs:
+                            self.session_context.append(task.session_id, new_msgs)
+                            _written = len(task.messages)
+                    except Exception:
+                        pass
+                self._emit("agent_loop.turn", task)
+                break
 
             if getattr(result, "tool_calls", None):
                 # 还有工具调用 → 拼接 assistant + tool 回合，继续下一回合
@@ -492,7 +541,7 @@ class AgentLoop:
             # while 因 max_turns 耗尽退出且未 break → 预算用尽，挂起等待人工
             if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 task.status = TaskStatus.HALTED
-                task.error = f"达到 max_turns={task.max_turns}"
+                task.error = f"达到 max_turns={task.max_turns}" if task.max_turns else "任务被人工停止（轮次预算不限）"
                 task.completed_at = datetime.now().isoformat()
 
         # ── 交接笔记（handoff）：终态生成（loop 交接 + macdev 回审双轨，冗余保障） ──

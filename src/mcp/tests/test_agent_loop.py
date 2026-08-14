@@ -322,7 +322,7 @@ def test_loop_uses_session_context_when_available():
             self.appended.append((sid, list(msgs)))
 
     ctx = FakeSessionCtx()
-    runner = FakeRunner([([], "完成")])
+    runner = FakeRunner([([], "🎯 目标已达成，完成")])
     loop = make_loop(runner, session_context=ctx)
     task_id = loop.submit("新目标", session_id="sess-1", auto_start=False)
     loop.step()
@@ -367,7 +367,7 @@ def test_session_mode_task_messages_are_loop_only():
             self.appended.append((sid, list(msgs)))
 
     ctx = FakeSessionCtx()
-    runner = FakeRunner([([], "完成")])
+    runner = FakeRunner([([], "🎯 目标已达成，完成")])
     loop = make_loop(runner, session_context=ctx)
     task_id = loop.submit("新目标", session_id="sess-1", auto_start=False)
     loop.step()
@@ -382,3 +382,88 @@ def test_session_mode_task_messages_are_loop_only():
     # 回写仅含回合产出增量（不含普通对话/不含 goal 重复）
     assert ctx.appended
     assert all("普通对话1" not in str(x) and "普通回复1" not in str(x) for _, x in ctx.appended)
+
+# ── 14) 达成即停机（硬约束）：content/工具参数声明「🎯 目标已达成」→ 立即 COMPLETED，不执行多余工具迭代 ──
+def test_goal_reached_with_tool_calls_stops_immediately():
+    """达成声明即使带 tool_calls 也立即停机（不执行工具迭代）"""
+
+    class FakeSessionCtx:
+        def get(self, sid):
+            return [{"role": "user", "content": "普通对话"}]
+
+        def append(self, sid, msgs):
+            pass
+
+    ctx = FakeSessionCtx()
+    # 回合带 tool_calls（如"写总结文件"）+ content 声明达成 → 应停机，不执行工具
+    runner = FakeRunner([
+        ([{"name": "write_file", "arguments": '{"path": "summary.md"}'}], "🎯 目标已达成，产出总结完毕"),
+    ])
+    loop = make_loop(runner, session_context=ctx)
+    task_id = loop.submit("达成即停", session_id="sess-1", auto_start=False)
+    loop.step()
+    task = loop.get_task(task_id)
+    assert task.status == TaskStatus.COMPLETED
+    assert task.turn_count == 1          # 不进入下一回合
+    assert len(runner.calls) == 1         # 只跑 1 回合（工具未执行）
+    assert task.result and "目标已达成" in task.result
+
+
+def test_goal_reached_in_tool_arguments_stops():
+    """工具参数里声明达成（如 write_file 写达成报告）→ 也立即停机"""
+
+    class FakeSessionCtx:
+        def get(self, sid):
+            return [{"role": "user", "content": "普通对话"}]
+
+        def append(self, sid, msgs):
+            pass
+
+    ctx = FakeSessionCtx()
+    runner = FakeRunner([
+        ([{"name": "write_file", "arguments": '{"path": "report.md", "content": "🎯 目标已达成"}'}], "写报告"),
+    ])
+    loop = make_loop(runner, session_context=ctx)
+    task_id = loop.submit("参数达成", session_id="sess-1", auto_start=False)
+    loop.step()
+    task = loop.get_task(task_id)
+    assert task.status == TaskStatus.COMPLETED
+    assert task.turn_count == 1
+    assert len(runner.calls) == 1
+
+
+# ── 15) 轮次灵活：默认不限 + 运行中可调 ──
+def test_default_max_turns_unlimited():
+    loop = make_loop(FakeRunner([([], "完成")]))
+    task_id = loop.submit("默认轮次", auto_start=False)
+    task = loop.get_task(task_id)
+    assert task.max_turns is None  # 默认不限（达成/时长停机）
+
+
+def test_update_max_turns_runtime():
+    """运行中调整轮次预算：先收紧为 1 → 1 回合后 HALTED"""
+
+    class FakeSessionCtx:
+        def get(self, sid):
+            return [{"role": "user", "content": "普通对话"}]
+
+        def append(self, sid, msgs):
+            pass
+
+    ctx = FakeSessionCtx()
+    # 无 🎯 续跑脚本（session 模式 → 目标达成前不停）
+    runner = FakeRunner([([], "进度1"), ([], "进度2"), ([], "进度3")])
+    loop = make_loop(runner, session_context=ctx)
+    task_id = loop.submit("轮次可调", session_id="sess-1", auto_start=False, max_turns=None)
+    task = loop.get_task(task_id)
+    assert task.max_turns is None
+    # 运行中收紧为 1 回合
+    loop.update_max_turns(task_id, 1)
+    assert task.max_turns == 1
+    loop.step()
+    # 1 回合后 while 条件不满足 → HALTED（error 提及 max_turns=1）
+    assert task.status == TaskStatus.HALTED
+    assert "max_turns=1" in task.error
+    # 已终态任务不可再调（ValueError）
+    with pytest.raises(ValueError):
+        loop.update_max_turns(task_id, 5)
