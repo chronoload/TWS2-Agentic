@@ -54,6 +54,27 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# 全局 pending ask 池：供非 SSE 环境（WS2 Agent 等）的 ask_followup_question
+# 挂起时注册问题，前端通过 /api/agent/ask/pending 轮询拉取并弹窗（与审批恢复同构）。
+_GLOBAL_PENDING_ASKS: dict = {}
+
+
+def list_global_pending_asks() -> list:
+    """返回全局待回答 ask 列表 [{request_id, question, options}]（自动清理过期条目）"""
+    import time as _t
+    now = _t.time()
+    items = []
+    for rid, info in list(_GLOBAL_PENDING_ASKS.items()):
+        if now - info.get("created_at", 0) > 320:
+            _GLOBAL_PENDING_ASKS.pop(rid, None)
+            continue
+        items.append({
+            "request_id": rid,
+            "question": info.get("question", ""),
+            "options": info.get("options", []) or [],
+        })
+    return items
+
 # 尝试导入事件日志系统
 try:
     from .event_logger import EventLogger
@@ -1706,9 +1727,16 @@ class Agent:
             result = tool.execute(**args)
             logger.info(f"工具 {tool_call.name} 执行完成 ({len(result)} 字符)")
 
-            # ask_followup_question 挂起式：检查 _suspend_ask 标志，触发后挂起 turn
-            if tool_call.name == "ask_followup_question" and self._maybe_suspend_for_ask(result):
-                return f'{{"success":true,"suspended":"ask","timeout":true}}'
+            # ask_followup_question 挂起式：检查 _suspend_ask 标志，触发后挂起 turn。
+            # 挂起返回后直接携带真实答案（单/多工具路径都正确，多工具并行不再依赖外部替换）
+            if tool_call.name == "ask_followup_question":
+                _ask_rid = self._maybe_suspend_for_ask(result)
+                if _ask_rid is not None:
+                    _ans = (getattr(self, "_last_ask_answers", None) or {}).pop(_ask_rid, None)
+                    if _ans is None:
+                        _ans = self.get_last_ask_answer() or "（用户未作答）"
+                    import json as _json2
+                    return _json2.dumps({"success": True, "answer": _ans, "suspended": "ask"}, ensure_ascii=False)
 
             if HAS_MIDDLEWARE and self._middleware_chain and mw_ctx:
                 mw_after = self._middleware_chain.run_after_tool(tool_call.name, tool_call.arguments or {}, result, mw_ctx)
@@ -1801,56 +1829,103 @@ class Agent:
 
     # ─── ask/answer 追问接口（供 server 端点调用）───
     def set_pending_ask(self, request_id: str) -> None:
-        """标记当前 turn 挂起在 ask 问题上"""
-        self._pending_ask = request_id
+        """标记当前 turn 挂起在 ask 问题上（支持并发多挂起：字典按 rid 区分）"""
+        if getattr(self, "_pending_asks", None) is None:
+            self._pending_asks = {}
+        self._pending_asks[request_id] = True
         self._awaiting_approval = True
 
-    def clear_pending_ask(self) -> None:
-        self._pending_ask = None
-        self._awaiting_approval = False
+    def clear_pending_ask(self, request_id: Optional[str] = None) -> None:
+        if getattr(self, "_pending_asks", None) is None:
+            self._pending_asks = {}
+        if request_id:
+            self._pending_asks.pop(request_id, None)
+        else:
+            self._pending_asks.clear()
+        if not self._pending_asks:
+            self._awaiting_approval = False
 
     def get_pending_ask(self) -> Optional[str]:
-        return getattr(self, "_pending_ask", None)
+        """返回任一挂起 rid（兼容旧调用）；answer 端点应优先用 has_pending_ask(rid)"""
+        return next(iter(getattr(self, "_pending_asks", None) or {}), None)
 
-    def _maybe_suspend_for_ask(self, tool_result: str) -> bool:
-        """ask_followup_question 调用后:若注册了 ask 通道 + 用户存在,挂起并等答案。
-        挂起期间主线程通过 _consume_ask_answer 唤醒（由 ask/answer API 触发）。
+    def has_pending_ask(self, request_id: str) -> bool:
+        return request_id in (getattr(self, "_pending_asks", None) or {})
+
+    def _maybe_suspend_for_ask(self, tool_result: str) -> Optional[str]:
+        """ask_followup_question 调用后:挂起并等答案。返回挂起 rid（已答/超时后），None 表示非挂起。
+
+        双通道：
+        - 有 SSE ask 通道（_current_ask_sender，TS2 前端会话）→ 实时推送 ask 事件；
+        - 无通道（WS2/隔离环境，sender=None）→ 问题存入全局 _GLOBAL_PENDING_ASKS 池，
+          前端经 /api/agent/ask/pending 轮询拉取弹窗（复用 approval 恢复机制）。
+        两条路径都 set_pending_ask + 阻塞等 answer API 唤醒（最长 300s）。
+        答案按 rid 存 _last_ask_answers（并发多挂起互不覆盖），并同步单值 _last_ask_answer 兼容旧调用。
         """
         import json as _json
         import time as _t
         try:
             payload = _json.loads(tool_result)
         except Exception:
-            return False
-        if not isinstance(payload, dict) or not payload.get("_suspend_ask"):
-            return False
-        # 取挂起通道：sse 推送 + 阻塞等答案
-        sender = getattr(self, "_current_ask_sender", None)
-        if sender is None:
-            return False
+            return None
+        if not isinstance(payload, dict):
+            return None
+        # _suspend_ask 在 ToolResult 的 data 里（to_json=asdict 扁平化）：
+        #   {"success":true,"data":{"question":...,"options":[...],"_suspend_ask":true},"message":...}
+        # 兼容顶层直传（WS2/其他通道可能的精简包装）。
+        _data = payload.get("data") or {}
+        if not (payload.get("_suspend_ask") or _data.get("_suspend_ask")):
+            return None
         import uuid as _u
         rid = _u.uuid4().hex[:8]
-        question = payload.get("question", "")
-        options = payload.get("options", []) or []
+        question = payload.get("question") or _data.get("question", "")
+        options = payload.get("options") or _data.get("options") or []
+        if not isinstance(options, list):
+            options = []
+        if getattr(self, "_last_ask_answers", None) is None:
+            self._last_ask_answers = {}
         self.set_pending_ask(rid)
+        sender = getattr(self, "_current_ask_sender", None)
+        if sender is not None:
+            try:
+                sender({"type": "ask", "request_id": rid, "question": question, "options": options})
+            except Exception:
+                pass
+        # 无论是否有 SSE 通道，都注册全局池（前端轮询兜底，双保险）。
+        # 避免 WS2 等实例存在 _current_ask_sender 时只推 SSE、问题不进池，
+        # 导致前端轮询 ask/pending 拉不到 → 不弹窗 → answer 匹配失败 → Agent 干等 300s。
         try:
-            sender({"type": "ask", "request_id": rid, "question": question, "options": options})
+            _GLOBAL_PENDING_ASKS[rid] = {
+                "question": question,
+                "options": options,
+                "created_at": _t.time(),
+                "agent": self,
+            }
         except Exception:
             pass
-        # 阻塞主线程（最长 300s），由 answer API 唤醒
+        # 阻塞主线程（最长 300s），由 answer API 写入 _last_ask_answers[rid] 唤醒
+        print(f"[ASK] {rid} 挂起等待答案 (sender={'有' if sender else '无'}, 全局池注册={'ok' if rid in _GLOBAL_PENDING_ASKS else 'FAIL'}, 实例id={id(self)})", flush=True)
         deadline = _t.time() + 300
         while _t.time() < deadline:
-            if self._pending_ask is None:
+            if rid in self._last_ask_answers:
+                print(f"[ASK] {rid} 读到答案 唤醒 (实例id={id(self)})", flush=True)
+                break
+            if not self._pending_asks.get(rid):
+                print(f"[ASK] {rid} pending 已清 退出 (实例id={id(self)})", flush=True)
                 break
             _t.sleep(0.1)
-        answer = getattr(self, "_last_ask_answer", None)
-        self._last_ask_answer = None
-        self.clear_pending_ask()
+        answer = self._last_ask_answers.get(rid)
         if answer is None:
             answer = "（用户未作答）"
-        # 把答案作为后续 tool_result 注入：调用方（_chat_impl）将本工具结果替换成答案
+            print(f"[ASK] {rid} 300s 超时未作答 (实例id={id(self)})", flush=True)
+        # 同步单值兼容旧调用（单工具串行路径）
         self._last_ask_answer = answer
-        return True
+        self.clear_pending_ask(rid)
+        try:
+            _GLOBAL_PENDING_ASKS.pop(rid, None)
+        except Exception:
+            pass
+        return rid
 
     def get_last_ask_answer(self) -> Optional[str]:
         return getattr(self, "_last_ask_answer", None)

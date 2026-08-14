@@ -5234,6 +5234,11 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
+  height: 36px;
+  min-height: 36px;
+  max-height: 36px;
+  flex-shrink: 0;
+  overflow: hidden;
   border-bottom: 1px solid var(--border);
   background: var(--bg-secondary);
 }
@@ -5245,6 +5250,8 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   padding: 2px 8px;
   border-radius: 4px;
   cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .agent-session-btn:hover {
   color: var(--accent);
@@ -5254,6 +5261,18 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   font-size: 11px;
   color: var(--fg-dim);
   margin-left: auto;
+  /* 长会话标题 ellipsis 截断，防止撑开顶栏高度 */
+  min-width: 0;
+  max-width: 35%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+#agentModelSelector {
+  flex-shrink: 0;
+  max-width: 200px;
+  min-width: 0;
 }
 /* 门控控制面板（🎛 展开，不占 session-bar 空间） */
 .harness-panel {

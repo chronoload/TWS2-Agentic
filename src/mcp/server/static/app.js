@@ -10115,6 +10115,12 @@ document.addEventListener('DOMContentLoaded', () => {
     _initOverlayDrag();
     // 模型选择状态初始化
     loadModelStatus();
+    // 审批/追问弹窗全局轮询：拉取待审批/待追问请求弹窗
+    // （无 SSE 通道的隔离环境（如 WS2 Agent）依赖此轮询弹出 ask/approval 弹窗）
+    try {
+      syncPendingApprovals();
+      setInterval(() => { try { syncPendingApprovals(); } catch (e) {} }, 3000);
+    } catch (e) { /* 静默：弹窗轮询初始化失败不影响主流程 */ }
   }, 100);
 });
 
@@ -13856,9 +13862,12 @@ function _renderDiscoverList(preserveSel) {
   }
   let html = '';
   const matches = (name, desc) => !kw || ((name || '') + ' ' + (desc || '')).toLowerCase().includes(kw);
+  // 排序：名称字母序（大小写不敏感），让列表整齐易找
+  const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh', { sensitivity: 'base' });
+  const byStr = (a, b) => String(a || '').localeCompare(String(b || ''), 'zh', { sensitivity: 'base' });
 
   if (_discoverTab === 'skill') {
-    const items = (_discoverData.skills || []).filter((s) => matches(s.name, s.description));
+    const items = (_discoverData.skills || []).filter((s) => matches(s.name, s.description)).sort(byName);
     items.forEach((s) => {
       _discoverItems.push({ type: 'skill', name: s.name, skillName: s.name, description: s.description || '' });
       html += _discoverRow(`⚡ ${s.name}`, s.description || '', _discoverItems.length - 1);
@@ -13885,7 +13894,7 @@ function _renderDiscoverList(preserveSel) {
     });
     if (!items.length) html = _discoverEmpty();
   } else if (_discoverTab === 'workflow') {
-    const items = (_discoverData.workflows || []).filter((w) => matches(w.name, w.description));
+    const items = (_discoverData.workflows || []).filter((w) => matches(w.name, w.description)).sort(byName);
     items.forEach((w) => {
       const sub = [w.description, w.version ? `v${w.version}` : ''].filter(Boolean).join(' · ');
       _discoverItems.push({ type: 'workflow', name: w.name, workflowId: w.workflow_id || '', description: w.description || '' });
@@ -14562,7 +14571,10 @@ async function refreshAgentStatus() {
     
     // 渲染实例列表
     renderAgentStatusList(instances);
-    
+
+    // 拉取待审批/待追问请求重新弹窗（断线恢复 + 无 SSE 通道的隔离环境轮询）
+    syncPendingApprovals();
+
   } catch (e) {
     list.innerHTML = '<div class="agent-status-empty" style="color:var(--red)">加载失败</div>';
   }
@@ -15235,10 +15247,47 @@ async function showAgentCheckpoints() {
   }
 }
 
+
+
+// ─── 审批/追问弹窗队列（多弹窗串行展示，互不覆盖）────────────────
+let _agentModalQueue = [];
+let _agentModalBusy = false;
+let _agentModalSubmitting = false;
+
+function _enqueueAgentModal(kind, data) {
+  const key = kind + ':' + (data && (data.request_id || ''));
+  for (const q of _agentModalQueue) {
+    if ((q.kind + ':' + (q.data && q.data.request_id || '')) === key) return; // 幂等去重
+  }
+  _agentModalQueue.push({ kind, data });
+  _drainAgentModalQueue();
+}
+
+function _drainAgentModalQueue() {
+  if (_agentModalBusy || _agentModalSubmitting) return;
+  if (!_agentModalQueue.length) return;
+  const item = _agentModalQueue[0];
+  if (item.kind === 'approval') _renderApprovalDialog(item.data);
+  else if (item.kind === 'ask') _renderAskPanel(item.data);
+}
+
+function _finishAgentModal() {
+  closeHtmlModal();          // 关闭当前弹窗 UI（作答/决策后窗口必须消失）
+  _agentModalQueue.shift();
+  _agentModalBusy = false;
+  _drainAgentModalQueue();
+}
+
 // ─── Web 审批弹窗：Agent 工具权限请求 → 用户授权 ───────────
 
 function _showWebApprovalDialog(data) {
   if (!data || !data.request_id) return;
+  _enqueueAgentModal('approval', data);
+}
+
+function _renderApprovalDialog(data) {
+  if (!data || !data.request_id) return;
+  _agentModalBusy = true;
   const riskColor = { low: '#22c55e', medium: '#f59e0b', high: '#ef4444' }[data.risk_level] || '#f59e0b';
   const riskTxt = { low: '低', medium: '中', high: '高' }[data.risk_level] || (data.risk_level || '');
   const preview = String(data.tool_input_preview || '').substring(0, 400);
@@ -15259,10 +15308,12 @@ function _showWebApprovalDialog(data) {
   html += '</div>';
   html += '<div style="font-size:11px;color:var(--fg-dim);margin-top:8px">⏳ 等待授权期间 Agent 已暂停，决策后自动继续（忽略则超时默认拒绝）</div>';
   html += '</div>';
-  showHtmlModal('权限审批', html);
+  showHtmlModal('权限审批', html, { clickOutside: false });
 }
 
 async function webApprovalDecide(requestId, decision) {
+  if (_agentModalSubmitting) return;
+  _agentModalSubmitting = true;
   try {
     const res = await fetch(`${API_BASE}/api/agent/approval/decide`, {
       method: 'POST',
@@ -15271,22 +15322,34 @@ async function webApprovalDecide(requestId, decision) {
     });
     const j = await res.json();
     if (j && j.data && j.data.decided) {
-      closeHtmlModal();
+      _finishAgentModal();
       showToast(decision === 'deny' ? '已拒绝该操作' : '已批准该操作', decision === 'deny' ? 'warning' : 'info');
     } else {
       showToast('审批提交失败: ' + ((j && j.msg) || '未知错误'), 'error');
     }
   } catch (e) {
     showToast('审批提交失败: ' + e.message, 'error');
+  } finally {
+    _agentModalSubmitting = false;
+    // submitting 复位后补 drain：_finishAgentModal 期间被挡的队列推进在此恢复
+    _drainAgentModalQueue();
   }
 }
 
 // ─── ask/answer 追问闭环（前端问题面板）──────────────────────────
-let _pendingAskRequestId = null;
+let _pendingAskRequestId = null;  // 兼容兜底（当前显示的 ask rid）
 
 function _showAskQuestionPanel(data) {
   if (!data || !data.request_id) return;
-  _pendingAskRequestId = String(data.request_id);
+  _enqueueAgentModal('ask', data);
+}
+
+function _renderAskPanel(data) {
+  if (!data || !data.request_id) return;
+  _agentModalBusy = true;
+  // rid 快照：所有提交路径都绑定本次渲染的 rid，避免全局变量被后续弹窗覆盖导致错配
+  const rid = String(data.request_id);
+  _pendingAskRequestId = rid;
   const question = String(data.question || '');
   const options = Array.isArray(data.options) ? data.options : [];
   let html = '<div style="text-align:left;padding:4px 8px">';
@@ -15297,31 +15360,33 @@ function _showAskQuestionPanel(data) {
     html += '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">';
     options.forEach((opt, i) => {
       const val = String(opt);
-      html += '<button onclick="submitAskAnswer(\'' + _pendingAskRequestId + '\',\'' + escapeHtml(val).replace(/'/g, "\\'") + '\')" style="text-align:left;padding:7px 10px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px">' + (i + 1) + '. ' + escapeHtml(val) + '</button>';
+      html += '<button onclick="submitAskAnswer(\'' + rid + '\',\'' + escapeHtml(val).replace(/'/g, "\\'") + '\')" style="text-align:left;padding:7px 10px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px">' + (i + 1) + '. ' + escapeHtml(val) + '</button>';
     });
     html += '</div>';
   }
   html += '<div style="display:flex;gap:6px;margin-bottom:8px">';
-  html += '<input id="askFreeAnswer" type="text" placeholder="自由回答…" style="flex:1;padding:7px 10px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:6px;font-size:12px" onkeydown="if(event.key===\'Enter\')submitAskAnswerFromInput()">';
-  html += '<button onclick="submitAskAnswerFromInput()" style="padding:7px 14px;background:var(--accent,#4f8cff);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px">提交</button>';
+  html += '<input id="askFreeAnswer" type="text" placeholder="自由回答…" style="flex:1;padding:7px 10px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:6px;font-size:12px" onkeydown="if(event.key===\'Enter\')submitAskAnswerFromInput(\'' + rid + '\')">';
+  html += '<button onclick="submitAskAnswerFromInput(\'' + rid + '\')" style="padding:7px 14px;background:var(--accent,#4f8cff);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px">提交</button>';
   html += '</div>';
   html += '<div style="display:flex;justify-content:flex-end">';
-  html += '<button onclick="submitAskAnswer(\'' + _pendingAskRequestId + '\',\'\')" style="padding:5px 10px;background:transparent;color:var(--fg-muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:11px">跳过（继续）</button>';
+  html += '<button onclick="submitAskAnswer(\'' + rid + '\',\'\')" style="padding:5px 10px;background:transparent;color:var(--fg-muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:11px">跳过（继续）</button>';
   html += '</div>';
   html += '<div style="font-size:11px;color:var(--fg-dim);margin-top:6px">⏳ 超时未作答则以「未作答」继续</div>';
   html += '</div>';
-  showHtmlModal('Agent 提问', html);
+  showHtmlModal('Agent 提问', html, { clickOutside: false });
   const inp = document.getElementById('askFreeAnswer');
   if (inp) inp.focus();
 }
 
-function submitAskAnswerFromInput() {
+function submitAskAnswerFromInput(rid) {
   const inp = document.getElementById('askFreeAnswer');
-  submitAskAnswer(_pendingAskRequestId, inp ? inp.value : '');
+  submitAskAnswer(rid || _pendingAskRequestId, inp ? inp.value : '');
 }
 
 async function submitAskAnswer(requestId, answer) {
   if (!requestId) return;
+  if (_agentModalSubmitting) return;
+  _agentModalSubmitting = true;
   try {
     const res = await fetch(`${API_BASE}/api/agent/ask/answer`, {
       method: 'POST',
@@ -15331,14 +15396,58 @@ async function submitAskAnswer(requestId, answer) {
     const j = await res.json();
     if (j && j.data && j.data.accepted) {
       _pendingAskRequestId = null;
-      closeHtmlModal();
+      _finishAgentModal();
       showToast(answer ? '已答复，Agent 继续执行' : '已跳过', 'info');
     } else {
-      showToast('答复提交失败: ' + ((j && j.data && j.data.error) || '未知错误'), 'error');
+      const msg = ((j && j.data && j.data.error) || '未知错误');
+      // 请求不存在/已过期 → 从队列移除该项 + 关闭继续；瞬时错误保留供重试
+      if (/不存在|已过期|no matching|expired/i.test(msg)) {
+        _pendingAskRequestId = null;
+        _removeAgentModalById(requestId);
+        _finishAgentModal();
+      }
+      showToast('答复提交失败: ' + msg, 'error');
     }
   } catch (e) {
+    // 网络异常：保留弹窗供重试
     showToast('答复提交失败: ' + e.message, 'error');
+  } finally {
+    _agentModalSubmitting = false;
+    // 关键：_finishAgentModal 在 submitting=true 期间被调用时 drain 被挡，
+    // 这里 submitting 复位后必须再 drain 一次，否则队列下一个弹窗不会自动弹出
+    _drainAgentModalQueue();
   }
+}
+
+// 从队列移除指定 rid 的弹窗项（幂等，容错清理失效项）
+function _removeAgentModalById(requestId) {
+  _agentModalQueue = _agentModalQueue.filter(q => !(q.data && q.data.request_id === requestId));
+}
+
+// ─── 刷新/断线恢复：拉取待审批/待追问请求重新弹窗（含池同步容错） ─────
+async function syncPendingApprovals() {
+  try {
+    const sid = _getAgentSessionId();
+    const res = await fetch(`${API_BASE}/api/agent/approval/pending?session_id=${encodeURIComponent(sid || '')}`);
+    const j = await res.json();
+    const items = (j && j.data && j.data.pending) || [];
+    for (const it of items) _enqueueAgentModal('approval', it);
+  } catch (e) { /* 静默：轮询失败不打扰 */ }
+  try {
+    // 挂起 ask 追问池（无 SSE 通道的隔离环境经全局池 + 本轮询弹窗）
+    const sid = _getAgentSessionId();
+    const res = await fetch(`${API_BASE}/api/agent/ask/pending?session_id=${encodeURIComponent(sid || '')}`);
+    const j = await res.json();
+    const asks = (j && j.data && j.data.pending) || [];
+    // 池同步容错：后端已不存在（已作答/超时）的 ask 弹窗 → 从队列移除，避免错配/阻塞
+    const activeRids = new Set(asks.map(a => a.request_id));
+    _agentModalQueue = _agentModalQueue.filter(q => q.kind !== 'ask' || activeRids.has(q.data.request_id));
+    if (_agentModalBusy && _pendingAskRequestId && !activeRids.has(_pendingAskRequestId)) {
+      // 当前显示的 ask 弹窗在后端已失效（超时/已处理）→ 自动关闭推进
+      _finishAgentModal();
+    }
+    for (const it of asks) _enqueueAgentModal('ask', it);
+  } catch (e) { /* 静默：轮询失败不打扰 */ }
 }
 
 // ─── 门控面板（🎛 按钮 + 弹出面板）────────────────────────────
@@ -16677,7 +16786,7 @@ function escapeHtml(text) {
 
 let modalCallback = null;
 
-function showHtmlModal(title, html) {
+function showHtmlModal(title, html, opts) {
   const overlay = document.getElementById('modalOverlay');
   const titleEl = document.getElementById('modalTitle');
   const input = document.getElementById('modalInput');
@@ -16706,9 +16815,10 @@ function showHtmlModal(title, html) {
   const cancel = document.getElementById('modalCancel');
   confirm.style.display = 'none';
   cancel.style.display = 'none';
-  // 点击 overlay 外部区域关闭
+  // 点击 overlay 外部区域关闭（opts.clickOutside === false 时禁用，如审批/追问弹窗防误关）
+  const clickOutside = !(opts && opts.clickOutside === false);
   overlay.onclick = function(e) {
-    if (e.target === overlay) {
+    if (clickOutside && e.target === overlay) {
       overlay.classList.remove('show');
       modalBox.classList.remove('modal-wide');
       overlay.onclick = null;

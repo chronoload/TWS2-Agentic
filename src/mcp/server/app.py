@@ -6284,11 +6284,42 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         if not request_id:
             return ok(data={"error": "request_id required"})
         for ag in _iter_all_agents():
-            if getattr(ag, "get_pending_ask", lambda: None)() == request_id:
-                ag._last_ask_answer = answer or "（用户未输入）"
-                ag.clear_pending_ask()
+            if getattr(ag, "has_pending_ask", lambda r: False)(request_id):
+                # 并发多挂起：答案按 rid 写入字典，唤醒对应挂起线程
+                answers = getattr(ag, "_last_ask_answers", None)
+                if answers is None:
+                    ag._last_ask_answers = answers = {}
+                answers[request_id] = answer or "（用户未输入）"
+                ag.clear_pending_ask(request_id)
+                print(f"[ASK] answer {request_id} 主路径匹配 写入 (实例id={id(ag)})", flush=True)
                 return ok(data={"accepted": True})
+        # 兜底：从全局 pending ask 池按 request_id 找 agent（WS2/隔离环境实例可能不在 pool）
+        try:
+            from ..agent import _GLOBAL_PENDING_ASKS
+            info = _GLOBAL_PENDING_ASKS.get(request_id)
+            ag = info.get("agent") if info else None
+            print(f"[ASK] answer {request_id} 主路径未匹配，全局池兜底 agent={'有' if ag is not None else '无'}", flush=True)
+            if ag is not None and getattr(ag, "has_pending_ask", lambda r: False)(request_id):
+                answers = getattr(ag, "_last_ask_answers", None)
+                if answers is None:
+                    ag._last_ask_answers = answers = {}
+                answers[request_id] = answer or "（用户未输入）"
+                ag.clear_pending_ask(request_id)
+                print(f"[ASK] answer {request_id} 全局池兜底 写入 (实例id={id(ag)})", flush=True)
+                return ok(data={"accepted": True})
+        except Exception:
+            pass
+        print(f"[ASK] answer {request_id} 匹配失败 → no matching (accepted=false)", flush=True)
         return ok(data={"accepted": False, "error": "no matching pending ask"})
+
+    @app.get("/api/agent/ask/pending")
+    async def agent_ask_pending():
+        """非 SSE 环境（WS2 Agent）挂起的 ask 问题池：前端轮询拉取并弹窗"""
+        try:
+            from ..agent import list_global_pending_asks
+            return ok(data={"pending": list_global_pending_asks()})
+        except Exception as e:
+            return ok(data={"pending": [], "error": str(e)})
 
     @app.get("/api/agent/model-info")
     async def agent_model_info():
