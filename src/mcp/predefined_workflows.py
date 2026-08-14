@@ -1628,7 +1628,7 @@ def langdriven_engine_workflow() -> WorkflowDefinition:
     return WorkflowDefinition(
         workflow_id="langdriven_engine_v1",
         name="语言驱动研究引擎",
-        description="计算科学专家·语言驱动：先用编程语言抽象（对象/消息/函数/类型/并发）建模问题，再匹配范式、设计方案、验证边界、产出最小可运行核心",
+        description="计算科学专家·语言驱动：先用编程语言抽象（对象/消息/函数/类型/并发）建模问题，再匹配范式（含 TDD/BDD 等工程实践）、设计方案、测试与验证、失效边界、产出最小可运行核心+测试骨架",
         entry_step="language_modeling",
         checkpoint_after={"language_modeling", "paradigm_match", "design", "verification", "failure_boundary", "minimal_core"},
         steps=[
@@ -1656,15 +1656,16 @@ def langdriven_engine_workflow() -> WorkflowDefinition:
 
 {step_results}
 
-从以下清单选出匹配范式并说明原因（语言范式第一位，其后才是经典范式）：
+从以下清单选出匹配范式并说明原因（**语言范式第一，开发实践第二**，其后才是经典范式）：
 - 语言范式: 面向对象 / 函数式 / 过程式 / 逻辑式 / 并发模型(Actor·CSP·STM·协程) / 类型系统 / 元编程
+- 开发实践: TDD / BDD(GWT) / ATDD / 重构 / 测试金字塔 / CI / CD / 代码评审 / 结对编程 / DDD / 微服务拆分 / 遗留代码处理 / 混沌工程 / ODD / SRE / SDL / 敏捷精益
 - 算法范式: 分治 / DP / 贪心 / 回溯 / 搜索 / 随机化 / 流式 / 图算法
 - 存储范式: B+树 / LSM / 索引 / 文档-键值-图-时序-向量 / 缓存 / 分区复制分片
 - 分布式: CAP / 一致 / Raft / Saga / Outbox / 事件驱动 / CQRS / 微服务
 - 架构: 分层 / 六边形 / 微内核 / 管道过滤器 / 事件驱动 / DDD
 - 性能 / 安全范式
 
-禁止空泛使用范式名称——必须指出具体用到封装/继承/多态/纯函数/不可变/Actor信箱等哪个构件解决什么问题。""",
+禁止空泛使用范式名称或工程实践——必须指出具体用到封装/继承/多态/纯函数/不可变/Actor信箱等哪个构件、以及 TDD 具体测什么行为/用什么框架，解决什么问题。""",
                 tools=["calculate"],
             ),
             StepDefinition(
@@ -1680,13 +1681,17 @@ def langdriven_engine_workflow() -> WorkflowDefinition:
             ),
             StepDefinition(
                 step_id="verification",
-                name="验证方法",
+                name="测试与验证",
                 step_type=StepType.AGENT,
-                prompt_template="""为方案设计验证方法（不得跳过）：
+                prompt_template="""为方案设计测试策略与验证方法（遵循 TDD/BDD，不得跳过）：
 
 {step_results}
 
-输出「验证方法」：基准测试 / 复杂度分析 / 失效注入 / 类型检查 / 单元测试 / 竞态检测等，具体到验证什么、怎么验证、通过标准。""",
+输出「测试与验证」：
+- 遵循 TDD/BDD：先写什么失败测试（红）？测什么行为（Given-When-Then 或单元断言）？用什么框架（pytest/Jest/JUnit 等）？
+- 测试分层（测试金字塔）：单元 > 集成 > 端到端各测什么、如何隔离？
+- 验证正确性与性能：复杂度分析 / 基准 / 竞态检测 / 失效注入，通过标准具体化。
+- 可选 CI/CD：每次提交触发什么检查、如何保证主干可发布。""",
                 tools=["calculate", "cli_execute"],
             ),
             StepDefinition(
@@ -1708,7 +1713,7 @@ def langdriven_engine_workflow() -> WorkflowDefinition:
 
 {step_results}
 
-输出 30-50 行代码或核心类型/接口定义（含注释），演示语言范式落地。若有触发词 [OO]/[FP]/[并发]/[类型]，按其强制约束输出。""",
+输出 30-50 行代码或核心类型/接口定义（含注释）+ **配套测试骨架**（TDD/BDD：至少一个失败测试→实现→断言），演示语言范式与工程实践落地。若有触发词 [OO]/[FP]/[TDD]/[BDD]/[并发]/[类型]，按其强制约束输出。""",
                 tools=["write_file", "cli_execute"],
             ),
         ],
