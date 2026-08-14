@@ -339,3 +339,46 @@ def test_loop_uses_session_context_when_available():
     tid2 = loop2.submit("独立任务", auto_start=False)
     loop2.step()
     assert runner2.calls[0][0]["content"] == "独立任务"
+
+    # 无 session_id 时保持独立上下文（兼容旧用法）
+    runner2 = FakeRunner([([], "ok")])
+    loop2 = make_loop(runner2, session_context=ctx)
+    tid2 = loop2.submit("独立任务", auto_start=False)
+    loop2.step()
+    assert runner2.calls[0][0]["content"] == "独立任务"
+
+
+def test_session_mode_task_messages_are_loop_only():
+    """session 模式下 task.messages 只记录 loop 自身回合（goal + 回合产出），
+    不含普通对话历史——前端同流显示不被污染、去重指针不漂移（吞消息/闪烁根因，1:1 对齐单例）"""
+
+    class FakeSessionCtx:
+        def __init__(self):
+            self.history = [
+                {"role": "user", "content": "普通对话1"},
+                {"role": "assistant", "content": "普通回复1"},
+            ]
+            self.appended = []
+
+        def get(self, sid):
+            return list(self.history)
+
+        def append(self, sid, msgs):
+            self.appended.append((sid, list(msgs)))
+
+    ctx = FakeSessionCtx()
+    runner = FakeRunner([([], "完成")])
+    loop = make_loop(runner, session_context=ctx)
+    task_id = loop.submit("新目标", session_id="sess-1", auto_start=False)
+    loop.step()
+    task = loop.get_task(task_id)
+    msgs = task.messages
+    # 起始是 goal（user），不含普通对话消息
+    assert msgs[0]["role"] == "user" and msgs[0]["content"] == "新目标"
+    assert not any(m["content"] == "普通对话1" for m in msgs)
+    assert not any(m["content"] == "普通回复1" for m in msgs)
+    # 回合产出（assistant）在流中
+    assert any(m["role"] == "assistant" for m in msgs)
+    # 回写仅含回合产出增量（不含普通对话/不含 goal 重复）
+    assert ctx.appended
+    assert all("普通对话1" not in str(x) and "普通回复1" not in str(x) for _, x in ctx.appended)

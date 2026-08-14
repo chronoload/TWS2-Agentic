@@ -321,8 +321,10 @@ class AgentLoop:
             # goal 作为上下文组件（spec id=5）：会话中无该目标则追加
             if not any(m.get("role") == "user" and m.get("content") == task.goal for m in messages):
                 messages = messages + [{"role": "user", "content": task.goal}]
-            # task.messages 同步为会话上下文（前端同流显示）
-            task.messages = [dict(m) for m in messages]
+            # task.messages 只记录 loop 自身回合流（goal + 回合产出），不整体重建为会话历史——
+            # 避免普通对话消息污染同流显示 + _written/去重指针错乱（吞消息/闪烁根因，1:1 对齐单例）
+            if not task.messages:
+                task.messages.append({"role": "user", "content": task.goal, "ts": datetime.now().isoformat()})
         else:
             messages: List[Dict[str, Any]] = [{"role": "user", "content": task.goal}]
             # 会话化：goal 作为 user 消息记录到消息流（仅首次，介入消息不重复 goal）

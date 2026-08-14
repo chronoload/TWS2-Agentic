@@ -10218,6 +10218,26 @@ function _stopLoopPolling() {
   }
 }
 
+// loop 消息增量追加（1:1 对齐单例模式：与普通会话流式消息一样只 append DOM，不重建容器）。
+// 避免 loop 回合加入触发 renderAgentMessages 全量重建 → 闪烁 / 吞消息 / 打扰普通对话（解耦）。
+function addLoopMessage(content, extra) {
+  state.agentMessages.push({ role: 'loop', content: content || '', ...(extra || {}) });
+  const index = state.agentMessages.length - 1;
+  const msg = state.agentMessages[index];
+  const container = document.getElementById('agentMessages');
+  if (container) {
+    const html = _renderAgentMessageHtml(msg, index);
+    container.insertAdjacentHTML('beforeend', html);
+    // 渲染 KaTeX（仅新追加的这条）
+    const lastEls = container.querySelectorAll('.agent-msg:last-child .msg-content');
+    lastEls.forEach(function (el) {
+      if (!el._katexRendered) { _renderKatex(el); el._katexRendered = true; }
+    });
+    container.scrollTop = container.scrollHeight;
+  }
+  try { _addFlowNavBlock('loop', content || '', index, extra); } catch (e) {}
+}
+
 // 自主模式提交（方案A：注入 + 自动建 LoopTask 保障，spec id=4/5 + handoff/回审闭环）：
 // 1) loop-goal 注入目标到 agent 会话上下文（同一上下文迭代器）
 // 2) loop/submit 建 LoopTask(session_id) → 后台自主推进：防打断 + 达成判定 + handoff + macdev 回审
@@ -10253,7 +10273,7 @@ async function _submitLoopTask(goal) {
   } catch (e) {
     showToast('⚠️ 保障任务创建失败（目标已注入，agent 仍会自然推进）：' + (e.message || e), 'error');
   }
-  addAgentMessage('loop', goal, { loopKind: 'submitted', loopTaskId: taskId || '' });
+  addLoopMessage(goal, { loopKind: 'submitted', loopTaskId: taskId || '' });
   if (taskId) { _seenLoopTaskIds[taskId] = true; _seenLoopTasks[taskId] = 0; }
   showToast(taskId
     ? '⚡ Loop 目标已注入 + 保障任务已启动（防打断/达成判定/交接回审）'
@@ -10303,19 +10323,19 @@ function _startLoopPolling() {
           if (!_seenLoopTaskIds[tid]) {
             _seenLoopTaskIds[tid] = true;
             _seenLoopTasks[tid] = 0;
-            addAgentMessage('loop', t.goal, { loopKind: 'submitted', loopTaskId: tid });
+            addLoopMessage(t.goal, { loopKind: 'submitted', loopTaskId: tid });
           }
           // 新回合：从已见位置追加（跳过首条 user goal）
           const seen = _seenLoopTasks[tid] || 0;
           for (let i = seen; i < msgs.length; i++) {
             const m = msgs[i];
             if (m.role === 'assistant') {
-              addAgentMessage('loop', m.content || '', {
+              addLoopMessage(m.content || '', {
                 loopKind: 'turn', loopTaskId: tid, toolCalls: m.tool_calls,
                 turnCount: t.turn_count, status: t.status,
               });
             } else if (m.role === 'tool') {
-              addAgentMessage('loop', m.content || '', { loopKind: 'tool', loopTaskId: tid, toolCallId: m.tool_call_id });
+              addLoopMessage(m.content || '', { loopKind: 'tool', loopTaskId: tid, toolCallId: m.tool_call_id });
             }
           }
           _seenLoopTasks[tid] = msgs.length;
