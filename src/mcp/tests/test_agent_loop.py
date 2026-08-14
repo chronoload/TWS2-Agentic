@@ -274,3 +274,68 @@ def test_turn_event_emitted_per_round():
     task_id = loop.submit("目标", session_id="sess-1", auto_start=False)
     loop.step()
     assert "agent_loop.turn" in events
+
+
+
+# ── 12) 交接笔记（handoff）：终态生成结构化接力笔记（loop 交接 + macdev 回审双轨）──
+def test_task_generates_handoff():
+    runner = FakeRunner([
+        ([{"name": "write_file", "arguments": '{"path": "x.py"}'}], ""),
+        ([], "完成：已写入 x.py"),
+    ])
+    loop = make_loop(runner)
+    task_id = loop.submit("写文件", auto_start=False)
+    loop.step()
+    task = loop.get_task(task_id)
+    h = task.handoff
+    assert h is not None
+    assert h["goal"] == "写文件"
+    assert h["status"] == "completed"
+    assert h["turns"] == 2
+    assert h["summary"] == "完成：已写入 x.py"
+    # artifacts 从 write_file 调用提取 path 断言
+    assert any("x.py" in a for a in h["artifacts"])
+    # decisions 含工具名
+    assert "write_file" in h["decisions"]
+    # 无错误 → open_issues 为空
+    assert h["open_issues"] == []
+    # snapshot 暴露 handoff
+    assert task.snapshot()["handoff"]["status"] == "completed"
+
+
+# ── 13) 上下文共享改造（spec id=4）：同一上下文迭代器 ──
+def test_loop_uses_session_context_when_available():
+    """有 session_id 且注入会话回调 → 回合上下文 = 会话历史 + goal，结果回写会话"""
+
+    class FakeSessionCtx:
+        def __init__(self):
+            self.history = [
+                {"role": "user", "content": "之前聊过的内容"},
+                {"role": "assistant", "content": "之前回复"},
+            ]
+            self.appended = []
+
+        def get(self, sid):
+            return list(self.history)
+
+        def append(self, sid, msgs):
+            self.appended.append((sid, list(msgs)))
+
+    ctx = FakeSessionCtx()
+    runner = FakeRunner([([], "完成")])
+    loop = make_loop(runner, session_context=ctx)
+    task_id = loop.submit("新目标", session_id="sess-1", auto_start=False)
+    loop.step()
+    # 回合上下文以会话历史开头（同一上下文），goal 追加在后
+    first_call = runner.calls[0]
+    assert first_call[0]["content"] == "之前聊过的内容"
+    assert any(m.get("content") == "新目标" for m in first_call)
+    # 结果回写会话（同一上下文迭代器：回合产物写回共享流）
+    assert len(ctx.appended) >= 1
+    assert ctx.appended[0][0] == "sess-1"
+    # 无 session_id 时保持独立上下文（兼容旧用法）
+    runner2 = FakeRunner([([], "ok")])
+    loop2 = make_loop(runner2, session_context=ctx)
+    tid2 = loop2.submit("独立任务", auto_start=False)
+    loop2.step()
+    assert runner2.calls[0][0]["content"] == "独立任务"

@@ -305,6 +305,13 @@ class AgentInjectSkillRequest(BaseModel):
     direct_text: str = ""    # 非技能类型（tool/mcp/workflow/plugin）直接注入的指令文本
 
 
+class AgentLoopGoalRequest(BaseModel):
+    """Loop 目标注入请求（spec id=5）：loop 目标作为会话上下文可选组件注入 agent，
+    agent 自身循环（LLM↔工具）持续推进目标，直到达成/用户停止"""
+    goal: str
+    session_id: str = ""
+
+
 # ─── 工具函数 ────────────────────────────────────────────────
 
 def get_local_ip() -> str:
@@ -5454,6 +5461,49 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 "reply": f"处理出错：{str(e)}",
                 "source": "error",
             })
+
+    @app.post("/api/agent/loop-goal")
+    async def agent_loop_goal(req: AgentLoopGoalRequest):
+        """Loop 目标注入（spec id=5）：loop 目标作为会话上下文可选组件注入 agent。
+
+        agent 本身（LLM↔工具反复调用）就是不断循环的上下文——注入目标后，
+        agent 在后续每次对话/循环中持续推进该目标，直到达成或用户停止。
+        """
+        goal = (req.goal or "").strip()
+        if not goal:
+            return err(msg="goal 不能为空")
+        agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
+        if agent is None:
+            return err(msg="Agent 未初始化，无法注入 loop 目标")
+        try:
+            inject_msg = (
+                "【⚡ 自主 Loop 目标 · 会话级指令】\n"
+                "在本次会话中持续自主推进以下目标，反复迭代直到达成；期间可调用工具、自行验证。\n"
+                f"目标：{goal}\n"
+                "推进规则：\n"
+                "1. 每完成一步，简述进度（不要重复已说内容）；\n"
+                "2. 涉及代码/文件产出时，完成后自查（运行测试 / 检查文件存在与内容）；\n"
+                "3. 目标达成时明确声明『🎯 目标已达成』并总结产出；\n"
+                "4. 遇到无法推进的卡点时，明确说明卡点与建议。"
+            )
+            with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+                if getattr(agent, "messages", None) is None:
+                    agent.messages = []
+                agent.messages.append({"role": "user", "content": inject_msg})
+            try:
+                store = _get_session_store()
+                if store and req.session_id:
+                    _sync_agent_from_store(agent, req.session_id, store)
+            except Exception as e:
+                logger.warning(f"loop-goal session save error: {e}")
+            return ok(data={
+                "injected": True,
+                "content_length": len(inject_msg),
+                "preview": inject_msg[:160],
+                "message": f"⚡ Loop 目标已注入当前会话（agent 将自主循环推进）",
+            })
+        except Exception as e:
+            return err(msg=f"loop 目标注入失败: {e}")
 
     @app.post("/api/agent/inject-skill")
     async def agent_inject_skill(req: AgentInjectSkillRequest):

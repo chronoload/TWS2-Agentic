@@ -68,6 +68,9 @@ class LoopTask:
     pending_input: Optional[str] = None
     # 会话级模式切换（决策A）：归属会话（Agent 面板普通会话 session_id）
     session_id: Optional[str] = None
+    # 交接笔记（handoff）：终态生成结构化接力笔记 {goal, status, turns, summary,
+    # decisions[], artifacts[], open_issues[]}——loop 交接 + macdev 回审双轨（冗余保障）
+    handoff: Optional[Dict[str, Any]] = None
 
     def snapshot(self) -> Dict[str, Any]:
         """状态快照（前端轮询/事件广播用）"""
@@ -84,6 +87,7 @@ class LoopTask:
             "error": self.error,
             "messages": list(self.messages),
             "session_id": self.session_id,
+            "handoff": self.handoff,
         }
 
 
@@ -98,6 +102,7 @@ class AgentLoop:
         max_turns: int = 30,
         max_duration_seconds: float = 1800.0,
         event_bus=None,
+        session_context=None,
     ):
         self.runner = runner
         self.middleware_chain = middleware_chain  # 横切管线挂载点
@@ -105,6 +110,9 @@ class AgentLoop:
         self.default_max_turns = max_turns
         self.default_max_duration = max_duration_seconds
         self._event_bus = event_bus  # 事件广播通道（复用 automation.event_bus.EventBus）
+        # 会话上下文共享（spec id=4/5）：{get(sid)->msgs, append(sid, msgs)}
+        # loop 回合读写同一会话上下文（普通对话+loop 回合同流），目标达成前不停
+        self.session_context = session_context
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._tasks: Dict[str, LoopTask] = {}
         self._lock = threading.RLock()
@@ -238,6 +246,39 @@ class AgentLoop:
         self._queue.put(task_id)
         return task
 
+    def _build_handoff(self, task: LoopTask) -> Dict[str, Any]:
+        """生成结构化交接笔记（loop 交接 + macdev 回审双轨，冗余保障）：
+        从消息流提炼文件产出断言（artifacts）与工具决策（decisions），
+        供回审验证（macdev audit）与前端注入普通会话。"""
+        artifacts: List[str] = []
+        decisions: List[str] = []
+        for m in task.messages:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    name = tc.get("name") or ""
+                    if not name and isinstance(tc.get("function"), dict):
+                        name = tc.get("function", {}).get("name", "")
+                    if name:
+                        decisions.append(name)
+                    args = tc.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            import json as _json
+                            args = _json.loads(args)
+                        except Exception:
+                            args = None
+                    if isinstance(args, dict) and args.get("path"):
+                        artifacts.append(f"{name}: {args['path']}")
+        return {
+            "goal": task.goal,
+            "status": task.status.value,
+            "turns": task.turn_count,
+            "summary": task.result or "",
+            "decisions": list(dict.fromkeys(decisions)),
+            "artifacts": list(dict.fromkeys(artifacts)),
+            "open_issues": [task.error] if task.error else [],
+        }
+
     # ────────────────────────── 核心：step（同步可测） ──────────────────────────
 
     def step(self, timeout: float = 0.0) -> Optional[str]:
@@ -267,10 +308,27 @@ class AgentLoop:
             task.started_at = task.started_at or datetime.now().isoformat()
         self._emit("agent_loop.task_started", task)
 
-        messages: List[Dict[str, Any]] = [{"role": "user", "content": task.goal}]
-        # 会话化：goal 作为 user 消息记录到消息流（仅首次，介入消息不重复 goal）
-        if not task.messages:
-            task.messages.append({"role": "user", "content": task.goal, "ts": datetime.now().isoformat()})
+        # 上下文源（spec id=4/5）：有 session_id + 会话回调 → 读写同一会话上下文
+        # （普通对话 + loop 回合同流，目标达成前不停）；否则独立上下文（兼容 discover 面板/测试）
+        session_msgs = None
+        if task.session_id and self.session_context:
+            try:
+                session_msgs = list(self.session_context.get(task.session_id) or [])
+            except Exception:
+                session_msgs = None
+        if session_msgs is not None:
+            messages = list(session_msgs)
+            # goal 作为上下文组件（spec id=5）：会话中无该目标则追加
+            if not any(m.get("role") == "user" and m.get("content") == task.goal for m in messages):
+                messages = messages + [{"role": "user", "content": task.goal}]
+            # task.messages 同步为会话上下文（前端同流显示）
+            task.messages = [dict(m) for m in messages]
+        else:
+            messages: List[Dict[str, Any]] = [{"role": "user", "content": task.goal}]
+            # 会话化：goal 作为 user 消息记录到消息流（仅首次，介入消息不重复 goal）
+            if not task.messages:
+                task.messages.append({"role": "user", "content": task.goal, "ts": datetime.now().isoformat()})
+        _written = len(task.messages)  # 已回写会话的消息数（回合产物增量回写）
         while task.turn_count < task.max_turns:
             # ── 审核介入消息：追加为 user 消息喂给模型（决策③C） ──
             if task.pending_input:
@@ -313,9 +371,28 @@ class AgentLoop:
             try:
                 result = self.runner.run_turn(messages)
             except Exception as e:
-                task.status = TaskStatus.FAILED
+                # 防异常打断（spec id=5：目标达成前不停）：记录错误 + 续跑（预算未尽时）
                 task.error = f"{type(e).__name__}: {e}"
-                break
+                task.messages.append({
+                    "role": "assistant",
+                    "content": f"⚠️ 回合异常：{task.error}，继续尝试推进目标",
+                    "tool_calls": None,
+                    "ts": datetime.now().isoformat(),
+                })
+                messages.append({"role": "assistant", "content": f"⚠️ 回合异常：{task.error}"})
+                if task.turn_count >= task.max_turns:
+                    task.status = TaskStatus.FAILED
+                    break
+                messages.append({
+                    "role": "user",
+                    "content": f"（上一回合异常：{task.error}。请继续推进 loop 目标，必要时换一种方式）",
+                })
+                task.messages.append({
+                    "role": "user",
+                    "content": f"（上一回合异常：{task.error}，继续推进）",
+                    "ts": datetime.now().isoformat(),
+                })
+                continue
 
             # ── middleware 横切：after_agent ──
             if mw_context is not None:
@@ -350,28 +427,78 @@ class AgentLoop:
                     })
                 # 会话级模式切换：每回合广播 turn 事件（前端同流追加显示）
                 self._emit("agent_loop.turn", task)
+                # 会话上下文回写（同一上下文迭代器：回合产物写回共享流）
+                if session_msgs is not None and task.session_id and self.session_context:
+                    try:
+                        new_msgs = task.messages[_written:]
+                        if new_msgs:
+                            self.session_context.append(task.session_id, new_msgs)
+                            _written = len(task.messages)
+                    except Exception:
+                        pass
                 continue
 
-            # 无 tool_calls → 自然完成
-            task.result = getattr(result, "content", "") or ""
-            task.status = TaskStatus.COMPLETED
-            task.completed_at = datetime.now().isoformat()
-            # 会话化：记录最终 assistant 回复到消息流
-            task.messages.append({
-                "role": "assistant",
-                "content": task.result,
-                "tool_calls": None,
-                "ts": datetime.now().isoformat(),
-            })
-            # 会话级模式切换：最终回合也广播 turn 事件
+            # 无 tool_calls：目标达成判定（spec id=5）——loop 目标模式须声明「🎯 目标已达成」才完成，
+            # 否则目标达成前不停（续跑）；非 loop 目标模式保持「无 tool_calls → 自然完成」（兼容旧行为）
+            _content = getattr(result, "content", "") or ""
+            _loop_goal_mode = session_msgs is not None
+            if _loop_goal_mode and "🎯 目标已达成" not in _content:
+                # 目标达成前不停：记录回复 + 追加继续推进指令，续跑
+                task.messages.append({
+                    "role": "assistant",
+                    "content": _content,
+                    "tool_calls": None,
+                    "ts": datetime.now().isoformat(),
+                })
+                messages.append({"role": "assistant", "content": _content})
+                task.messages.append({
+                    "role": "user",
+                    "content": "（继续推进上述 loop 目标，直到达成；每完成一步就继续下一步，若已达成请声明『🎯 目标已达成』）",
+                    "ts": datetime.now().isoformat(),
+                })
+                messages.append({
+                    "role": "user",
+                    "content": "（继续推进上述 loop 目标，直到达成；若已达成请声明『🎯 目标已达成』）",
+                })
+            else:
+                # 达成 或 非 loop 目标模式 → 自然完成
+                task.result = _content
+                task.status = TaskStatus.COMPLETED
+                task.completed_at = datetime.now().isoformat()
+                task.messages.append({
+                    "role": "assistant",
+                    "content": _content,
+                    "tool_calls": None,
+                    "ts": datetime.now().isoformat(),
+                })
+                messages.append({"role": "assistant", "content": _content})
+            # 会话上下文回写
+            if session_msgs is not None and task.session_id and self.session_context:
+                try:
+                    new_msgs = task.messages[_written:]
+                    if new_msgs:
+                        self.session_context.append(task.session_id, new_msgs)
+                        _written = len(task.messages)
+                except Exception:
+                    pass
+            # 会话级模式切换：每回合广播 turn 事件（含最终回合）
             self._emit("agent_loop.turn", task)
-            break
+            if task.status == TaskStatus.COMPLETED:
+                break
+            continue
         else:
             # while 因 max_turns 耗尽退出且未 break → 预算用尽，挂起等待人工
             if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 task.status = TaskStatus.HALTED
                 task.error = f"达到 max_turns={task.max_turns}"
                 task.completed_at = datetime.now().isoformat()
+
+        # ── 交接笔记（handoff）：终态生成（loop 交接 + macdev 回审双轨，冗余保障） ──
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.HALTED, TaskStatus.FAILED):
+            try:
+                task.handoff = self._build_handoff(task)
+            except Exception:
+                pass
 
         # ── 终态广播（前端轮询/通知通道） ──
         if task.status == TaskStatus.COMPLETED:
