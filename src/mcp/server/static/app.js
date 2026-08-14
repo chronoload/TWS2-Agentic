@@ -12569,10 +12569,14 @@ function _mdStructuralIncomplete(text) {
   return false;
 }
 
-function _applyStreamContent(el, content, container) {
+function _applyStreamContent(el, content, container, forceRender) {
   if (!el) return;
+  // 自适应：结构未完成（防闪烁）或超长回复（>800 行，防每 30ms 全量解析卡顿）→ 保守纯文本；
+  // 否则流式中直接 renderSimpleMarkdown（适当激进）。forceRender=true（流结束收尾）强制渲染。
+  var incomplete = _mdStructuralIncomplete(content);
+  var tooLong = content.split('\n').length > 800;
   var renderKey;
-  if (_mdStructuralIncomplete(content)) {
+  if (!forceRender && (incomplete || tooLong)) {
     renderKey = 'TEXT:' + content;
     if (el._streamRendered !== renderKey) {
       el._streamRendered = renderKey;
@@ -12670,8 +12674,8 @@ function finalizeStreamingMessage() {
     const el = container ? container.querySelector('.agent-msg[data-index="' + lastIdx + '"] .msg-content') : null;
     if (el) {
       const content = state.agentMessages[lastIdx].content || '';
-      // 幂等补一次最终内容（_streamRendered 防重：已渲染则跳过）+ KaTeX 收尾
-      _applyStreamContent(el, content, container);
+      // 幂等补一次最终内容（forceRender：超长回复流式中降级纯文本，此处强制渲染 md）+ KaTeX 收尾
+      _applyStreamContent(el, content, container, true);
       if (el._streamKatexTimer) { clearTimeout(el._streamKatexTimer); el._streamKatexTimer = null; }
       _renderKatex(el);
       return;  // 已实时渲染，跳过全量重建（避免脱掉闪烁）
