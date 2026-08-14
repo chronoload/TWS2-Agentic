@@ -533,6 +533,13 @@ function __fallbackLink(el, urls) {
               </select>
             </div>
             <div class="harness-row">
+              <label title="会话级模式：普通对话 / 自主 loop（loop 回合与对话同流显示）">对话模式</label>
+              <select id="agentLoopModeSelector" onchange="setAgentLoopMode(this.value)">
+                <option value="normal">💬 普通对话</option>
+                <option value="loop">⚡ 自主模式</option>
+              </select>
+            </div>
+            <div class="harness-row">
               <label title="工具权限审批粒度">审批</label>
               <select id="agentApprovalModeSelector" onchange="setAgentApprovalMode(this.value)">
                 <option value="suggest">💡 建议</option>

@@ -25,6 +25,7 @@ class SubmitRequest(BaseModel):
     goal: str
     max_turns: Optional[int] = None
     auto_start: bool = True
+    session_id: Optional[str] = None  # 会话级模式切换（决策A）：归属普通会话
 
 
 class ControlRequest(BaseModel):
@@ -76,10 +77,21 @@ def loop_submit(req: SubmitRequest):
     loop = _get_loop()
     try:
         task_id = loop.submit(goal=req.goal, max_turns=req.max_turns,
-                              auto_start=req.auto_start)
+                              auto_start=req.auto_start,
+                              session_id=req.session_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
     return {"task_id": task_id, "goal": req.goal}
+
+
+@router.get("/tasks")
+def loop_tasks_by_session(session: Optional[str] = None):
+    """按会话查询 loop 任务（会话级模式切换：前端同流渲染时拉取归属会话的 loop 任务）"""
+    loop = _get_loop()
+    tasks = loop.list_tasks()
+    if session is not None:
+        tasks = [t for t in tasks if t.session_id == session]
+    return {"tasks": [t.snapshot() for t in tasks]}
 
 
 @router.get("/task/{task_id}")

@@ -10164,6 +10164,108 @@ async function initAgentPanel() {
   
   // 启动后台定期同步（每30秒检查一次会话状态）
   _startPeriodicSessionSync();
+  // 会话级模式切换（决策A）：普通对话 / 自主 loop（模式开关 + loop 回合轮询同流显示）
+  _initAgentLoopMode();
+}
+
+// ─── 会话级模式切换（决策A）：普通对话 / 自主 loop ─────────────
+// loop 是一种 autonomous 对话模式：自主模式提交目标 → 后台执行 → 回合与普通对话同流显示，
+// 随时切回普通对话继续（spec id=2）。
+let _agentLoopMode = false;           // false=普通对话 true=自主 loop
+let _agentLoopPollTimer = null;
+let _seenLoopTasks = {};              // task_id → 已见消息数（同流去重）
+let _seenLoopTaskIds = {};            // task_id → true（提交卡片去重）
+
+function _initAgentLoopMode() {
+  const sel = document.getElementById('agentLoopModeSelector');
+  const input = document.getElementById('agentInput');
+  function render() {
+    if (!sel) return;
+    if (_agentLoopMode) {
+      if (input) input.placeholder = '输入自主任务目标… 后台执行，回合与对话同流显示（可随时切回普通对话）';
+    } else {
+      if (input) input.placeholder = '输入消息... (可粘贴/拖拽图片或视频，右键呼出方法菜单，输入 / 唤醒技能发现)';
+    }
+  }
+  // 初始值对齐（普通对话）
+  if (sel) sel.value = _agentLoopMode ? 'loop' : 'normal';
+  render();
+  _startLoopPolling();
+}
+
+// 门控面板「对话模式」切换（onchange）：普通对话 ↔ 自主 loop
+window.setAgentLoopMode = function (value) {
+  _agentLoopMode = (value === 'loop');
+  const input = document.getElementById('agentInput');
+  if (input) input.placeholder = _agentLoopMode
+    ? '输入自主任务目标… 后台执行，回合与对话同流显示（可随时切回普通对话）'
+    : '输入消息... (可粘贴/拖拽图片或视频，右键呼出方法菜单，输入 / 唤醒技能发现)';
+};
+
+// 自主模式提交：POST /api/loop/submit {goal, session_id} → 流中插入「⚡ 已提交自主任务」卡片
+async function _submitLoopTask(goal) {
+  const sid = _getAgentSessionId() || '';
+  let taskId = null;
+  try {
+    const res = await fetch(API_BASE + '/api/loop/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: goal, session_id: sid }),
+    });
+    const data = await res.json();
+    taskId = data.task_id || null;
+  } catch (e) {
+    showToast('自主任务提交失败：' + (e.message || e), 'error');
+    return;
+  }
+  addAgentMessage('loop', goal, { loopKind: 'submitted', loopTaskId: taskId || '' });
+  if (taskId) { _seenLoopTaskIds[taskId] = true; _seenLoopTasks[taskId] = 0; }
+  showToast('⚡ 已提交自主任务' + (taskId ? '（' + taskId + '）' : ''), 'success');
+}
+
+// 轮询：拉取当前会话的 loop 任务，新任务/新回合追加到会话流（同流显示）
+function _startLoopPolling() {
+  if (_agentLoopPollTimer) return;
+  _agentLoopPollTimer = setInterval(function () {
+    const sid = _getAgentSessionId();
+    if (!sid) return;
+    fetch(API_BASE + '/api/loop/tasks?session=' + encodeURIComponent(sid))
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        const tasks = (res && res.tasks) || [];
+        tasks.forEach(function (t) {
+          const tid = t.task_id;
+          const msgs = t.messages || [];
+          // 新任务提交卡片（未见过）
+          if (!_seenLoopTaskIds[tid]) {
+            _seenLoopTaskIds[tid] = true;
+            _seenLoopTasks[tid] = 0;
+            addAgentMessage('loop', t.goal, { loopKind: 'submitted', loopTaskId: tid });
+          }
+          // 新回合：从已见位置追加（跳过首条 user goal）
+          const seen = _seenLoopTasks[tid] || 0;
+          for (let i = seen; i < msgs.length; i++) {
+            const m = msgs[i];
+            if (m.role === 'assistant') {
+              addAgentMessage('loop', m.content || '', {
+                loopKind: 'turn', loopTaskId: tid, toolCalls: m.tool_calls,
+                turnCount: t.turn_count, status: t.status,
+              });
+            } else if (m.role === 'tool') {
+              addAgentMessage('loop', m.content || '', { loopKind: 'tool', loopTaskId: tid, toolCallId: m.tool_call_id });
+            }
+          }
+          _seenLoopTasks[tid] = msgs.length;
+        });
+        // 清理已切换会话的残留记录
+        const curTids = {};
+        tasks.forEach(function (t) { curTids[t.task_id] = true; });
+        Object.keys(_seenLoopTasks).forEach(function (k) {
+          if (!curTids[k]) { delete _seenLoopTasks[k]; delete _seenLoopTaskIds[k]; }
+        });
+      })
+      .catch(function () {});
+  }, 3000);
 }
 
 // ─── 多标签页同步 ────────────────────────────────────────────
@@ -12200,6 +12302,42 @@ function _renderAgentMessageHtml(msg, mi) {
       '<div class="msg-content">' + rendered + '</div>' +
     '</div>';
   }
+  // ── loop 回合（会话级模式切换，决策A）：与普通对话同流显示 ──
+  if (msg.role === 'loop') {
+    var _loopTid = msg.loopTaskId ? '<code style="font-size:10px;opacity:.8">' + escapeHtml(String(msg.loopTaskId).slice(0, 8)) + '</code>' : '';
+    if (msg.loopKind === 'submitted') {
+      rendered = '<div class="loop-submitted" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+        + '<span>⚡</span><span style="flex:1">已提交自主任务：<b>' + escapeHtml(msg.content || '') + '</b></span>'
+        + _loopTid + '</div>';
+      return '<div class="agent-msg loop" data-index="' + mi + '" data-mid="' + _mid + '">' +
+        '<div class="msg-role">⚡ 自主任务</div><div class="msg-content">' + rendered + '</div></div>';
+    }
+    if (msg.loopKind === 'tool') {
+      var _tc = String(msg.content || '').slice(0, 600);
+      rendered = '<div class="lp-tool-card">🔧 tool' + (msg.toolCallId ? ' <code>' + escapeHtml(msg.toolCallId) + '</code>' : '')
+        + '<pre>' + escapeHtml(_tc) + '</pre></div>';
+      return '<div class="agent-msg loop" data-index="' + mi + '" data-mid="' + _mid + '">' +
+        '<div class="msg-content">' + rendered + '</div></div>';
+    }
+    // turn：自主 Agent 回合（assistant 内容 + tool_calls 卡片 + 状态）
+    var _loopToolHtml = '';
+    if (msg.toolCalls && msg.toolCalls.length) {
+      _loopToolHtml = '<div class="lp-tool-list">' + msg.toolCalls.map(function (tc) {
+        var _n = tc && (tc.name || (tc.function && tc.function.name)) || 'tool';
+        var _a = tc && tc.arguments ? tc.arguments : '';
+        if (typeof _a !== 'string') _a = JSON.stringify(_a);
+        return '<div class="lp-tool-call">🔧 <code>' + escapeHtml(_n) + '</code>'
+          + (_a ? '<pre>' + escapeHtml(String(_a).slice(0, 200)) + '</pre>' : '') + '</div>';
+      }).join('') + '</div>';
+    }
+    var _stBadge = msg.status ? '<span class="lp-badge lp-' + String(msg.status) + '">' + escapeHtml(msg.status) + '</span>' : '';
+    var _turnLabel = msg.turnCount ? '回合 ' + msg.turnCount : '';
+    rendered = '<div class="lp-role">⚡ 自主 Agent ' + _stBadge + ' ' + _turnLabel + '</div>'
+      + (msg.content ? '<div class="msg-content lp-body">' + escapeHtml(msg.content) + '</div>' : '')
+      + _loopToolHtml;
+    return '<div class="agent-msg loop" data-index="' + mi + '" data-mid="' + _mid + '">' +
+      '<div class="msg-role">⚡ 自主 ' + _loopTid + '</div><div>' + rendered + '</div></div>';
+  }
   if (msg.role === 'user') {
     // 技能注入消息：折叠为提示条，不展示全文（保持上下文感知但 UI 简洁）
     var _content = msg.content || '';
@@ -12950,6 +13088,15 @@ function renderSimpleMarkdown(text) {
 let _pendingSendQueue = [];
 
 async function sendAgentMessage() {
+  // 会话级模式切换（决策A）：自主模式 → 提交后台长程任务（回合与对话同流显示）
+  const _modeInput = document.getElementById('agentInput');
+  const _modeText = _modeInput.value.trim();
+  if (_agentLoopMode) {
+    if (!_modeText) return;
+    _modeInput.value = '';
+    await _submitLoopTask(_modeText);
+    return;
+  }
   // 检查是否正在恢复会话
   if (state.agentRestoring) {
     showToast('正在加载上次会话，请稍候...', 'info');

@@ -16,6 +16,7 @@ from mcp.harness.turn import TurnResult, TurnStatus  # noqa: E402
 from mcp.server.loop_api import (  # noqa: E402
     ControlRequest, SubmitRequest, TaskMessageRequest, _set_loop_for_test,
     loop_control, loop_state, loop_submit, loop_task_detail, loop_task_message,
+    loop_tasks_by_session,
 )
 
 
@@ -85,3 +86,19 @@ def test_task_message_intervene():
     assert task.messages[-1]["role"] == "user"
     assert task.messages[-1]["content"] == "注意细节"
     assert task.pending_input == "注意细节"
+
+
+# ── 会话级模式切换：submit 带 session_id + 按会话查询 ──
+def test_submit_with_session_and_query_by_session():
+    loop = AgentLoop(runner=FakeRunner())
+    _set_loop_for_test(loop)
+    body = loop_submit(SubmitRequest(goal="会话任务", session_id="sess-1"))
+    tid = body["task_id"]
+    loop.step()
+    tasks = loop_tasks_by_session("sess-1")["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["task_id"] == tid
+    assert tasks[0]["session_id"] == "sess-1"
+    assert "messages" in tasks[0]
+    # 其他会话查不到
+    assert loop_tasks_by_session("sess-2")["tasks"] == []

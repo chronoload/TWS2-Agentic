@@ -251,3 +251,26 @@ def test_task_records_message_flow():
     # snapshot 暴露 messages
     snap = task.snapshot()
     assert "messages" in snap and len(snap["messages"]) == len(msgs)
+
+
+# ── 11) 会话级模式切换：session_id 关联 + 每回合 turn 事件 ──
+def test_submit_with_session_id():
+    runner = FakeRunner([([], "完成")])
+    loop = make_loop(runner)
+    task_id = loop.submit("目标", session_id="sess-1", auto_start=False)
+    task = loop.get_task(task_id)
+    assert task.session_id == "sess-1"
+    assert task.snapshot()["session_id"] == "sess-1"
+
+
+def test_turn_event_emitted_per_round():
+    from mcp.automation.event_bus import EventBus
+
+    bus = EventBus()
+    events = []
+    bus.subscribe("agent_loop.*", lambda e: events.append(e.event_type))
+    runner = FakeRunner([([], "完成")])
+    loop = make_loop(runner, event_bus=bus)
+    task_id = loop.submit("目标", session_id="sess-1", auto_start=False)
+    loop.step()
+    assert "agent_loop.turn" in events

@@ -5238,7 +5238,7 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   min-height: 36px;
   max-height: 36px;
   flex-shrink: 0;
-  overflow: hidden;
+  overflow: visible;
   border-bottom: 1px solid var(--border);
   background: var(--bg-secondary);
 }
@@ -8337,3 +8337,8 @@ pre.rmd-chunk::first-line {
 .lp-halted { background: rgba(255,180,0,.15); color: #ffb400; }
 .lp-unknown { background: rgba(128,128,128,.15); color: var(--fg-muted); }
 .lp-result { margin-top: 6px; font-size: 11px; color: var(--fg); }
+
+/* ── loop 回合与普通对话同流显示（会话级模式切换，决策A）── */
+.agent-msg.loop { border-left: 2px solid var(--accent); background: var(--bg-secondary); }
+.agent-msg.loop .msg-role { color: var(--accent); }
+.lp-tool-list { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }

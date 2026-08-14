@@ -66,6 +66,8 @@ class LoopTask:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     # 审核介入挂起输入：intervene() 设置，下一回合消费为 user 消息（决策③C）
     pending_input: Optional[str] = None
+    # 会话级模式切换（决策A）：归属会话（Agent 面板普通会话 session_id）
+    session_id: Optional[str] = None
 
     def snapshot(self) -> Dict[str, Any]:
         """状态快照（前端轮询/事件广播用）"""
@@ -81,6 +83,7 @@ class LoopTask:
             "result": self.result,
             "error": self.error,
             "messages": list(self.messages),
+            "session_id": self.session_id,
         }
 
 
@@ -166,19 +169,23 @@ class AgentLoop:
 
     def submit(self, goal: str, max_turns: Optional[int] = None,
                max_duration_seconds: Optional[float] = None,
-               auto_start: bool = True) -> str:
+               auto_start: bool = True,
+               session_id: Optional[str] = None) -> str:
         """提交长程任务（入队即返回 task_id；后台自主执行）
 
         auto_start=True（默认）：提交即自主——loop 处于 IDLE 时自动启动后台线程执行
         （修复：此前 submit 只入队不启动线程，队列永不 drain → 任务永久 pending）；
         PAUSED/STOPPED 状态不强制启动（保持状态机语义）。
         auto_start=False：仅入队，配合 step() 单步驱动（测试/编排用）。
+        session_id：归属会话（会话级模式切换，决策A）——loop 回合可同流显示在
+        该普通会话的消息流中。
         """
         task = LoopTask(
             task_id=uuid.uuid4().hex[:12],
             goal=goal,
             max_turns=max_turns or self.default_max_turns,
             max_duration_seconds=max_duration_seconds or self.default_max_duration,
+            session_id=session_id,
         )
         with self._lock:
             self._tasks[task.task_id] = task
@@ -341,6 +348,8 @@ class AgentLoop:
                         "role": "tool", "tool_call_id": t_id, "content": content,
                         "ts": datetime.now().isoformat(),
                     })
+                # 会话级模式切换：每回合广播 turn 事件（前端同流追加显示）
+                self._emit("agent_loop.turn", task)
                 continue
 
             # 无 tool_calls → 自然完成
@@ -354,6 +363,8 @@ class AgentLoop:
                 "tool_calls": None,
                 "ts": datetime.now().isoformat(),
             })
+            # 会话级模式切换：最终回合也广播 turn 事件
+            self._emit("agent_loop.turn", task)
             break
         else:
             # while 因 max_turns 耗尽退出且未 break → 预算用尽，挂起等待人工
