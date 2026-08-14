@@ -454,7 +454,6 @@ function _safeParseJSON(str, fallback) {
 const state = {
   currentDir: '',
   currentWorkspaceRoot: '',
-  defaultWorkspaceRoot: '',
   openTabs: [],
   recentFiles: _safeParseJSON(localStorage.getItem('ts2_recent_files') || '[]', []),
   activeTab: null,
@@ -612,8 +611,8 @@ let _editorOpenGen = 0;  // 代际计数器：防止快速连续打开文件时�
 
 const editorService = {
   async open(path, forceFresh) {
-    // 如果活动 pane 是分屏编辑器，在该 pane 中打开（Agent pane 除外）
-    if (!forceFresh && _splitActive && _activePaneId !== '0' && !(window._agentPanes && window._agentPanes[_activePaneId])) {
+    // 如果活动 pane 是分屏编辑器，在该 pane 中打开
+    if (!forceFresh && _splitActive && _activePaneId !== '0' && _activePaneId !== _agentPaneId) {
       await this.openInPane(path, _activePaneId);
       return;
     }
@@ -3851,7 +3850,13 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
 });
 
 function switchNavTab(tabName) {
-  // Agent 分屏 pane 为独立组件（在 editorArea），sidebar 的 Agent 面板始终可用，无需特判
+  // 如果 Agent 面板在分屏中，点击 Agent tab 时聚焦分屏而非 sidebar
+  if (tabName === 'agent' && _agentPaneId) {
+    setActivePane(_agentPaneId);
+    // 不切换 sidebar 面板，因为 panel-agent 已在分屏中
+    document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
+    return;
+  }
 
   state.activeNavTab = tabName;
 
@@ -4438,13 +4443,9 @@ async function refreshTree(dirtyPaths) {
   if (state.currentWorkspaceRoot) {
     dirs.add('.');
   }
-  // 默认工作区：EXPOSED_DIRS 根目录若已展开也一并刷新
-  // （工作区模式下 expandedDirs 已全量加入，无需再遍历 EXPOSED_DIRS）
-  if (!state.currentWorkspaceRoot) {
-    for (const d of EXPOSED_DIRS) {
-      if (state.expandedDirs.has(d)) {
-        dirs.add(d);
-      }
+  for (const d of EXPOSED_DIRS) {
+    if (state.expandedDirs.has(d)) {
+      dirs.add(d);
     }
   }
   for (const dirPath of dirs) {
@@ -4695,8 +4696,8 @@ function markTabModified(path, modified) {
 }
 
 async function saveCurrentFile(silent) {
-  // 如果活动 pane 是分屏编辑器，走分屏保存（Agent pane 除外）
-  if (_splitActive && _activePaneId !== '0' && !(window._agentPanes && window._agentPanes[_activePaneId])) {
+  // 如果活动 pane 是分屏编辑器，走分屏保存
+  if (_splitActive && _activePaneId !== '0' && _activePaneId !== _agentPaneId) {
     await savePaneFile(_activePaneId, silent);
     return;
   }
@@ -6039,10 +6040,6 @@ async function _doRefreshWelcomeCollabList(box) {
   if (_collabListCache.loading) return;
   _collabListCache.loading = true;
   var dirs = (typeof EXPOSED_DIRS !== 'undefined') ? EXPOSED_DIRS : ['TS2'];
-  // 非默认工作区：扫描整个工作区根目录（不受 EXPOSED_DIRS 限制）
-  if (state.currentWorkspaceRoot) {
-    dirs = ['.'];
-  }
   // 并行扫描所有暴露目录，整体加超时保护（scanTree 全量 rglob 在大目录上较慢）
   var allTask = Promise.all(dirs.map(function (d) {
     return client.scanTree(d).then(function (r) {
@@ -10161,9 +10158,6 @@ async function initAgentPanel() {
   
   // 启动后台定期同步（每30秒检查一次会话状态）
   _startPeriodicSessionSync();
-
-  // 恢复 Agent 显示模式（单实例 ⇄ 真分屏）
-  try { initAgentPaneMode(); } catch (e) { console.warn('[Agent] initAgentPaneMode 失败', e); }
 }
 
 // ─── 多标签页同步 ────────────────────────────────────────────
@@ -13861,20 +13855,10 @@ function _renderDiscoverList(preserveSel) {
     return;
   }
   let html = '';
-  // 搜索匹配 + 排序：名字命中排最前，其次描述命中；无关键词时保持原序
-  const rank = (name, desc) => {
-    if (!kw) return 0;
-    const n = ((name || '') + '').toLowerCase();
-    const d = ((desc || '') + '').toLowerCase();
-    if (n.includes(kw)) return 0; // 名字匹配 → 最前
-    if (d.includes(kw)) return 1; // 仅描述匹配 → 次之
-    return 2;                     // 不匹配 → 过滤
-  };
-  const rankFilter = (name, desc) => rank(name, desc) <= 1;
-  const rankSort = (a, b) => rank(a.name, a.description) - rank(b.name, b.description);
+  const matches = (name, desc) => !kw || ((name || '') + ' ' + (desc || '')).toLowerCase().includes(kw);
 
   if (_discoverTab === 'skill') {
-    const items = (_discoverData.skills || []).filter((s) => rankFilter(s.name, s.description)).sort(rankSort);
+    const items = (_discoverData.skills || []).filter((s) => matches(s.name, s.description));
     items.forEach((s) => {
       _discoverItems.push({ type: 'skill', name: s.name, skillName: s.name, description: s.description || '' });
       html += _discoverRow(`⚡ ${s.name}`, s.description || '', _discoverItems.length - 1);
@@ -13894,14 +13878,14 @@ function _renderDiscoverList(preserveSel) {
     });
     if (!html) html = _discoverEmpty();
   } else if (_discoverTab === 'mcp') {
-    const items = (_discoverData.mcp || []).filter((m) => rankFilter(m.name, m.description)).sort(rankSort);
+    const items = (_discoverData.mcp || []).filter((m) => matches(m.name, m.description));
     items.forEach((m) => {
       _discoverItems.push({ type: 'mcp', name: m.name, description: m.description || '' });
       html += _discoverRow(`🔌 ${m.name}`, m.description || '', _discoverItems.length - 1);
     });
     if (!items.length) html = _discoverEmpty();
   } else if (_discoverTab === 'workflow') {
-    const items = (_discoverData.workflows || []).filter((w) => rankFilter(w.name, w.description)).sort(rankSort);
+    const items = (_discoverData.workflows || []).filter((w) => matches(w.name, w.description));
     items.forEach((w) => {
       const sub = [w.description, w.version ? `v${w.version}` : ''].filter(Boolean).join(' · ');
       _discoverItems.push({ type: 'workflow', name: w.name, workflowId: w.workflow_id || '', description: w.description || '' });
@@ -13909,7 +13893,7 @@ function _renderDiscoverList(preserveSel) {
     });
     if (!items.length) html = _discoverEmpty();
   } else if (_discoverTab === 'plugin') {
-    const items = (_discoverData.plugins || []).filter((p) => rankFilter(p.name, p.description)).sort(rankSort);
+    const items = (_discoverData.plugins || []).filter((p) => matches(p.name, p.description));
     items.forEach((p) => {
       const sub = p.description || '';
       _discoverItems.push({ type: 'plugin', name: p.name, description: p.description || '' });
@@ -14578,10 +14562,6 @@ async function refreshAgentStatus() {
     
     // 渲染实例列表
     renderAgentStatusList(instances);
-    
-    // 刷新/断线恢复：若服务端有待审批请求（如刷新页面后 agent 卡在 awaiting_approval），
-    // 拉取并重新弹窗（_enqueueAgentModal 幂等去重，不会重复弹）
-    syncPendingApprovals();
     
   } catch (e) {
     list.innerHTML = '<div class="agent-status-empty" style="color:var(--red)">加载失败</div>';
@@ -15252,46 +15232,12 @@ async function showAgentCheckpoints() {
     showHtmlModal('🔖 检查点', html);
   } catch (e) {
     showToast('加载检查点失败: ' + e.message, 'error');
-// ─── Agent 交互弹窗队列（审批 + ask 共用，防互斥覆盖/并发覆盖）──────
-let _agentModalQueue = [];        // {kind:'approval'|'ask', data}
-let _agentModalActive = false;    // 当前是否有 Agent 交互弹窗在显示
-let _agentModalSubmitting = false; // 决策/提交防重复点击
-
-function _enqueueAgentModal(kind, data) {
-  if (!data || !data.request_id) return;
-  const rid = String(data.request_id);
-  // 同 request_id 已在队列或显示中 → 跳过重复（幂等，配合刷新恢复轮询）
-  const exists = _agentModalQueue.some(it => String(it.data.request_id) === rid);
-  if (exists) return;
-  _agentModalQueue.push({ kind, data });
-  _drainAgentModalQueue();
-}
-
-function _drainAgentModalQueue() {
-  if (_agentModalActive) return;
-  if (!_agentModalQueue.length) return;
-  _agentModalActive = true;
-  const item = _agentModalQueue.shift();
-  if (item.kind === 'approval') _renderApprovalDialog(item.data);
-  else if (item.kind === 'ask') _renderAskPanel(item.data);
-}
-
-function _finishAgentModal() {
-  _agentModalActive = false;
-  closeHtmlModal();
-  _drainAgentModalQueue();
-}
-
   }
 }
 
 // ─── Web 审批弹窗：Agent 工具权限请求 → 用户授权 ───────────
 
 function _showWebApprovalDialog(data) {
-  _enqueueAgentModal('approval', data);
-}
-
-function _renderApprovalDialog(data) {
   if (!data || !data.request_id) return;
   const riskColor = { low: '#22c55e', medium: '#f59e0b', high: '#ef4444' }[data.risk_level] || '#f59e0b';
   const riskTxt = { low: '低', medium: '中', high: '高' }[data.risk_level] || (data.risk_level || '');
@@ -15313,13 +15259,10 @@ function _renderApprovalDialog(data) {
   html += '</div>';
   html += '<div style="font-size:11px;color:var(--fg-dim);margin-top:8px">⏳ 等待授权期间 Agent 已暂停，决策后自动继续（忽略则超时默认拒绝）</div>';
   html += '</div>';
-  // 强交互弹窗：禁止遮罩点击关闭，防误触导致面板消失 + Agent 卡 300s
-  showHtmlModal('权限审批', html, { clickOutside: false });
+  showHtmlModal('权限审批', html);
 }
 
 async function webApprovalDecide(requestId, decision) {
-  if (_agentModalSubmitting) return; // 防重复点击
-  _agentModalSubmitting = true;
   try {
     const res = await fetch(`${API_BASE}/api/agent/approval/decide`, {
       method: 'POST',
@@ -15328,21 +15271,13 @@ async function webApprovalDecide(requestId, decision) {
     });
     const j = await res.json();
     if (j && j.data && j.data.decided) {
-      _finishAgentModal();
+      closeHtmlModal();
       showToast(decision === 'deny' ? '已拒绝该操作' : '已批准该操作', decision === 'deny' ? 'warning' : 'info');
     } else {
-      const msg = ((j && j.msg) || (j && j.data && j.data.error) || '未知错误');
-      // 请求不存在/已过期 → 该弹窗已无法操作，关闭并继续下一个；网络等瞬时错误保留弹窗供重试
-      if (/不存在|已过期|no matching|expired/i.test(msg)) {
-        _finishAgentModal();
-      }
-      showToast('审批提交失败: ' + msg, 'error');
+      showToast('审批提交失败: ' + ((j && j.msg) || '未知错误'), 'error');
     }
   } catch (e) {
-    // 网络异常：保留弹窗供重试
     showToast('审批提交失败: ' + e.message, 'error');
-  } finally {
-    _agentModalSubmitting = false;
   }
 }
 
@@ -15350,10 +15285,6 @@ async function webApprovalDecide(requestId, decision) {
 let _pendingAskRequestId = null;
 
 function _showAskQuestionPanel(data) {
-  _enqueueAgentModal('ask', data);
-}
-
-function _renderAskPanel(data) {
   if (!data || !data.request_id) return;
   _pendingAskRequestId = String(data.request_id);
   const question = String(data.question || '');
@@ -15379,8 +15310,7 @@ function _renderAskPanel(data) {
   html += '</div>';
   html += '<div style="font-size:11px;color:var(--fg-dim);margin-top:6px">⏳ 超时未作答则以「未作答」继续</div>';
   html += '</div>';
-  // 强交互弹窗：禁止遮罩点击关闭
-  showHtmlModal('Agent 提问', html, { clickOutside: false });
+  showHtmlModal('Agent 提问', html);
   const inp = document.getElementById('askFreeAnswer');
   if (inp) inp.focus();
 }
@@ -15392,8 +15322,6 @@ function submitAskAnswerFromInput() {
 
 async function submitAskAnswer(requestId, answer) {
   if (!requestId) return;
-  if (_agentModalSubmitting) return; // 防重复提交
-  _agentModalSubmitting = true;
   try {
     const res = await fetch(`${API_BASE}/api/agent/ask/answer`, {
       method: 'POST',
@@ -15403,34 +15331,14 @@ async function submitAskAnswer(requestId, answer) {
     const j = await res.json();
     if (j && j.data && j.data.accepted) {
       _pendingAskRequestId = null;
-      _finishAgentModal();
+      closeHtmlModal();
       showToast(answer ? '已答复，Agent 继续执行' : '已跳过', 'info');
     } else {
-      const msg = ((j && j.data && j.data.error) || '未知错误');
-      // 请求不存在/已过期 → 关闭继续；瞬时错误保留供重试
-      if (/不存在|已过期|no matching|expired/i.test(msg)) {
-        _pendingAskRequestId = null;
-        _finishAgentModal();
-      }
-      showToast('答复提交失败: ' + msg, 'error');
+      showToast('答复提交失败: ' + ((j && j.data && j.data.error) || '未知错误'), 'error');
     }
   } catch (e) {
-    // 网络异常：保留弹窗供重试
     showToast('答复提交失败: ' + e.message, 'error');
-  } finally {
-    _agentModalSubmitting = false;
   }
-}
-
-// ─── 刷新/断线恢复：拉取当前 session 的待审批请求重新弹窗 ─────
-async function syncPendingApprovals() {
-  try {
-    const sid = _getAgentSessionId();
-    const res = await fetch(`${API_BASE}/api/agent/approval/pending?session_id=${encodeURIComponent(sid || '')}`);
-    const j = await res.json();
-    const items = (j && j.data && j.data.pending) || [];
-    for (const it of items) _enqueueAgentModal('approval', it);
-  } catch (e) { /* 静默：轮询失败不打扰 */ }
 }
 
 // ─── 门控面板（🎛 按钮 + 弹出面板）────────────────────────────
@@ -16769,7 +16677,7 @@ function escapeHtml(text) {
 
 let modalCallback = null;
 
-function showHtmlModal(title, html, options = {}) {
+function showHtmlModal(title, html) {
   const overlay = document.getElementById('modalOverlay');
   const titleEl = document.getElementById('modalTitle');
   const input = document.getElementById('modalInput');
@@ -16798,15 +16706,14 @@ function showHtmlModal(title, html, options = {}) {
   const cancel = document.getElementById('modalCancel');
   confirm.style.display = 'none';
   cancel.style.display = 'none';
-  // 点击 overlay 外部区域关闭（默认开启；审批/ask 等强交互弹窗传 {clickOutside:false} 禁止误触关闭）
-  const clickOutsideClose = options.clickOutside !== false;
-  overlay.onclick = clickOutsideClose ? function(e) {
+  // 点击 overlay 外部区域关闭
+  overlay.onclick = function(e) {
     if (e.target === overlay) {
       overlay.classList.remove('show');
       modalBox.classList.remove('modal-wide');
       overlay.onclick = null;
     }
-  } : null;
+  };
 }
 
 function closeHtmlModal() {
@@ -16880,16 +16787,11 @@ function showModal(title, placeholder, callback, options = {}) {
 
   if (options.showDirSelect) {
     dirSelect.style.display = '';
-    // 非默认工作区：用工作区根目录条目（不受 EXPOSED_DIRS 限制）
-    var rootDirs = EXPOSED_DIRS;
-    if (state.currentWorkspaceRoot && state.dirCache['.']) {
-      rootDirs = state.dirCache['.'].filter(function(e) { return e.is_dir; }).map(function(e) { return e.name; });
-    }
-    dirSelect.innerHTML = rootDirs.map(d =>
+    dirSelect.innerHTML = EXPOSED_DIRS.map(d =>
       `<option value="${d}" ${d === state.currentDir ? 'selected' : ''}>${d}</option>`
     ).join('');
     if (state.currentDir) {
-      const matchDir = rootDirs.find(d => state.currentDir.startsWith(d));
+      const matchDir = EXPOSED_DIRS.find(d => state.currentDir.startsWith(d));
       if (matchDir) dirSelect.value = matchDir;
     }
   } else {
@@ -17379,7 +17281,7 @@ document.getElementById('pdfDualBtn').addEventListener('click', async () => {
 // 键盘翻页（主编辑器 PDF 和分屏 PDF）
 document.addEventListener('keydown', async (e) => {
   // 分屏 PDF 翻页
-  if (_splitActive && _activePaneId !== '0' && !(window._agentPanes && window._agentPanes[_activePaneId])) {
+  if (_splitActive && _activePaneId !== '0' && _activePaneId !== _agentPaneId) {
     var panePdf = state['panePdfDoc_' + _activePaneId];
     if (!panePdf) return;
     var paneTab = (state['paneTabs_' + _activePaneId] || []).find(function(t) { return t.path === state['paneActiveTab_' + _activePaneId]; });
@@ -17904,79 +17806,6 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
         ob.dataset.order = (ob.dataset.order === 'desc') ? 'asc' : 'desc';
         ob.textContent = (ob.dataset.order === 'desc') ? '↓' : '↑';
         refresh();
-
-// ─── Agent 显示模式：单实例 ⇄ 真分屏（方案 C + kanban）────────────
-const AGENT_PANE_MODE_KEY = 'ts2_agent_pane_mode';
-const AGENT_KANBAN_KEY = 'ts2_agent_kanban';
-
-// 切换显示模式：single（单实例，sidebar）⇄ split（真分屏，多 pane）
-function setAgentPaneMode(mode) {
-  localStorage.setItem(AGENT_PANE_MODE_KEY, mode);
-  _applyAgentModeUI(mode);
-  if (mode === 'split') {
-    if (!_splitActive) {
-      splitPane('agent', 'h');
-    }
-    showToast('已切换到真分屏模式：Agent 已作为独立 pane 分屏');
-  } else {
-    closeAllAgentPanes();
-    showToast('已切换到单实例模式');
-  }
-}
-
-// 初始化显示模式（页面加载时恢复上次选择）
-function initAgentPaneMode() {
-  var mode = localStorage.getItem(AGENT_PANE_MODE_KEY) || 'single';
-  _applyAgentModeUI(mode);
-  if (mode === 'split') {
-    setTimeout(function() {
-      if (!_splitActive) splitPane('agent', 'h');
-    }, 350);
-  }
-}
-
-// 同步模式按钮 UI（单实例=隐藏 pane 内"◻ 单实例"按钮；分屏=显示）
-function _applyAgentModeUI(mode) {
-  var panes = window._agentPanes || {};
-  Object.keys(panes).forEach(function(pid) {
-    var backBtn = document.getElementById('agentPaneBack-' + pid);
-    if (backBtn) backBtn.style.display = mode === 'split' ? '' : 'none';
-    var kanbanBtn = document.getElementById('agentPaneKanban-' + pid);
-    if (kanbanBtn) kanbanBtn.style.display = mode === 'split' ? '' : 'none';
-    var nestedBtn = document.getElementById('agentPaneNested-' + pid);
-    if (nestedBtn) nestedBtn.style.display = mode === 'split' ? '' : 'none';
-  });
-}
-
-// 关闭所有 Agent 分屏 pane（回到单实例）
-function closeAllAgentPanes() {
-  if (!window._agentPanes) return;
-  var ids = Object.keys(window._agentPanes);
-  ids.forEach(function(pid) { closePane(pid, true); });
-}
-
-// 看板式横向滚动分屏切换（作用于顶层 splitContainer）
-function toggleSplitKanban() {
-  var sc = document.getElementById('splitContainer');
-  if (!sc) { showToast('请先进入分屏模式', 'error'); return; }
-  var on = sc.classList.toggle('kanban-mode');
-  localStorage.setItem(AGENT_KANBAN_KEY, on ? '1' : '');
-  var btn = document.getElementById('agentKanbanBtn');
-  if (btn) btn.classList.toggle('active', on);
-  showToast(on ? '看板模式：多列横向滚动' : '网格模式：均分拖拽');
-  setTimeout(_relayoutEditors, 60);
-}
-
-// 恢复看板模式（分屏打开时调用）
-function _restoreSplitKanban() {
-  var sc = document.getElementById('splitContainer');
-  if (!sc) return;
-  if (localStorage.getItem(AGENT_KANBAN_KEY) === '1') {
-    sc.classList.add('kanban-mode');
-    var btn = document.getElementById('agentKanbanBtn');
-    if (btn) btn.classList.add('active');
-  }
-}
       });
     }
   });
@@ -17989,7 +17818,7 @@ let _paneCounter = 1;
 let _activePaneId = '0';
 var _splitActive = false;  // 是否处于分屏状态
 var _splitDirection = 'h'; // 分屏方向: 'h' 水平, 'v' 垂直
-let _agentPaneId = null;   // 最近创建的 Agent 分屏 paneId（独立组件，可多个并存）
+let _agentPaneId = null;   // Agent 分屏所在的 paneId（复用 sidebar DOM）
 
 function _onPaneMousedown(paneId, e) {
   var el = e.target;
@@ -18064,7 +17893,6 @@ function splitPane(type, direction) {
     _splitActive = true;
     _splitDirection = direction;
     _relayoutEditors();
-    _restoreSplitKanban();
 
     _addPaneToContainer(document.getElementById('splitContainer'), type);
     return;
@@ -18127,51 +17955,22 @@ function splitPane(type, direction) {
 
 function _initNewPane(pane, newPaneId, type) {
   if (type === 'agent') {
-    // Agent 分屏 pane：独立组件（可多个并存，kanban 式），一比一复刻单实例 UI
-    window._agentPanes = window._agentPanes || {};
-    window._agentPanes[newPaneId] = { sessionId: null, streaming: false, messages: [] };
-    _agentPaneId = newPaneId;  // 指向最近创建的 agent pane
-    pane.dataset.agentPane = '1';
+    _agentPaneId = newPaneId;
+    var panelAgent = document.getElementById('panel-agent');
     pane.innerHTML =
       '<div class="pane-header">' +
         '<span class="pane-title">🤖 Agent</span>' +
-        '<select class="agent-pane-select" id="agentPaneSelect-' + newPaneId + '" title="选择此 pane 显示的会话（自定义显示哪些会话）"><option value="">加载会话…</option></select>' +
-        '<span class="agent-pane-status" id="agentPaneStatus-' + newPaneId + '">○ 空闲</span>' +
-        '<button class="split-btn" id="agentPaneNested-' + newPaneId + '" onclick="_agentPaneToggleNestedKanban(\'' + newPaneId + '\')" title="嵌套横向任务看板（多实例列，横向滚动）" style="font-size:11px">📊</button>' +
-        '<button class="split-btn" id="agentPaneKanban-' + newPaneId + '" onclick="toggleSplitKanban()" title="分屏容器看板式横向滚动" style="font-size:11px">📋</button>' +
-        '<button class="split-btn" onclick="splitPane(\'agent\',\'h\')" title="再开一个 Agent 分屏（看板式追加）" style="font-size:11px">＋🤖</button>' +
-        '<button class="pane-close" onclick="closePane(\'' + newPaneId + '\')" title="关闭此分屏">✕</button>' +
+        '<button class="pane-close" onclick="closePane(\'' + newPaneId + '\')" title="关闭">✕</button>' +
       '</div>' +
-      '<div class="pane-body agent-pane-body" id="agentPaneBody-' + newPaneId + '">' +
-        '<div class="agent-chat-main agent-pane-chat" id="agentPaneChat-' + newPaneId + '">' +
-          '<div class="agent-pane-nested-kanban" id="agentPaneNestedKanban-' + newPaneId + '" style="display:none"></div>' +
-          '<div class="agent-messages agent-pane-messages" id="agentPaneMsgs-' + newPaneId + '"><div class="agent-pane-empty">加载中…</div></div>' +
-          '<div class="agent-typing" id="agentPaneTyping-' + newPaneId + '" style="display:none">正在输入...</div>' +
-          '<div class="agent-session-bar" id="agentPaneBar-' + newPaneId + '">' +
-            '<button class="agent-session-btn" id="agentPaneBack-' + newPaneId + '" onclick="setAgentPaneMode(\'single\')" title="回到单实例模式">◻ 单实例</button>' +
-            '<span class="agent-pane-info" id="agentPaneInfo-' + newPaneId + '">新对话</span>' +
-            '<button class="agent-session-btn" onclick="toggleFlowNav()" title="对话流导航">📑</button>' +
-            '<button class="agent-session-btn" onclick="toggleConvSidebar()" title="会话管理">💬</button>' +
-            '<button class="agent-session-btn" onclick="toggleAgentStatusPanel()" title="Agent 实例状态">📊</button>' +
-            '<button class="agent-session-btn" onclick="showAgentCheckpoints()" title="检查点 — 每轮对话自动保存，可回退对话或文件">🔖</button>' +
-            '<button class="agent-session-btn" onclick="_agentPaneNewSession(\'' + newPaneId + '\')" title="此 pane 新建会话">➕</button>' +
-            '<button class="agent-session-btn" onclick="toggleHarnessPanel(event)" title="门控：Agent 模式 / 审批 / 工具组">🎛</button>' +
-          '</div>' +
-          '<div class="agent-input-area" style="position:relative">' +
-            '<input type="text" id="agentPaneInput-' + newPaneId + '" placeholder="输入消息... (Enter 发送到本 pane 会话)" autocomplete="off">' +
-            '<button id="agentPaneSend-' + newPaneId + '" onclick="_agentPaneSend(\'' + newPaneId + '\')">发送</button>' +
-          '</div>' +
-        '</div>' +
-      '</div>';
+      '<div class="pane-body" id="agentPaneBody-' + newPaneId + '"></div>';
     pane.style.flex = '1';
     pane.style.overflow = 'hidden';
-    var selEl = document.getElementById('agentPaneSelect-' + newPaneId);
-    if (selEl) selEl.addEventListener('change', function() { _agentPaneSelectSession(newPaneId, selEl.value); });
-    var inpEl = document.getElementById('agentPaneInput-' + newPaneId);
-    if (inpEl) inpEl.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); _agentPaneSend(newPaneId); }
-    });
-    _agentPaneInit(newPaneId);
+    var newPaneBody = pane.querySelector('.pane-body');
+    newPaneBody.appendChild(panelAgent);
+    panelAgent.classList.add('split-pane-content');
+    panelAgent.style.flexDirection = 'column';
+    panelAgent.style.height = '100%';
+    initAgentPanel();
   } else {
     pane.innerHTML =
       '<div class="pane-header">' +
@@ -18245,331 +18044,6 @@ function _initNewPane(pane, newPaneId, type) {
   }
 }
 
-// ─── Agent 分屏 pane 辅助（方案 C + kanban 式）──────────────────
-// 每个 Agent pane 是独立组件：一比一复刻单实例 UI（会话条/消息区/输入区）。
-// 会话归属存 window._agentPanes[paneId].sessionId，可多个并存，各自轮询刷新。
-
-// 初始化一个 Agent pane：填充会话下拉 + 加载当前主会话
-function _agentPaneInit(paneId) {
-  var curId = _getAgentSessionId();
-  var st = window._agentPanes && window._agentPanes[paneId];
-  if (st) st.sessionId = curId || null;
-  _agentPaneUpdateInfo(paneId, curId);
-  _agentPaneLoadSessions(paneId, curId);
-  _agentPaneLoadSession(paneId, curId || '');
-  _agentPaneStartPolling();
-}
-
-// 更新 pane 会话信息标签（会话条左侧）
-function _agentPaneUpdateInfo(paneId, sessionId) {
-  var infoEl = document.getElementById('agentPaneInfo-' + paneId);
-  if (!infoEl) return;
-  infoEl.textContent = sessionId ? ('会话 ' + String(sessionId).substring(0, 8)) : '新对话';
-}
-
-// 拉取全部会话填充 pane 下拉选择器
-async function _agentPaneLoadSessions(paneId, selectedId) {
-  var sel = document.getElementById('agentPaneSelect-' + paneId);
-  if (!sel) return;
-  try {
-    var res = await client.getAgentSessions();
-    var sessions = (res && res.code === 0 && res.data && res.data.sessions) || [];
-    sessions = sessions.filter(function(s) { return s && s.id; });
-    sessions.sort(function(a, b) {
-      var pa = (a.is_streaming ? 3 : 0) + (a.is_active ? 2 : 0);
-      var pb = (b.is_streaming ? 3 : 0) + (b.is_active ? 2 : 0);
-      if (pa !== pb) return pb - pa;
-      return ((b.last_accessed || b.timestamp || 0) - (a.last_accessed || a.timestamp || 0));
-    });
-    var opts = sessions.map(function(s) {
-      var label = s.name || s.summary || s.preview || ('会话 ' + String(s.id).substring(0, 8));
-      var suffix = s.is_streaming ? ' ⚡' : (s.is_active ? ' 🟢' : '');
-      return '<option value="' + escapeHtml(s.id) + '"' + (s.id === selectedId ? ' selected' : '') + '>' +
-        escapeHtml(String(label).substring(0, 24)) + suffix + '</option>';
-    }).join('');
-    sel.innerHTML = opts || '<option value="">（无会话）</option>';
-    if (selectedId && !sessions.some(function(s) { return s.id === selectedId; })) {
-      sel.insertAdjacentHTML('afterbegin', '<option value="' + escapeHtml(selectedId) + '" selected>' + escapeHtml(String(selectedId).substring(0, 24)) + '</option>');
-    }
-  } catch (e) {
-    sel.innerHTML = '<option value="">（加载失败）</option>';
-  }
-}
-
-// pane 内切换显示的会话（自定义显示哪些会话）
-function _agentPaneSelectSession(paneId, sessionId) {
-  if (!sessionId) return;
-  var st = window._agentPanes && window._agentPanes[paneId];
-  if (st) st.sessionId = sessionId;
-  _agentPaneUpdateInfo(paneId, sessionId);
-  _agentPaneLoadSession(paneId, sessionId);
-}
-
-// 加载指定会话消息到 pane（只读，不切换主视图会话）
-async function _agentPaneLoadSession(paneId, sessionId) {
-  var msgsEl = document.getElementById('agentPaneMsgs-' + paneId);
-  var statusEl = document.getElementById('agentPaneStatus-' + paneId);
-  var typingEl = document.getElementById('agentPaneTyping-' + paneId);
-  if (!msgsEl) return;
-  if (!sessionId) {
-    msgsEl.innerHTML = '<div class="agent-pane-empty">新对话 — 输入消息自动创建会话，或在上方选择会话</div>';
-    return;
-  }
-  try {
-    var res = await client.getAgentSession(sessionId);
-    if (res && res.code === 0 && res.data) {
-      var msgs = res.data.messages || [];
-      var st0 = window._agentPanes && window._agentPanes[paneId];
-      if (st0) {
-        st0.messages = msgs;
-        st0.streaming = (res.data.status === 'streaming' || res.data.status === 'running');
-      }
-      _agentPaneRenderMessages(paneId, msgs);
-      if (typingEl) typingEl.style.display = (st0 && st0.streaming) ? '' : 'none';
-      if (statusEl) {
-        var stTxt = { idle: '○ 空闲', running: '● 处理中', streaming: '● 对话中', awaiting_approval: '⏳ 待审批', aborted: '⛔ 已中止' }[res.data.status] || '○ 空闲';
-        var stColor = { idle: 'var(--fg-muted)', running: '#f59e0b', streaming: '#22c55e', awaiting_approval: '#f97316', aborted: '#ef4444' }[res.data.status] || 'var(--fg-muted)';
-        statusEl.textContent = stTxt;
-        statusEl.style.color = stColor;
-      }
-    }
-  } catch (e) {
-    msgsEl.innerHTML = '<div class="agent-pane-empty" style="color:var(--red)">加载失败: ' + escapeHtml(e.message || e) + '</div>';
-  }
-}
-
-// 渲染会话消息（完整版：markdown/工具卡片/KaTeX，一比一复刻单实例风格）
-function _agentPaneRenderMessages(paneId, messages) {
-  var msgsEl = document.getElementById('agentPaneMsgs-' + paneId);
-  if (!msgsEl) return;
-  var nearBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 80;
-  msgsEl.innerHTML = '';
-  if (!messages || !messages.length) {
-    msgsEl.innerHTML = '<div class="agent-pane-empty">暂无消息</div>';
-    if (nearBottom) msgsEl.scrollTop = msgsEl.scrollHeight;
-    return;
-  }
-  var html = '';
-  for (var i = 0; i < messages.length; i++) {
-    html += _agentPaneRenderOne(messages[i], i, messages);
-  }
-  msgsEl.innerHTML = html;
-  // KaTeX 公式渲染（复用单实例 _renderKatex）
-  if (typeof _renderKatex === 'function') {
-    msgsEl.querySelectorAll('.agent-msg .msg-content').forEach(function(el) {
-      if (!el._katexRendered) {
-        try { _renderKatex(el); } catch (e) {}
-        el._katexRendered = true;
-      }
-    });
-  }
-  if (nearBottom) msgsEl.scrollTop = msgsEl.scrollHeight;
-}
-
-// pane 单条消息渲染（复用 renderSimpleMarkdown/escapeHtml，不依赖 state.agentMessages）
-function _agentPaneRenderOne(msg, mi, messages) {
-  if (!msg) return '';
-  var role = msg.role || '';
-  if (role === 'user') {
-    return '<div class="agent-msg user" data-index="' + mi + '">' +
-      '<div class="msg-role">👤 用户</div>' +
-      '<div class="msg-content">' + escapeHtml(msg.content || '') + '</div></div>';
-  }
-  if (role === 'assistant') {
-    var rendered = '';
-    if (typeof renderSimpleMarkdown === 'function') {
-      try { rendered = renderSimpleMarkdown(msg.content || ''); } catch (e) { rendered = ''; }
-    }
-    if (!rendered) rendered = escapeHtml(msg.content || '');
-    return '<div class="agent-msg assistant" data-index="' + mi + '">' +
-      '<div class="msg-role">🤖 Agent</div>' +
-      '<div class="msg-content">' + rendered + '</div></div>';
-  }
-  if (role === 'tool' || role === 'tool_call') {
-    // 一比一复刻单实例：直接复用 _renderToolCallCard（纯函数，含参数摘要/友好视图/原始JSON/检查点/回退/展开收起）
-    var hasLater = false;
-    for (var k = mi + 1; k < messages.length; k++) {
-      if (messages[k] && messages[k].role === 'assistant' && messages[k].content) { hasLater = true; break; }
-    }
-    var tc = {
-      name: msg.toolName || msg.name || 'tool',
-      args: msg.args || '',
-      result: msg.result || msg.content || '',
-      status: msg.status,
-      checkpointHash: msg.checkpointHash || '',
-      interrupted: !!msg.interrupted
-    };
-    var cardHtml = '';
-    try {
-      cardHtml = _renderToolCallCard(tc, mi, hasLater ? undefined : false);
-    } catch (e) {
-      cardHtml = '<div class="agent-msg assistant"><div class="msg-content">🔧 ' + escapeHtml(tc.name) + '<div style="white-space:pre-wrap;font-size:11px;color:var(--fg-muted)">' + escapeHtml(String(tc.result).slice(0, 600)) + '</div></div></div>';
-    }
-    return '<div class="agent-msg assistant" data-index="' + mi + '">' + cardHtml + '</div>';
-  }
-  return '';
-}
-
-// 从 pane 输入框发送消息到该 pane 绑定会话（无会话时自动创建）
-async function _agentPaneSend(paneId) {
-  var st = window._agentPanes && window._agentPanes[paneId];
-  var sessionId = st ? st.sessionId : null;
-  var inp = document.getElementById('agentPaneInput-' + paneId);
-  if (!inp) return;
-  var text = (inp.value || '').trim();
-  if (!text) return;
-  inp.value = '';
-  var isNew = !sessionId;
-  var msgsEl = document.getElementById('agentPaneMsgs-' + paneId);
-  var typingEl = document.getElementById('agentPaneTyping-' + paneId);
-  if (msgsEl) {
-    var emptyEl = msgsEl.querySelector('.agent-pane-empty');
-    if (emptyEl) emptyEl.remove();
-    var msgEl = document.createElement('div');
-    msgEl.className = 'agent-msg user';
-    msgEl.innerHTML = '<div class="msg-role">👤 用户</div><div class="msg-content">' + escapeHtml(text) + '</div>';
-    msgsEl.appendChild(msgEl);
-    msgsEl.scrollTop = msgsEl.scrollHeight;
-  }
-  if (typingEl) typingEl.style.display = '';
-  var sendBtn = document.getElementById('agentPaneSend-' + paneId);
-  if (sendBtn) { sendBtn.textContent = '发送中…'; sendBtn.disabled = true; }
-  try {
-    if (sessionId) _setAgentSessionId(sessionId);
-    var res = await client.agentChat(text, [], sessionId || null);
-    // agentChat 可能返回新会话 id
-    var newSid = sessionId;
-    if (res && res.data && res.data.session_id) newSid = res.data.session_id;
-    if (st) { st.sessionId = newSid || null; st.streaming = false; }
-    _agentPaneUpdateInfo(paneId, newSid);
-    if (newSid) {
-      _agentPaneLoadSessions(paneId, newSid);
-      await _agentPaneLoadSession(paneId, newSid);
-    } else if (st && st.messages) {
-      st.messages.push({ role: 'user', content: text });
-      _agentPaneRenderMessages(paneId, st.messages);
-    }
-  } catch (e) {
-    showToast('发送失败: ' + (e.message || e), 'error');
-  }
-  if (typingEl) typingEl.style.display = 'none';
-  if (sendBtn) { sendBtn.textContent = '发送'; sendBtn.disabled = false; }
-}
-
-// 此 pane 新建会话（清空消息 + 取消会话绑定）
-function _agentPaneNewSession(paneId) {
-  var st = window._agentPanes && window._agentPanes[paneId];
-  if (st) { st.sessionId = null; st.messages = []; st.streaming = false; }
-  var msgsEl = document.getElementById('agentPaneMsgs-' + paneId);
-  if (msgsEl) msgsEl.innerHTML = '<div class="agent-pane-empty">新对话 — 输入消息自动创建会话</div>';
-  var typingEl = document.getElementById('agentPaneTyping-' + paneId);
-  if (typingEl) typingEl.style.display = 'none';
-  var statusEl = document.getElementById('agentPaneStatus-' + paneId);
-  if (statusEl) { statusEl.textContent = '○ 空闲'; statusEl.style.color = 'var(--fg-muted)'; }
-  _agentPaneUpdateInfo(paneId, null);
-  var sel = document.getElementById('agentPaneSelect-' + paneId);
-  if (sel) sel.value = '';
-  var inp = document.getElementById('agentPaneInput-' + paneId);
-  if (inp) inp.focus();
-}
-
-// ─── pane 内嵌套横向任务看板（像任务 nav kanban，多实例列横向滚动）──
-// 在 pane 消息区上方展开一个看板条：每列 = 一个会话/Agent 实例卡片，
-// 点击列加载该会话到 pane；列多时横向滚动。
-function _agentPaneToggleNestedKanban(paneId) {
-  var kb = document.getElementById('agentPaneNestedKanban-' + paneId);
-  if (!kb) return;
-  var btn = document.getElementById('agentPaneNested-' + paneId);
-  var isOpen = kb.style.display !== 'none';
-  if (isOpen) {
-    kb.style.display = 'none';
-    if (btn) btn.classList.remove('active');
-    return;
-  }
-  kb.style.display = '';
-  if (btn) btn.classList.add('active');
-  _agentPaneRenderNestedKanban(paneId);
-}
-
-// 渲染嵌套看板列（会话/实例 → 列）
-async function _agentPaneRenderNestedKanban(paneId) {
-  var kb = document.getElementById('agentPaneNestedKanban-' + paneId);
-  if (!kb) return;
-  kb.innerHTML = '<div class="kanban" style="min-height:120px;border-bottom:1px solid var(--border);background:var(--bg-secondary)">' +
-    '<div class="agent-nested-loading" style="padding:12px;color:var(--fg-muted);font-size:11px;text-align:center;flex:1">加载会话…</div></div>';
-  try {
-    var res = await client.getAgentSessions();
-    var sessions = (res && res.code === 0 && res.data && res.data.sessions) || [];
-    sessions = sessions.filter(function(s) { return s && s.id; });
-    // 按流式/活跃/时间排序
-    sessions.sort(function(a, b) {
-      var pa = (a.is_streaming ? 3 : 0) + (a.is_active ? 2 : 0);
-      var pb = (b.is_streaming ? 3 : 0) + (b.is_active ? 2 : 0);
-      if (pa !== pb) return pb - pa;
-      return ((b.last_accessed || b.timestamp || 0) - (a.last_accessed || a.timestamp || 0));
-    });
-    var curId = (window._agentPanes && window._agentPanes[paneId]) ? window._agentPanes[paneId].sessionId : null;
-    // 按状态分组（任务 nav kanban 风格：进行中 / 空闲 / 其他）
-    var cols = {
-      streaming: { label: '● 进行中', color: '#22c55e', items: [] },
-      idle: { label: '○ 空闲', color: 'var(--fg-muted)', items: [] },
-      other: { label: '◐ 其他', color: '#f59e0b', items: [] }
-    };
-    sessions.forEach(function(s) {
-      var group = s.is_streaming || s.is_active ? 'streaming' : (s.status === 'idle' ? 'idle' : 'other');
-      if (!cols[group]) group = 'other';
-      cols[group].items.push(s);
-    });
-    var html = '<div class="kanban" style="min-height:110px;border-bottom:1px solid var(--border);background:var(--bg-secondary);padding:8px;gap:8px;overflow-x:auto;overflow-y:hidden;display:flex;flex-shrink:0">';
-    Object.keys(cols).forEach(function(ck) {
-      var col = cols[ck];
-      html += '<div class="kanban-column agent-nested-col" style="min-width:210px;max-width:260px;flex:0 0 auto;border:1px solid var(--border)">' +
-        '<div class="kanban-column-header" style="font-size:11px;padding:6px 10px"><span style="color:' + col.color + '">' + col.label + '</span><span class="count">' + col.items.length + '</span></div>' +
-        '<div class="kanban-column-body" style="padding:6px;gap:5px;min-height:40px;max-height:150px;overflow-y:auto">';
-      if (!col.items.length) {
-        html += '<div style="color:var(--fg-muted);font-size:10px;text-align:center;padding:8px 0">无</div>';
-      }
-      col.items.forEach(function(s) {
-        var label = s.name || s.summary || s.preview || ('会话 ' + String(s.id).substring(0, 8));
-        var isCur = s.id === curId;
-        html += '<div class="agent-nested-card" onclick="_agentPaneSelectSession(\'' + paneId + '\',\'' + escapeHtml(s.id) + '\')" title="加载此会话到本 pane"' +
-          ' style="padding:5px 8px;border-radius:6px;background:var(--bg);border:1px solid ' + (isCur ? 'var(--accent,#4f8cff)' : 'var(--border)') + ';cursor:pointer;font-size:11px;display:flex;align-items:center;gap:6px">' +
-          '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(String(label).substring(0, 28)) + '</span>' +
-          (s.is_streaming ? '<span style="color:#22c55e;font-size:10px">⚡</span>' : '') +
-          (isCur ? '<span style="color:var(--accent);font-size:10px">✓</span>' : '') +
-          '</div>';
-      });
-      html += '</div></div>';
-    });
-    html += '</div>';
-    kb.innerHTML = html;
-  } catch (e) {
-    kb.innerHTML = '<div style="padding:10px;color:var(--red);font-size:11px;text-align:center">加载失败: ' + escapeHtml(e.message || e) + '</div>';
-  }
-}
-
-// 轮询：定期刷新所有 Agent pane 的会话消息（4s）
-var _agentPanePollTimer = null;
-function _agentPaneStartPolling() {
-  if (_agentPanePollTimer) return;
-  _agentPanePollTimer = setInterval(function() {
-    var panes = window._agentPanes || {};
-    for (var pid in panes) {
-      if (!panes.hasOwnProperty(pid)) continue;
-      var el = document.getElementById('pane-' + pid);
-      if (el && el.parentNode) {
-        if (panes[pid].sessionId) _agentPaneLoadSession(pid, panes[pid].sessionId);
-      }
-    }
-  }, 4000);
-}
-function _agentPaneStopPolling() {
-  if (_agentPanePollTimer) {
-    clearInterval(_agentPanePollTimer);
-    _agentPanePollTimer = null;
-  }
-}
-
 function navigatePaneBrowser(paneId) {
   var inp = document.getElementById('paneBrowserUrl-' + paneId);
   var frame = document.getElementById('paneBrowserFrame-' + paneId);
@@ -18624,13 +18098,24 @@ function closePane(paneId, noAnim) {
   if (!pane) return;
   var container = _findSplitContainer(pane) || document.getElementById('splitContainer');
 
-  // 如果关闭的是 Agent 分屏（独立组件）：清理其会话状态，不需要移回 sidebar
-  var isAgent = !!(pane.dataset && pane.dataset.agentPane === '1');
+  // 如果关闭的是 Agent 分屏，把 panel-agent 移回 sidebar
+  var isAgent = paneId === _agentPaneId;
+  var panelAgent;
   if (isAgent) {
-    if (window._agentPanes) {
-      delete window._agentPanes[paneId];
-      if (_agentPaneId === paneId) _agentPaneId = null;
+    panelAgent = document.getElementById('panel-agent');
+    var sidebar = document.getElementById('sidebar');
+    if (panelAgent && sidebar) {
+      panelAgent.classList.remove('split-pane-content');
+      panelAgent.style.flexDirection = '';
+      panelAgent.style.height = '';
+      var navPanels = sidebar.querySelector('.nav-tabs');
+      if (navPanels) {
+        sidebar.insertBefore(panelAgent, navPanels.nextSibling);
+      } else {
+        sidebar.appendChild(panelAgent);
+      }
     }
+    _agentPaneId = null;
   }
 
   // 找到关联的 divider
@@ -19346,21 +18831,15 @@ async function init() {
   }
 
   try {
+    for (const d of EXPOSED_DIRS) {
+      const res = await client.readDir(d);
+      if (res.code === 0) {
+        state.dirCache[d] = res.data;
+        state.expandedDirs.add(d);
+      }
+    }
+    // 如果有工作区根目录，也加载根目录列表
     if (!state.currentWorkspaceRoot) {
-      // 默认工作区：加载 EXPOSED_DIRS 目录 + 根目录列表
-      for (const d of EXPOSED_DIRS) {
-        const res = await client.readDir(d);
-        if (res.code === 0) {
-          state.dirCache[d] = res.data;
-          state.expandedDirs.add(d);
-        }
-      }
-      var rootRes = await client.readDir('');
-      if (rootRes.code === 0) {
-        state.dirCache['.'] = rootRes.data;
-      }
-    } else {
-      // 工作区模式：加载工作区根目录（暴露全部文件，不受 EXPOSED_DIRS 限制）
       var rootRes = await client.readDir('');
       if (rootRes.code === 0) {
         state.dirCache['.'] = rootRes.data;
@@ -19408,6 +18887,9 @@ async function init() {
   // 初始化加载 Dashboard 数据
   loadDashboardPanel();
   
+  // 初始化 Agent 显示模式设置
+  initAgentDisplayMode();
+  
   // 恢复上次 Agent 会话（异步不阻塞，刷新/重载时自动恢复对话）
   _restoreAgentSessionOnLoad();
 }
@@ -19443,9 +18925,6 @@ async function loadWorkspaces() {
     defOpt.value = '';
     defOpt.textContent = '📁 TS2 (默认)';
     sel.appendChild(defOpt);
-    // 记录默认工作区路径（切回默认时后端需恢复 EXPOSED_DIRS 限制）
-    var defWs = _workspaces.find(function(ws) { return ws.isDefault; });
-    state.defaultWorkspaceRoot = defWs ? defWs.path : '';
     _workspaces.forEach(function(ws, i) {
       var opt = document.createElement('option');
       opt.value = ws.path;
@@ -19455,27 +18934,13 @@ async function loadWorkspaces() {
     if (sel.options.length <= 1) {
       sel.innerHTML = '<option value="">无工作区</option>';
     }
-    // 恢复后端当前激活的工作区（刷新页面后保持一致；非默认工作区暴露全部文件）
-    var activeWs = _workspaces.find(function(ws) { return ws.active; });
-    if (activeWs) {
-      state.currentWorkspaceRoot = activeWs.path;
-      sel.value = activeWs.path;
-    } else {
-      state.currentWorkspaceRoot = '';
-    }
+    state.currentWorkspaceRoot = '';
   } catch(e) { console.warn('loadWorkspaces failed', e); }
 }
 
 async function switchWorkspace(path, code) {
   if (!path) {
-    // 切回默认（TS2）模式：先让后端切回默认工作区（恢复 EXPOSED_DIRS 限制）
-    if (state.currentWorkspaceRoot && state.defaultWorkspaceRoot) {
-      var backRes = await client.api('/api/system/switchWorkspace', { path: state.defaultWorkspaceRoot });
-      if (backRes.code !== 0) {
-        showToast(backRes.msg || '切回默认工作区失败', 'error');
-        return;
-      }
-    }
+    // 切回默认（TS2）模式
     state.currentWorkspaceRoot = '';
     state.dirCache = {};
     state.expandedDirs.clear();
@@ -20042,6 +19507,416 @@ function toggleGradientTheme() {
   }
 }
 
+// ─── Agent 显示模式 ──────────────────────────────────────────────
+const AGENT_DISPLAY_MODE_KEY = 'ts2_agent_display_mode';
+const AGENT_SPLIT_LAYOUT_KEY = 'ts2_agent_split_layout';
+const AGENT_SPLIT_COUNT_KEY = 'ts2_agent_split_count';
+
+function setAgentDisplayMode(mode) {
+  localStorage.setItem(AGENT_DISPLAY_MODE_KEY, mode);
+  const config = document.getElementById('agentSplitConfig');
+  if (config) {
+    config.style.display = mode === 'split' ? 'block' : 'none';
+  }
+  
+  if (mode === 'split') {
+    enableAgentSplitMode();
+  } else {
+    disableAgentSplitMode();
+  }
+  applyIntraSplit();
+  showToast('已切换到' + (mode === 'split' ? '真分屏' : '单实例跳跃') + '模式');
+}
+
+function setAgentSplitLayout(layout) {
+  localStorage.setItem(AGENT_SPLIT_LAYOUT_KEY, layout);
+  applyAgentSplitLayout();
+}
+
+function setAgentSplitCount(count) {
+  localStorage.setItem(AGENT_SPLIT_COUNT_KEY, count);
+  applyAgentSplitLayout();
+}
+
+function enableAgentSplitMode() {
+  const layout = localStorage.getItem(AGENT_SPLIT_LAYOUT_KEY) || 'horizontal';
+  applyAgentSplitLayout();
+}
+
+function disableAgentSplitMode() {
+  _splitStopPolling();
+  const splitContainer = document.getElementById('agentSplitContainer');
+  if (splitContainer) {
+    splitContainer.remove();
+  }
+  window._agentSplitPanels = {};
+  const mainAgent = document.getElementById('agentChatMain');
+  if (mainAgent) {
+    mainAgent.style.display = '';
+  }
+}
+
+function applyAgentSplitLayout() {
+  const mode = localStorage.getItem(AGENT_DISPLAY_MODE_KEY) || 'single';
+  if (mode !== 'split') return;
+  
+  const layout = localStorage.getItem(AGENT_SPLIT_LAYOUT_KEY) || 'horizontal';
+  const count = parseInt(localStorage.getItem(AGENT_SPLIT_COUNT_KEY) || '2');
+  
+  // 隐藏原主聊天区域
+  const mainAgent = document.getElementById('agentChatMain');
+  if (mainAgent) {
+    mainAgent.style.display = 'none';
+  }
+  
+  // 复用已有分屏容器（不重建 DOM，保留面板状态/滚动/输入）
+  let container = document.getElementById('agentSplitContainer');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'agentSplitContainer';
+    container.className = 'agent-split-container';
+    const agentMain = document.getElementById('agentChatMain');
+    if (agentMain && agentMain.parentNode) {
+      agentMain.parentNode.insertBefore(container, agentMain);
+    }
+  }
+  
+  // 设置布局类
+  container.className = 'agent-split-container';
+  if (layout === 'horizontal') {
+    container.classList.add('layout-horizontal');
+  } else if (layout === 'vertical') {
+    container.classList.add('layout-vertical');
+  } else {
+    container.classList.add('layout-grid');
+  }
+  container.classList.add('count-' + Math.min(count, 4));
+  
+  // 从后端获取活跃会话列表（不依赖前端缓存）
+  const curId = _getAgentSessionId();
+  const sessionsToShow = [curId];
+  client.getAgentSessions().then(function(res) {
+    if (res.code === 0 && res.data) {
+      const all = (res.data.sessions || []).filter(function(s) { return s.id; });
+      if (all.length > 0) {
+        // 当前会话排最前，其余按活跃度补足
+        const rest = all.filter(function(s) { return s.id !== curId; }).slice(0, count - 1);
+        const list = [curId].concat(rest.map(function(s) { return s.id; })).slice(0, count);
+        sessionsToShow.length = 0;
+        list.forEach(function(id) { sessionsToShow.push(id); });
+      }
+    }
+    _syncSplitPanels(container, sessionsToShow, count);
+    _splitStartPolling();
+    showToast('分屏模式已激活：' + sessionsToShow.length + ' 个会话');
+  }).catch(function() {
+    _syncSplitPanels(container, sessionsToShow, count);
+    _splitStartPolling();
+  });
+}
+
+// 同步分屏面板集合：已有面板复用（保留 DOM/状态），缺的创建，多余的移除
+function _syncSplitPanels(container, sessionIds, count) {
+  // 记录现有面板
+  const existing = {};
+  container.querySelectorAll('.agent-split-panel').forEach(function(p) {
+    existing[p.dataset.sessionId] = p;
+  });
+  const panelMap = window._agentSplitPanels = window._agentSplitPanels || {};
+  
+  // 移除多余面板（不在目标列表中的）
+  const target = {};
+  sessionIds.slice(0, count).forEach(function(id) { target[id] = true; });
+  Object.keys(existing).forEach(function(id) {
+    if (!target[id]) {
+      container.removeChild(existing[id]);
+      delete existing[id];
+      delete panelMap[id];
+    }
+  });
+  
+  // 补齐/复用面板（保持容器内顺序 = sessionIds 顺序）
+  const wanted = sessionIds.slice(0, count);
+  let prevEl = null;
+  wanted.forEach(function(id) {
+    let panel = existing[id];
+    if (!panel) {
+      panel = createAgentSplitPanel(id);
+      existing[id] = panel;
+      panelMap[id] = panel;
+      // 复用该会话的已缓存消息（若本会话已在主视图加载过）
+      const cached = _splitSessionCache[id];
+      if (cached && cached.messages) {
+        _splitRenderMessages(panel, cached.messages);
+      } else {
+        _splitLoadSession(panel, id);
+      }
+    }
+    // 重新挂载保持顺序
+    if (panel.parentNode !== container) {
+      if (prevEl && prevEl.nextSibling) {
+        container.insertBefore(panel, prevEl.nextSibling);
+      } else {
+        container.appendChild(panel);
+      }
+    }
+    prevEl = panel;
+  });
+  
+  // 重建拖拽分隔条（horizontal/vertical 布局）
+  _rebuildSplitDividers(container);
+}
+
+function createAgentSplitPanel(sessionId, index) {
+  const panel = document.createElement('div');
+  panel.className = 'agent-split-panel';
+  panel.dataset.sessionId = sessionId;
+  
+  // 面板头部
+  const header = document.createElement('div');
+  header.className = 'agent-split-header';
+  
+  const title = document.createElement('span');
+  title.className = 'agent-split-title';
+  title.textContent = sessionId.slice(0, 8) + '…';
+  title.title = sessionId;
+  
+  const isCurSession = sessionId === _getAgentSessionId();
+  const status = document.createElement('span');
+  status.className = 'agent-split-status';
+  status.dataset.sid = sessionId;
+  _updateSplitStatusEl(status, sessionId, isCurSession ? (state.agentSessionState || (state.agentStreaming ? 'streaming' : 'idle')) : 'idle');
+  
+  const switchBtn = document.createElement('button');
+  switchBtn.className = 'agent-split-switch';
+  switchBtn.textContent = '⤢';
+  switchBtn.title = '在主视图打开此会话';
+  switchBtn.onclick = function() {
+    switchToSession(sessionId);
+  };
+  
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'agent-split-close';
+  closeBtn.textContent = '✕';
+  closeBtn.title = '关闭此面板';
+  closeBtn.onclick = function() {
+    const container = document.getElementById('agentSplitContainer');
+    if (container) {
+      container.removeChild(panel);
+      delete window._agentSplitPanels[sessionId];
+    }
+  };
+  
+  header.appendChild(title);
+  header.appendChild(status);
+  header.appendChild(switchBtn);
+  header.appendChild(closeBtn);
+  
+  // 消息区域
+  const messages = document.createElement('div');
+  messages.className = 'agent-split-messages';
+  messages.dataset.sid = sessionId;
+  messages.innerHTML = '<div class="agent-split-empty">加载中…</div>';
+  
+  // 输入区域（每个面板独立输入框，发送到对应会话）
+  const inputArea = document.createElement('div');
+  inputArea.className = 'agent-split-input';
+  const textarea = document.createElement('textarea');
+  textarea.className = 'agent-split-textarea';
+  textarea.placeholder = '输入消息… (Enter 发送)';
+  textarea.rows = 2;
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'agent-split-send';
+  sendBtn.textContent = '发送';
+  sendBtn.onclick = function() { _splitSendMessage(sessionId, panel, textarea); };
+  textarea.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      _splitSendMessage(sessionId, panel, textarea);
+    }
+  });
+  inputArea.appendChild(textarea);
+  inputArea.appendChild(sendBtn);
+  
+  panel.appendChild(header);
+  panel.appendChild(messages);
+  panel.appendChild(inputArea);
+  
+  return panel;
+}
+
+// ─── 真分屏辅助：会话消息缓存 / 加载 / 渲染 / 发送 / 轮询 / 拖拽分隔 ───
+
+// 会话消息缓存（分屏面板复用，避免重复请求）
+window._splitSessionCache = {};
+
+// 加载指定会话消息到面板（只读 API，不切换主视图会话）
+async function _splitLoadSession(panel, sessionId) {
+  const messagesEl = panel.querySelector('.agent-split-messages');
+  try {
+    const res = await client.getAgentSession(sessionId);
+    if (res && res.code === 0 && res.data) {
+      const msgs = res.data.messages || [];
+      window._splitSessionCache[sessionId] = { messages: msgs, status: res.data.status, is_streaming: !!res.data.is_streaming };
+      _splitRenderMessages(panel, msgs);
+      _updateSplitStatusEl(panel.querySelector('.agent-split-status'), sessionId, res.data.status || 'idle');
+    }
+  } catch (e) {
+    if (messagesEl) {
+      messagesEl.innerHTML = '<div class="agent-split-empty" style="color:var(--red)">加载失败: ' + escapeHtml(e.message || e) + '</div>';
+    }
+  }
+}
+
+// 渲染会话消息到面板（复用主视图的消息渲染风格）
+function _splitRenderMessages(panel, messages) {
+  const messagesEl = panel.querySelector('.agent-split-messages');
+  if (!messagesEl) return;
+  if (!messages || messages.length === 0) {
+    messagesEl.innerHTML = '<div class="agent-split-empty">暂无消息</div>';
+    return;
+  }
+  // 保留滚动位置：记录是否为底部
+  const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  messagesEl.innerHTML = '';
+  messages.forEach(function(msg) {
+    if (!msg || msg.role === 'system') return;
+    const msgEl = document.createElement('div');
+    msgEl.className = 'agent-msg agent-msg-' + msg.role;
+    let content = msg.content || '';
+    if (msg.role === 'assistant' && msg.reasoning_content) {
+      content = '<details class="agent-reasoning"><summary>思考</summary>' + escapeHtml(msg.reasoning_content) + '</details>' + content;
+    }
+    // 工具调用折叠卡
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length) {
+      const names = msg.tool_calls.map(function(tc) {
+        return (tc && tc.function && tc.function.name) || 'tool';
+      }).join(', ');
+      content += '<div class="agent-tool-badge">🔧 ' + escapeHtml(names) + '</div>';
+    }
+    // 工具结果折叠
+    if (msg.role === 'tool') {
+      content = '<div class="agent-tool-result">' + escapeHtml(String(content).slice(0, 500)) + '</div>';
+    }
+    msgEl.innerHTML = '<div class="msg-content">' + (typeof window.renderAgentContent === 'function' ? (window.renderAgentContent(content) || escapeHtml(String(content))) : escapeHtml(String(content))) + '</div>';
+    messagesEl.appendChild(msgEl);
+  });
+  // 保持在底部
+  if (nearBottom) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+}
+
+// 更新面板状态点
+function _updateSplitStatusEl(el, sessionId, st) {
+  if (!el) return;
+  const stTxt = { idle: '○ 空闲', running: '● 处理中', streaming: '● 对话中', awaiting_approval: '⏳ 待审批', aborted: '⛔ 已中止', not_found: '○ 无会话' }[st] || '○ 空闲';
+  const stColor = { idle: 'var(--fg-muted)', running: '#f59e0b', streaming: '#22c55e', awaiting_approval: '#f97316', aborted: '#ef4444', not_found: 'var(--fg-muted)' }[st] || 'var(--fg-muted)';
+  el.textContent = stTxt;
+  el.style.color = stColor;
+}
+
+// 从分屏面板发送消息到指定会话
+async function _splitSendMessage(sessionId, panel, textarea) {
+  const text = (textarea.value || '').trim();
+  if (!text) return;
+  textarea.value = '';
+  // 追加用户消息到面板（乐观渲染）
+  const messagesEl = panel.querySelector('.agent-split-messages');
+  if (messagesEl) {
+    const msgEl = document.createElement('div');
+    msgEl.className = 'agent-msg agent-msg-user';
+    msgEl.innerHTML = '<div class="msg-content">' + escapeHtml(text) + '</div>';
+    messagesEl.appendChild(msgEl);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  try {
+    // 切到该会话上下文（保持后端会话归属），发送
+    _setAgentSessionId(sessionId);
+    const res = await client.agentChat(text, [], sessionId);
+    // 发送成功后立即刷新面板（拉取最新消息，含流式结果轮询）
+    await _splitLoadSession(panel, sessionId);
+  } catch (e) {
+    showToast('发送失败: ' + (e.message || e), 'error');
+  }
+}
+
+// 轮询：分屏模式下定期刷新各面板会话消息
+let _splitPollTimer = null;
+function _splitStartPolling() {
+  _splitStopPolling();
+  _splitPollTimer = setInterval(function() {
+    const container = document.getElementById('agentSplitContainer');
+    if (!container) return;
+    // 仅刷新当前可见的面板（避免后台开销）
+    container.querySelectorAll('.agent-split-panel').forEach(function(panel) {
+      const sid = panel.dataset.sessionId;
+      if (sid) _splitLoadSession(panel, sid);
+    });
+  }, 4000);
+}
+function _splitStopPolling() {
+  if (_splitPollTimer) {
+    clearInterval(_splitPollTimer);
+    _splitPollTimer = null;
+  }
+}
+
+// 重建拖拽分隔条（horizontal/vertical 布局面板间加可拖拽分隔条）
+function _rebuildSplitDividers(container) {
+  // 移除旧分隔条
+  container.querySelectorAll('.agent-split-divider').forEach(function(d) { d.remove(); });
+  const layout = localStorage.getItem(AGENT_SPLIT_LAYOUT_KEY) || 'horizontal';
+  if (layout === 'grid') return; // 网格布局不支持拖拽
+  const isRow = layout === 'horizontal';
+  const panels = container.querySelectorAll('.agent-split-panel');
+  if (panels.length < 2) return;
+  const saved = localStorage.getItem('ts2_agent_split_divider_' + layout);
+  const basePx = saved ? parseFloat(saved) : 50; // 百分比
+  const applyWidth = function() {
+    panels.forEach(function(p, i) {
+      if (isRow) {
+        p.style.flex = (i === 0 ? basePx : (100 - basePx)) + ' 1 0%';
+      } else {
+        p.style.flex = (i === 0 ? basePx : (100 - basePx)) + ' 1 0%';
+      }
+    });
+  };
+  applyWidth();
+  // 在第一个面板后插入分隔条
+  const divider = document.createElement('div');
+  divider.className = 'agent-split-divider' + (isRow ? ' divider-col' : ' divider-row');
+  container.insertBefore(divider, panels[1]);
+  let dragging = false;
+  divider.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    dragging = true;
+    document.body.classList.add('split-dragging');
+    const onMove = function(ev) {
+      if (!dragging) return;
+      const rect = container.getBoundingClientRect();
+      let pct;
+      if (isRow) {
+        pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      } else {
+        pct = ((ev.clientY - rect.top) / rect.height) * 100;
+      }
+      pct = Math.max(15, Math.min(85, pct));
+      localStorage.setItem('ts2_agent_split_divider_' + layout, String(pct));
+      panels.forEach(function(p, i) {
+        p.style.flex = (i === 0 ? pct : (100 - pct)) + ' 1 0%';
+      });
+    };
+    const onUp = function() {
+      dragging = false;
+      document.body.classList.remove('split-dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
 
 // ─── 单窗口内分屏（对话 + 工具面板，不干扰 single/split 模式）───
 let _intraObserver = null;
@@ -20058,8 +19933,10 @@ function applyIntraSplit() {
   const main = document.getElementById('agentChatMain');
   const btn = document.getElementById('intraSplitBtn');
   if (!main) return;
-  const on = localStorage.getItem('ts2_agent_intra_split') === 'on';
-  if (btn) btn.style.display = '';
+  const mode = localStorage.getItem(AGENT_DISPLAY_MODE_KEY) || 'single';
+  const on = localStorage.getItem('ts2_agent_intra_split') === 'on' && mode === 'single';
+  // 按钮显隐：split（多会话看板）模式下隐藏，single 模式下可见
+  if (btn) btn.style.display = mode === 'split' ? 'none' : '';
   main.classList.toggle('intra-split', on);
   let side = document.getElementById('agentSplitSide');
   if (on) {
@@ -20118,6 +19995,37 @@ function _renderSplitSideTools() {
     '</div>';
   }).join('');
 }
+
+// 初始化 Agent 显示模式设置
+function initAgentDisplayMode() {
+  const mode = localStorage.getItem(AGENT_DISPLAY_MODE_KEY) || 'single';
+  const radios = document.getElementsByName('agentDisplayMode');
+  for (let i = 0; i < radios.length; i++) {
+    if (radios[i].value === mode) {
+      radios[i].checked = true;
+    }
+  }
+  
+  const config = document.getElementById('agentSplitConfig');
+  if (config) {
+    config.style.display = mode === 'split' ? 'block' : 'none';
+  }
+  
+  const layoutSelect = document.getElementById('agentSplitLayout');
+  if (layoutSelect) {
+    layoutSelect.value = localStorage.getItem(AGENT_SPLIT_LAYOUT_KEY) || 'horizontal';
+  }
+  
+  const countSelect = document.getElementById('agentSplitCount');
+  if (countSelect) {
+    countSelect.value = localStorage.getItem(AGENT_SPLIT_COUNT_KEY) || '2';
+  }
+  
+  if (mode === 'split') {
+    setTimeout(enableAgentSplitMode, 500);
+  }
+}
+
 // 时钟更新
 function setElColor(el, h, m) {
   var t = h + m / 60;
@@ -24842,7 +24750,7 @@ function openBrowser(url) {
     if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
     tab._browserUrl = url;
   }
-  if (_splitActive && _activePaneId !== '0' && !(window._agentPanes && window._agentPanes[_activePaneId])) {
+  if (_splitActive && _activePaneId !== '0' && _activePaneId !== _agentPaneId) {
     editorService.openInPane(tab.path, _activePaneId);
   } else {
     editorService.switchTo(tab.path);
