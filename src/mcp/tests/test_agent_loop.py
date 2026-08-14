@@ -45,7 +45,7 @@ def make_loop(runner, **kw):
 def test_task_completes_when_no_tool_calls():
     runner = FakeRunner([([], "最终答案")])
     loop = make_loop(runner)
-    task_id = loop.submit("计算 1+1")
+    task_id = loop.submit("计算 1+1", auto_start=False)
     assert loop.step() == task_id
     task = loop.get_task(task_id)
     assert task.status == TaskStatus.COMPLETED
@@ -63,7 +63,7 @@ def test_task_runs_multiple_turns_until_done():
         ]
     )
     loop = make_loop(runner)
-    task_id = loop.submit("算一下")
+    task_id = loop.submit("算一下", auto_start=False)
     assert loop.step() == task_id
     task = loop.get_task(task_id)
     assert task.status == TaskStatus.COMPLETED
@@ -76,8 +76,8 @@ def test_task_runs_multiple_turns_until_done():
 def test_fifo_order():
     runner = FakeRunner([([], "A"), ([], "B")])
     loop = make_loop(runner)
-    id_a = loop.submit("任务A")
-    id_b = loop.submit("任务B")
+    id_a = loop.submit("任务A", auto_start=False)
+    id_b = loop.submit("任务B", auto_start=False)
     assert loop.step() == id_a
     assert loop.get_task(id_a).status == TaskStatus.COMPLETED
     assert loop.get_task(id_b).status == TaskStatus.PENDING
@@ -90,7 +90,7 @@ def test_pause_resume():
     runner = FakeRunner([([], "x")])
     loop = make_loop(runner)
     loop.pause()
-    task_id = loop.submit("t")
+    task_id = loop.submit("t", auto_start=False)
     assert loop.step() is None  # paused 时 step 不处理
     assert loop.get_task(task_id).status == TaskStatus.PENDING
     loop.resume()
@@ -105,7 +105,7 @@ def test_stop_halts_processing():
     loop.start()
     try:
         loop.stop()
-        task_id = loop.submit("t2")
+        task_id = loop.submit("t2", auto_start=False)
         assert loop.step() is None  # stopped 后不处理
         assert loop.get_task(task_id).status == TaskStatus.PENDING
     finally:
@@ -128,7 +128,7 @@ class InfiniteToolRunner:
 def test_max_turns_budget_halted():
     runner = InfiniteToolRunner()
     loop = make_loop(runner, max_turns=3)
-    task_id = loop.submit("循环任务", max_turns=3)
+    task_id = loop.submit("循环任务", max_turns=3, auto_start=False)
     assert loop.step() == task_id
     task = loop.get_task(task_id)
     assert task.status == TaskStatus.HALTED
@@ -147,7 +147,7 @@ def test_max_duration_budget_halted():
             )
 
     loop = make_loop(SlowRunner(), max_turns=100, max_duration_seconds=0.08)
-    task_id = loop.submit("慢任务", max_turns=100)
+    task_id = loop.submit("慢任务", max_turns=100, auto_start=False)
     assert loop.step() == task_id
     task = loop.get_task(task_id)
     assert task.status == TaskStatus.HALTED
@@ -163,7 +163,7 @@ def test_event_broadcast_completed_and_halted():
     bus.subscribe("agent_loop.*", lambda e: events.append(e.event_type))
 
     loop = make_loop(FakeRunner([([], "ok")]), event_bus=bus)
-    loop.submit("任务")
+    loop.submit("任务", auto_start=False)
     loop.step()
     assert "agent_loop.task_started" in events
     assert "agent_loop.task_completed" in events
@@ -200,7 +200,54 @@ def test_middleware_chain_invoked():
     chain = MiddlewareChain()
     chain.add(mw)
     loop = make_loop(FakeRunner([([], "x")]), middleware_chain=chain)
-    loop.submit("m")
+    loop.submit("m", auto_start=False)
     loop.step()
     assert mw.before >= 1
     assert mw.after >= 1
+
+
+# ── 8) 提交即自主（修复：submit 自动启动后台线程，任务不再永久 pending）──
+def test_submit_auto_starts_background_execution():
+    import time
+    runner = FakeRunner([([], "自动完成")])
+    loop = make_loop(runner)
+    task_id = loop.submit("自动任务", max_turns=2)  # 默认 auto_start=True
+    time.sleep(1.0)  # 等后台线程 drain 队列
+    task = loop.get_task(task_id)
+    assert task.status == TaskStatus.COMPLETED
+    assert task.result == "自动完成"
+    assert len(runner.calls) == 1
+
+# ── 9) 状态机守卫：PAUSED 时 auto_start 不启动执行（任务保持 pending）──
+def test_submit_auto_start_respects_paused():
+    runner = FakeRunner([([], "x")])
+    loop = make_loop(runner)
+    loop.start()   # 先 RUNNING
+    loop.pause()   # 再 PAUSED（pause 仅在 RUNNING→PAUSED 生效）
+    task_id = loop.submit("t", auto_start=True)  # PAUSED 下不启动执行
+    assert loop.get_task(task_id).status == TaskStatus.PENDING
+
+
+# ── 10) 会话化：任务执行后消息流被记录（user goal → assistant 回合 → tool）──
+def test_task_records_message_flow():
+    """loop 会话化（决策①A）：LoopTask.messages 记录完整消息流，snapshot 暴露"""
+    runner = FakeRunner([
+        ([{"name": "calc", "arguments": "1+1"}], ""),
+        ([], "结果是 2"),
+    ])
+    loop = make_loop(runner)
+    task_id = loop.submit("计算", max_turns=5, auto_start=False)
+    loop.step()
+    task = loop.get_task(task_id)
+    msgs = task.messages
+    # 第一回合：user goal + assistant(tool_calls) + tool 结果
+    assert msgs[0]["role"] == "user" and "计算" in msgs[0]["content"]
+    assert msgs[1]["role"] == "assistant" and msgs[1]["tool_calls"]
+    assert msgs[2]["role"] == "tool"
+    # 第二回合：assistant 无 tool_calls → 完成
+    assert msgs[-1]["role"] == "assistant" and "结果是 2" in msgs[-1]["content"]
+    # 每条消息带 ts
+    assert all("ts" in m for m in msgs)
+    # snapshot 暴露 messages
+    snap = task.snapshot()
+    assert "messages" in snap and len(snap["messages"]) == len(msgs)

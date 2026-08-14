@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from mcp.harness.loop import AgentLoop  # noqa: E402
 from mcp.harness.turn import TurnResult, TurnStatus  # noqa: E402
 from mcp.server.loop_api import (  # noqa: E402
-    ControlRequest, SubmitRequest, _set_loop_for_test,
-    loop_control, loop_state, loop_submit,
+    ControlRequest, SubmitRequest, TaskMessageRequest, _set_loop_for_test,
+    loop_control, loop_state, loop_submit, loop_task_detail, loop_task_message,
 )
 
 
@@ -58,3 +58,30 @@ def test_control_unknown_action():
     _set_loop_for_test(AgentLoop(runner=FakeRunner()))
     with pytest.raises(Exception):
         loop_control(ControlRequest(action="fly"))
+
+
+# ── 会话化：任务详情（含消息流）+ 审核介入（插入 user 消息）──
+def test_task_detail_returns_messages():
+    loop = AgentLoop(runner=FakeRunner())
+    _set_loop_for_test(loop)
+    body = loop_submit(SubmitRequest(goal="详情任务"))
+    tid = body["task_id"]
+    loop.step()
+    detail = loop_task_detail(tid)
+    assert detail["task_id"] == tid
+    assert detail["status"] == "completed"
+    assert detail["messages"][0]["role"] == "user"
+    assert detail["messages"][-1]["role"] == "assistant"
+
+
+def test_task_message_intervene():
+    loop = AgentLoop(runner=FakeRunner())
+    _set_loop_for_test(loop)
+    body = loop_submit(SubmitRequest(goal="介入任务", auto_start=False))
+    tid = body["task_id"]
+    # 审核介入：插入 user 消息（喂给下一回合）
+    loop_task_message(tid, TaskMessageRequest(content="注意细节"))
+    task = loop.get_task(tid)
+    assert task.messages[-1]["role"] == "user"
+    assert task.messages[-1]["content"] == "注意细节"
+    assert task.pending_input == "注意细节"

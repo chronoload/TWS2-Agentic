@@ -24,10 +24,16 @@ _override_loop = None  # 测试注入点
 class SubmitRequest(BaseModel):
     goal: str
     max_turns: Optional[int] = None
+    auto_start: bool = True
 
 
 class ControlRequest(BaseModel):
     action: str  # start / pause / resume / stop
+
+
+class TaskMessageRequest(BaseModel):
+    """审核介入：追加一条 user 消息（喂给 loop 下一回合）"""
+    content: str
 
 
 def _set_loop_for_test(loop):
@@ -69,10 +75,34 @@ def loop_state():
 def loop_submit(req: SubmitRequest):
     loop = _get_loop()
     try:
-        task_id = loop.submit(goal=req.goal, max_turns=req.max_turns)
+        task_id = loop.submit(goal=req.goal, max_turns=req.max_turns,
+                              auto_start=req.auto_start)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
     return {"task_id": task_id, "goal": req.goal}
+
+
+@router.get("/task/{task_id}")
+def loop_task_detail(task_id: str):
+    """任务详情（会话化）：meta + 完整消息流（前端像普通会话那样审核）"""
+    loop = _get_loop()
+    task = loop.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return task.snapshot()
+
+
+@router.post("/task/{task_id}/message")
+def loop_task_message(task_id: str, req: TaskMessageRequest):
+    """审核介入（决策③C）：插入 user 消息，喂给 loop 下一回合"""
+    loop = _get_loop()
+    try:
+        task = loop.intervene(task_id, req.content)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "task_id": task_id, "pending_input": task.pending_input}
 
 
 @router.post("/control")

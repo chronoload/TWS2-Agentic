@@ -8306,3 +8306,34 @@ pre.rmd-chunk::first-line {
   max-height: 60px;
   overflow: hidden;
 }
+
+/* ── AgentLoop 会话化审核（loop-panel.js，复用 .agent-msg 气泡）── */
+.lp-list { list-style: none; margin: 0; padding: 0; }
+.lp-task { display: flex; align-items: center; gap: 6px; padding: 5px 2px; border-bottom: 1px solid rgba(128,128,128,.12); font-size: 11px; flex-wrap: wrap; }
+.lp-view { margin-left: auto; flex: 0 0 auto; padding: 2px 8px; background: var(--accent); color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 10px; }
+.lp-detail { margin-top: 8px; padding: 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; }
+.lp-detail-head { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; flex-wrap: wrap; }
+.lp-controls { display: flex; gap: 6px; margin-bottom: 8px; }
+.lp-ctrl { padding: 2px 8px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; font-size: 10px; color: var(--fg); }
+.lp-ctrl:hover { border-color: var(--accent); }
+.lp-thread { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.lp-thread .agent-msg { padding: 6px 8px; font-size: 11px; }
+.lp-role { font-size: 10px; color: var(--fg-muted); font-weight: 600; margin-bottom: 2px; }
+.lp-body { word-break: break-word; white-space: pre-wrap; }
+.lp-ts { display: block; font-size: 9px; color: var(--fg-muted); margin-top: 3px; }
+.lp-tool-call { margin-top: 4px; font-size: 10px; color: var(--accent); }
+.lp-tool-call pre { margin: 2px 0 0; padding: 3px 6px; background: rgba(0,0,0,.25); border-radius: 3px; font-size: 9px; overflow-x: auto; }
+.lp-tool-card { padding: 5px 8px; background: rgba(128,128,128,.1); border-left: 2px solid var(--accent); border-radius: 3px; font-size: 10px; color: var(--fg-muted); }
+.lp-tool-card pre { margin: 3px 0 0; padding: 3px 6px; background: rgba(0,0,0,.25); border-radius: 3px; font-size: 9px; overflow-x: auto; }
+.lp-intervene { display: flex; gap: 6px; margin-top: 8px; }
+.lp-intervene-input { flex: 1; padding: 4px 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--fg); font-size: 11px; outline: none; }
+.lp-intervene-send { padding: 4px 10px; background: var(--accent); color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.lp-loading, .lp-empty { color: var(--fg-muted); font-size: 11px; padding: 6px 2px; }
+.lp-badge { padding: 1px 6px; border-radius: 8px; font-size: 10px; }
+.lp-pending { background: rgba(255,180,0,.15); color: #ffb400; }
+.lp-running { background: rgba(60,140,255,.15); color: #5aa2ff; }
+.lp-completed { background: rgba(60,200,120,.15); color: #4cd07f; }
+.lp-failed { background: rgba(255,80,80,.15); color: #ff6b6b; }
+.lp-halted { background: rgba(255,180,0,.15); color: #ffb400; }
+.lp-unknown { background: rgba(128,128,128,.15); color: var(--fg-muted); }
+.lp-result { margin-top: 6px; font-size: 11px; color: var(--fg); }

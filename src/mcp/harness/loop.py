@@ -61,6 +61,11 @@ class LoopTask:
     completed_at: Optional[str] = None
     result: Optional[str] = None
     error: Optional[str] = None
+    # 会话化：完整消息流（{role: user/assistant/tool, content, tool_calls, ts}）
+    # loop 作为 autonomous 对话模式，前端像普通会话那样审核（决策①A：内存 + snapshot 暴露）
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    # 审核介入挂起输入：intervene() 设置，下一回合消费为 user 消息（决策③C）
+    pending_input: Optional[str] = None
 
     def snapshot(self) -> Dict[str, Any]:
         """状态快照（前端轮询/事件广播用）"""
@@ -75,6 +80,7 @@ class LoopTask:
             "completed_at": self.completed_at,
             "result": self.result,
             "error": self.error,
+            "messages": list(self.messages),
         }
 
 
@@ -159,8 +165,15 @@ class AgentLoop:
     # ────────────────────────── 任务接口 ──────────────────────────
 
     def submit(self, goal: str, max_turns: Optional[int] = None,
-               max_duration_seconds: Optional[float] = None) -> str:
-        """提交长程任务（入队即返回 task_id；后台自主执行）"""
+               max_duration_seconds: Optional[float] = None,
+               auto_start: bool = True) -> str:
+        """提交长程任务（入队即返回 task_id；后台自主执行）
+
+        auto_start=True（默认）：提交即自主——loop 处于 IDLE 时自动启动后台线程执行
+        （修复：此前 submit 只入队不启动线程，队列永不 drain → 任务永久 pending）；
+        PAUSED/STOPPED 状态不强制启动（保持状态机语义）。
+        auto_start=False：仅入队，配合 step() 单步驱动（测试/编排用）。
+        """
         task = LoopTask(
             task_id=uuid.uuid4().hex[:12],
             goal=goal,
@@ -170,6 +183,15 @@ class AgentLoop:
         with self._lock:
             self._tasks[task.task_id] = task
         self._queue.put(task.task_id)
+        if auto_start:
+            # 仅 IDLE 且无存活线程时启动（PAUSED/STOPPED 保持挂起语义）
+            with self._lock:
+                need_start = (
+                    self._status == LoopStatus.IDLE
+                    and (self._thread is None or not self._thread.is_alive())
+                )
+            if need_start:
+                self.start()
         logger.info("AgentLoop task submitted: %s goal=%r", task.task_id, goal[:60])
         return task.task_id
 
@@ -183,6 +205,31 @@ class AgentLoop:
         if status is not None:
             tasks = [t for t in tasks if t.status == status]
         return tasks
+
+    # ────────────────────────── 审核介入（会话化，决策③C） ──────────────────────────
+
+    def intervene(self, task_id: str, message: str) -> LoopTask:
+        """审核介入：插入 user 消息，下一回合喂给模型。
+
+        loop 是 autonomous 对话模式，审核者可像普通会话一样追加 user 消息。
+        约束：loop PAUSED/STOPPED → ValueError（API 层映射 409）；
+        任务不存在 → KeyError（API 层映射 404）；已终态（COMPLETED/FAILED）→ ValueError。
+        """
+        with self._lock:
+            if self._status in (LoopStatus.PAUSED, LoopStatus.STOPPED):
+                raise ValueError("loop 处于 PAUSED/STOPPED，无法介入")
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                raise ValueError(f"任务已结束（{task.status.value}），无法介入")
+            task.pending_input = message
+            task.messages.append(
+                {"role": "user", "content": message, "ts": datetime.now().isoformat()}
+            )
+        # 唤醒：入队（后台线程 drain 或下次 start 时处理）
+        self._queue.put(task_id)
+        return task
 
     # ────────────────────────── 核心：step（同步可测） ──────────────────────────
 
@@ -214,7 +261,18 @@ class AgentLoop:
         self._emit("agent_loop.task_started", task)
 
         messages: List[Dict[str, Any]] = [{"role": "user", "content": task.goal}]
+        # 会话化：goal 作为 user 消息记录到消息流（仅首次，介入消息不重复 goal）
+        if not task.messages:
+            task.messages.append({"role": "user", "content": task.goal, "ts": datetime.now().isoformat()})
         while task.turn_count < task.max_turns:
+            # ── 审核介入消息：追加为 user 消息喂给模型（决策③C） ──
+            if task.pending_input:
+                task.messages.append(
+                    {"role": "user", "content": task.pending_input, "ts": datetime.now().isoformat()}
+                )
+                messages.append({"role": "user", "content": task.pending_input})
+                task.pending_input = None
+
             # ── 时长预算检查（超时 → 挂起，等待人工） ──
             if task.max_duration_seconds and task.started_at:
                 elapsed = time.time() - _parse_ts(task.started_at)
@@ -264,6 +322,13 @@ class AgentLoop:
                 messages.append(
                     {"role": "assistant", "content": getattr(result, "content", "") or ""}
                 )
+                # 会话化：记录 assistant 回合到消息流
+                task.messages.append({
+                    "role": "assistant",
+                    "content": getattr(result, "content", "") or "",
+                    "tool_calls": getattr(result, "tool_calls", None),
+                    "ts": datetime.now().isoformat(),
+                })
                 for entry in result.tool_calls:
                     tc = entry.get("tool_call", entry) if isinstance(entry, dict) else entry
                     t_id = tc.get("id", "") if isinstance(tc, dict) else ""
@@ -271,12 +336,24 @@ class AgentLoop:
                     messages.append(
                         {"role": "tool", "tool_call_id": t_id, "content": content}
                     )
+                    # 会话化：记录 tool 消息到消息流
+                    task.messages.append({
+                        "role": "tool", "tool_call_id": t_id, "content": content,
+                        "ts": datetime.now().isoformat(),
+                    })
                 continue
 
             # 无 tool_calls → 自然完成
             task.result = getattr(result, "content", "") or ""
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now().isoformat()
+            # 会话化：记录最终 assistant 回复到消息流
+            task.messages.append({
+                "role": "assistant",
+                "content": task.result,
+                "tool_calls": None,
+                "ts": datetime.now().isoformat(),
+            })
             break
         else:
             # while 因 max_turns 耗尽退出且未 break → 预算用尽，挂起等待人工

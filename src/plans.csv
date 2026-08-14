@@ -11,6 +11,9 @@
 20260814_AgentLoop-面板接线-T4,AgentLoop 面板接线 T4,open,2026-08-14 17:48:16,18,T4b FastAPI /api/loop/* 端点,done,6,1,T4b红绿: mcp/server/loop_api.py (state/submit/control 三端点) + app.py include_router + PUBLIC_ENDPOINTS; 红(模块不存在)→绿(4passed + 挂载验证3端点),done
 20260814_AgentLoop-面板接线-T4,AgentLoop 面板接线 T4,open,2026-08-14 17:48:16,19,T4c 前端 loop-panel 组件,done,7,1,T4c红绿: loop-panel.js 组件(renderTasks/statusBadge纯函数 + createLoopPanel mount/refresh/submit) + loop-panel-init.js 引导 + index.html 引入; 红(模块不存在)→绿(9node PASS),done
 20260814_AgentLoop-面板接线-T4,AgentLoop 面板接线 T4,open,2026-08-14 17:48:16,19,T4c 前端 loop-panel 组件,done,8,2,T4c调整: 按用户指示改为集成进发现面板(agentDiscoverPanel) - 加 Loop tab(index.html) + _renderDiscoverList loop分支 + _mountLoopPanelInDiscover(app.js) + loop-panel-init 兜底化; 移除独立容器方案; 全量验证绿,done
+20260814_loop-会话化重构,loop 会话化重构,open,2026-08-14 20:55:06,22,T2 API 层：详情 + 消息介入,open,,,,
+20260814_loop-会话化重构,loop 会话化重构,open,2026-08-14 20:55:06,23,T3 前端层：会话视图复用 Agent 渲染,open,,,,
+20260814_loop-会话化重构,loop 会话化重构,open,2026-08-14 20:55:06,24,T1 数据层：LoopTask 消息流,open,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,5,T3 PLAN.md 更新,done,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,6,T2 skills/ 14 个子技能文档,done,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,7,T1 SKILL.md 流程编排重写,done,,,,

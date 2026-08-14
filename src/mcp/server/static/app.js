@@ -14005,7 +14005,7 @@ function _renderDiscoverList(preserveSel) {
       + '<button id="loopSubmitBtn" style="padding:4px 10px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px">提交</button>'
       + '</div>'
       + '<div id="loopListWrap"></div>'
-      + '<div style="color:var(--fg-muted);font-size:10px;padding:6px 2px 0">长程任务后台自主执行 · 完成✅/挂起⏸️ 自动通知 · 轮询 /api/loop/state</div>'
+      + '<div style="color:var(--fg-muted);font-size:10px;padding:6px 2px 0">长程任务后台自主执行 · 完成✅/挂起⏸️ 自动通知 · 点「👁 审核」像普通会话一样查看消息流并介入</div>'
       + '</div>';
   }
   box.innerHTML = html;
