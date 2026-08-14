@@ -36,12 +36,12 @@ PROJECT_SUPPORTED = ("audit", "log", "requirement", "dev")
 COMMAND_HELP = {
     "audit": "--task task.json --root . [--project <name>] 静态接口审计（亲属追逐依赖链 + 8维分析 + 4维扫描，双轨产物 INTERFACE_CHAIN.md + interface_chain.db + CSV）",
     "plan": "create --title ... / task add --plan <id> ... / step add --task <id> ... / verify --plan <id> / ledger / export / review / tdd check / openspec ...（开发流程机器化，变更自动刷新双轨产物）",
-    "patch": "gen --db ... --root . / apply --dir patches/ --root . / verify --before ... --after ... / plugins（自演化修复闭环）",
+    "patch": "gen --db ... --root . / apply --dir patches/ --root . / verify --before ... --after ... / plugins（自演化修复闭环；bug 修复前先 systematic-debugging：复现→根因→假设→patch）",
     "log": "add --project <name> --category pitfalls --title ... / list [--scope project|pkg] / query --keyword ... / export（经验沉淀，随项目/随包双轨）",
-    "requirement": "add --kind interface --name ... / list / update / delete / export / align --root . / scan --req-dirs openspec（需求 CRUD + 规范接口对齐，双轨）",
+    "requirement": "add --kind interface|path|file|spec --name ... / list / update / delete / export / align --root . / scan --req-dirs openspec（需求 CRUD + 规范接口对齐，双轨；--kind spec 替代外部 spec 文件——design 文档用 requirement 记录而非 docs/specs）",
     "dev": "map --target <目录> [--depth 3] / audit --target <目录>（学习/模仿目标项目：目录编排 + 架构了解）",
     "project": "init --name <name> [--git] / list / root --name <name>（产物目录约定 <name>-project/）",
-    "doc": "[--out 路径] 自举生成使用/开发文档（AUDIT/PLAN/LOG/REQI/DEV）",
+    "doc": "[--out 路径] 自举生成使用/开发文档（AUDIT/PLAN/LOG/REQI/DEV 各 5 份）",
 }
 
 
@@ -51,12 +51,19 @@ class MacdevTool(Tool):
     keywords = ["macdev", "audit", "审计", "接口链", "plan", "计划", "任务", "TDD",
                 "verify", "review", "ledger", "log", "经验", "教训", "pitfall",
                 "requirement", "需求", "align", "dev", "学习", "模仿", "架构",
-                "project", "产物", "patch", "补丁", "自演化"]
+                "project", "产物", "patch", "补丁", "自演化", "superpowers",
+                "brainstorming", "grilling", "构思", "systematic-debugging", "调试",
+                "subagent", "子技能", "spec", "writing-plans"]
     description = ("运行 macdev 机器驱动开发库命令（静态接口审计/开发流程机器化/经验沉淀/"
                    "需求对齐/学习模仿目标项目/产物目录/自演化补丁）。"
                    "它取代 plan_cli：plan 的 CRUD+verify+review+ledger+tdd+openspec 全在 plan 下，"
                    "audit 提供亲属追逐依赖链与 8 维分析，log 沉淀经验（随项目/随包），"
-                   "requirement 维护结构化需求并对齐代码/端点，dev 学习模仿陌生项目。"
+                   "requirement 维护结构化需求并对齐代码/端点（--kind spec 替代外部 spec 文件），"
+                   "dev 学习模仿陌生项目。"
+                   "整合 superpowers：任务先判定类型（构思→grilling/requirement spec / "
+                   "bug→systematic-debugging→patch / 功能→plan TDD / 收尾→review→分支完成），"
+                   "14 个子技能见 skills/macdev-skill/skills/（brainstorming/系统化调试/TDD/"
+                   "writing-plans/verification/code-review/subagent/并行/分支收尾/worktrees 等）。"
                    "产物默认收敛到 <name>-project/（--project 或 env MACDEV_PROJECT）。")
     parameters = {
         "type": "object",
@@ -90,13 +97,21 @@ class MacdevTool(Tool):
     model_hint = (
         "[何时使用] 审计项目架构/接口链、结构化维护开发计划、沉淀经验教训、管理需求并对齐代码、"
         "学习模仿陌生项目、收敛工作流产物。它取代了 plan_cli，plan 相关全部在 macdev plan 下。\n"
+        "[流程编排（superpowers 整合）] 任务先判定类型再选纪律：\n"
+        "- 构思/设计 → grilling（澄清→方案→批准）→ requirement add --kind spec 记录设计 → plan\n"
+        "- bug/缺陷   → systematic-debugging（复现→根因→假设）→ patch gen/apply/verify\n"
+        "- 功能实现   → plan（TDD：先失败测试后实现）→ verify 门禁\n"
+        "- 收尾       → plan review → 分支完成\n"
+        "14 个子技能：skills/macdev-skill/skills/（brainstorming/systematic-debugging/TDD/"
+        "writing-plans/verification/code-review/subagent/parallel/branch/worktrees）\n"
         "[顶层命令速查]\n"
         "- audit: --task task.json --root . [--project <name>]  → INTERFACE_CHAIN.md + interface_chain.db\n"
         "- plan: create --title ... / task add --plan <id> --title ... / step add --task <id> --text ... /\n"
         "        verify --plan <id>（完成门禁）/ ledger / export / review / tdd check / openspec ...\n"
         "- log: add --project <name> --category pitfalls|lessons|patterns|decisions --title ... [--body]\n"
         "       list [--scope project|pkg] / query --keyword ... / export\n"
-        "- requirement: add --kind interface|path|file --name ... / list / align --root . / scan\n"
+        "- requirement: add --kind interface|path|file|spec --name ... / list / align --root . / scan\n"
+        "       （--kind spec 替代外部 spec 文件：design 用 requirement 双轨记录，禁止 docs/specs）\n"
         "- dev: map --target <目录>（目录编排）/ audit --target <目录>（架构了解）\n"
         "- project: init --name <name> [--git]（建 <name>-project/ 收纳全部产物）\n"
         "- patch: gen --db ... --root . / apply --dir ... / verify（自演化修复闭环）\n"
