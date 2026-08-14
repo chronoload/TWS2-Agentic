@@ -183,8 +183,10 @@ python -m macdev project list                        # 列出已初始化的产�
    只读命令（`status` / `branch` / `log` / `diff` / `show`）可随时直接执行。
 2. **绝不假设未追踪（untracked）文件不重要**：`git status` 中的 `??` 项在删除/覆盖/忽略前必须逐项向用户确认，
    不得擅自忽略或清理。
-3. **上下文开始/压缩后第一步查 git 状态**：任何新上下文开始、或上下文压缩恢复后，第一时间执行
+3. **任何会话开始第一步查 git 状态（与铁律 10 查 log/plan 并列，用户强制）**：**任何新对话/会话（即使看似全新）开始、或上下文压缩恢复后，第一时间执行**
    `git branch -a` + `git status --short` + `git log --oneline -15`，看清分支/提交/工作区现状再动手。
+   git 查询与铁律 10 的 macdev log/plan 查询**地位并列、同为会话启动必查项**：先 git（看仓库现状）→
+   再 log/plan（看开发历史与既定事实），双查齐备后才允许继续操作。
 4. **动手前查阅 macdev log 与 plan**：用 `log list/query` 与 `plan list` 了解开发历史与进行中的计划，
    避免重复劳动或遗漏未完成事项。
 5. **macdev 操作必须生成双轨产物**：机器可读（db/csv/json）+ 人类可读（md）双轨缺一不可；
