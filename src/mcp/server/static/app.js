@@ -10560,6 +10560,9 @@ function _loadCompactMorePage(card, ti) {
     card.expandedCount = (card.expandedCount || 0) + ui3.length;
     card.expandedTotal = res.total || card.expandedCount;
     card.expandedHasMore = !!res.has_more;
+    // 压缩分页中间插入后：全量重建导航块，使 msgIndex 与 state.agentMessages
+    // 绝对下标重新对齐（否则插入点之后的导航块偏移，点击定位不精准）
+    _rebuildFlowNavBlocksAll();
     // 保持窗口起点与滚动位置重渲染（不跳底部）
     if (container) {
       _fullRenderRange(container, _agentMsgRenderStart, state.agentMessages.length, false, oldSH, oldST);
@@ -14782,8 +14785,8 @@ function _closeFlowNav() {
   if (mask) mask.style.display = 'none';
 }
 
-function _addFlowNavBlock(role, content, msgIndex, extra) {
-  // 为每条消息创建一个导航块
+function _makeFlowNavBlock(role, content, msgIndex, extra) {
+  // 为每条消息创建一个导航块（纯构建，供单条追加与批量重建复用）
   const iconMap = {
     user: '👤',
     assistant: '🤖',
@@ -14868,7 +14871,12 @@ function _addFlowNavBlock(role, content, msgIndex, extra) {
     if (!label) label = '消息';
   }
   
-  _flowNavBlocks.push({ icon, label, msgIndex, role });
+  return { icon, label, msgIndex, role };
+}
+
+function _addFlowNavBlock(role, content, msgIndex, extra) {
+  // 单条消息追加导航块（流式/增量路径），保持原行为
+  _flowNavBlocks.push(_makeFlowNavBlock(role, content, msgIndex, extra));
   _flowNavCurrentIdx = _flowNavBlocks.length - 1;
   _rebuildFlowNav();
   // 滚动到最新
@@ -14877,6 +14885,23 @@ function _addFlowNavBlock(role, content, msgIndex, extra) {
     _bindFlowNavScroll();
     list.scrollTop = list.scrollHeight;
   }
+}
+
+function _rebuildFlowNavBlocksAll() {
+  // 全量重建导航块（msgIndex 与 state.agentMessages 绝对下标对齐）：
+  // 压缩历史分页中间插入（_loadCompactMorePage 的 splice）后必须调用，
+  // 否则插入点之后的导航块 msgIndex 整体偏移，点击定位到错误消息（定位不精准）。
+  _flowNavBlocks = [];
+  _flowNavSections = [];
+  _flowNavCollapsed = {};
+  const _n = state.agentMessages.length;
+  for (let _i = 0; _i < _n; _i++) {
+    const _m = state.agentMessages[_i];
+    if (!_m) continue;
+    _flowNavBlocks.push(_makeFlowNavBlock(_m.role, _m.content, _i, _m));
+  }
+  _flowNavCurrentIdx = -1;
+  _rebuildFlowNav();
 }
 
 // 绑定 list 的 scroll 事件（仅绑一次），用于驱动虚拟滚动
