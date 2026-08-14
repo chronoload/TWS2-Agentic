@@ -12167,6 +12167,7 @@ function _fullRenderRange(container, start, end, forceScrollBottom, prevScrollHe
 
 function _renderAgentMessageHtml(msg, mi) {
   let rendered = '';
+  const _mid = _ensureMsgUid(msg);  // 稳定 ID：DOM 用 data-mid 定位（免疫数组中间插入偏移）
   // ── 压缩摘要卡片：提示"这段被压缩过 + 已找回 N 条"，滚动到顶部自动加载更早历史（无感）──
   if (msg.role === 'system' && msg.isCompactSummary) {
     if (!msg._compactKey) msg._compactKey = 'compact_' + mi + '_' + Date.now();
@@ -12194,7 +12195,7 @@ function _renderAgentMessageHtml(msg, mi) {
       '</div>' +
       '<div class="compact-summary-body" data-cid="' + _cid + '" style="display:none;margin-top:6px;padding:8px;background:var(--bg);border:1px dashed var(--border);border-radius:6px;white-space:pre-wrap;max-height:260px;overflow-y:auto;font-size:11px;color:var(--fg)">' + escapeHtml(msg.content) + '</div>' +
     '</div>';
-    return '<div class="agent-msg system" data-index="' + mi + '">' +
+    return '<div class="agent-msg system" data-index="' + mi + '" data-mid="' + _mid + '">' +
       '<div class="msg-role">📜 历史已压缩</div>' +
       '<div class="msg-content">' + rendered + '</div>' +
     '</div>';
@@ -12209,7 +12210,7 @@ function _renderAgentMessageHtml(msg, mi) {
         '<span>🧩</span><span style="flex:1">技能 <b style="color:var(--accent)">' + escapeHtml(_skillName) + '</b> 已注入当前会话（点击展开）</span>' +
         '<span class="inject-toggle" data-mi="' + mi + '" style="cursor:pointer;color:var(--accent);font-size:11px;flex:0 0 auto">展开</span></div>' +
         '<div class="inject-full" data-mi="' + mi + '" style="display:none;padding:8px 10px;background:var(--bg);border:1px dashed var(--border);border-radius:6px;font-size:11px;color:var(--fg);white-space:pre-wrap;max-height:240px;overflow-y:auto">' + escapeHtml(_content) + '</div>';
-      return '<div class="agent-msg user" data-index="' + mi + '">' + rendered + '</div>';
+      return '<div class="agent-msg user" data-index="' + mi + '" data-mid="' + _mid + '">' + rendered + '</div>';
     }
     rendered = escapeHtml(_content);
   } else if (msg.role === 'tool' || msg.role === 'tool_call') {
@@ -12242,7 +12243,7 @@ function _renderAgentMessageHtml(msg, mi) {
         interrupted: !!msg.interrupted
       }, mi, _hasLaterAssistant);
     }
-    return '<div class="agent-msg assistant" data-index="' + mi + '">' + rendered + '</div>';
+    return '<div class="agent-msg assistant" data-index="' + mi + '" data-mid="' + _mid + '">' + rendered + '</div>';
   } else if (msg.role === 'assistant') {
     var mi2 = state.agentMessages.indexOf(msg);
     var isLastAssistant = true;
@@ -12271,7 +12272,7 @@ function _renderAgentMessageHtml(msg, mi) {
     cpHash = window.__lastCpHash || '';
   }
   var btnDisplay = cpHash ? '' : 'style="display:none"';
-  return '<div class="agent-msg ' + msg.role + '" data-index="' + mi + '">' +
+  return '<div class="agent-msg ' + msg.role + '" data-index="' + mi + '" data-mid="' + _mid + '">' +
     '<div class="msg-role">' + (msg.role === 'user' ? '👤 你' : msg.role === 'tool_call' ? '🔧 工具' : msg.role === 'system' ? '⚙️ 系统' : '🤖 助手') + '</div>' +
     '<div class="msg-content' + (msg._streaming ? ' streaming' : '') + '">' + rendered + '</div>' +
     '<div class="agent-actions">' +
@@ -12552,6 +12553,15 @@ function _ensureMsgVisible(msgIndex, cb) {
 
 var _agentRenderTimer = null;
 var _agentStreamMsgIndex = -1;  // 记录当前流式消息的索引，避免每次查找
+// ── 稳定消息 ID（根治数组下标中间插入错位）──
+// 消息对象惰性分配 _uid（幂等）；渲染 DOM 用 data-mid、FlowNav 导航块用 msgId 定位，
+// 压缩分页 splice 中间插入后不再受下标偏移影响（_jumpToFlowBlock 按 msgId 查）。
+var _msgUidSeq = 0;
+function _ensureMsgUid(m) {
+  if (!m) return '';
+  if (!m._uid) m._uid = 'm' + Date.now().toString(36) + '_' + (++_msgUidSeq);
+  return m._uid;
+}
 
 // ── 流式 Markdown 渲染（适当激进 + 无感 + 计算量小）──
 // 结构未完成（代码围栏/行内公式未闭合）→ 保守纯文本，避免不完整块反复重排闪烁；
@@ -12634,9 +12644,9 @@ function updateLastAssistantMessage(content, forceIdx) {
   if (targetIdx >= 0) {
     state.agentMessages[targetIdx].content = content;
     
-    // 流式期间：直接更新 DOM，避免全量重渲染
-    if (_agentRenderTimer) clearTimeout(_agentRenderTimer);
-    _agentRenderTimer = setTimeout(function() {
+    // 流式期间：rAF 合帧更新 DOM（帧对齐、无 debounce 尾延迟，高吞吐 token 一帧一次）
+    if (_agentRenderTimer) cancelAnimationFrame(_agentRenderTimer);
+    _agentRenderTimer = requestAnimationFrame(function() {
       const container = document.getElementById('agentMessages');
       if (!container) { _agentRenderTimer = null; return; }
 
@@ -12671,7 +12681,7 @@ function updateLastAssistantMessage(content, forceIdx) {
 function finalizeStreamingMessage() {
   const lastIdx = _agentStreamMsgIndex;
   _agentStreamMsgIndex = -1;
-  if (_agentRenderTimer) { clearTimeout(_agentRenderTimer); _agentRenderTimer = null; }
+  if (_agentRenderTimer) { cancelAnimationFrame(_agentRenderTimer); _agentRenderTimer = null; }
   if (lastIdx >= 0 && state.agentMessages[lastIdx] && state.agentMessages[lastIdx].role === 'assistant') {
     const container = document.getElementById('agentMessages');
     const el = container ? container.querySelector('.agent-msg[data-index="' + lastIdx + '"] .msg-content') : null;
@@ -13205,8 +13215,11 @@ async function sendAgentStream(text, attachments) {
     
     // 更新对话流导航块的状态
     function _updateFlowNavBlockStatus(msgIndex, status, result) {
-      // 找到对应的导航块
-      const block = _flowNavBlocks.find(function(b) { return b.msgIndex === msgIndex; });
+      // 找到对应的导航块（msgId 稳定匹配优先，兜底按下标——免疫压缩分页中间插入偏移）
+      const _m = state.agentMessages[msgIndex];
+      const block = _flowNavBlocks.find(function(b) {
+        return b.msgId ? b.msgId === (_m && _m._uid) : b.msgIndex === msgIndex;
+      });
       if (!block) return;
       
       // 更新状态图标
@@ -14871,7 +14884,7 @@ function _makeFlowNavBlock(role, content, msgIndex, extra) {
     if (!label) label = '消息';
   }
   
-  return { icon, label, msgIndex, role };
+  return { icon, label, msgIndex, msgId: _ensureMsgUid(extra), role };
 }
 
 function _addFlowNavBlock(role, content, msgIndex, extra) {
@@ -15186,9 +15199,10 @@ function _jumpToFlowBlock(idx) {
       break;
     }
   }
-  // 找到对应消息元素并滚动到视野
+  // 找到对应消息元素并滚动到视野（msgId 稳定定位，免疫压缩分页中间插入的下标偏移）
   const block = _flowNavBlocks[idx];
-  const msgEl = document.querySelector('.agent-msg[data-index="' + block.msgIndex + '"]');
+  const _q = block.msgId ? '.agent-msg[data-mid="' + block.msgId + '"]' : '.agent-msg[data-index="' + block.msgIndex + '"]';
+  const msgEl = document.querySelector(_q);
   // 若目标消息不在当前渲染窗口内，先扩展窗口让其可见
   if (msgEl) {
     _ensureMsgVisible(block.msgIndex);
@@ -15196,7 +15210,7 @@ function _jumpToFlowBlock(idx) {
   } else {
     // 消息未渲染（窗口化裁剪），先扩展窗口再滚动
     _ensureMsgVisible(block.msgIndex, function() {
-      const el2 = document.querySelector('.agent-msg[data-index="' + block.msgIndex + '"]');
+      const el2 = document.querySelector(_q);
       if (el2) el2.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
   }
