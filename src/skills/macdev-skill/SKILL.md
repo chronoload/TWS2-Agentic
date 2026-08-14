@@ -213,6 +213,15 @@ python -m macdev project list                        # 列出已初始化的产�
     复制副本到临时目录、后台独立调试），**禁止随意 kill/restart/干扰其他进程**；只读检查
     （`netstat`/`wmic`/`tasklist`/status）可随时执行，但**任何终止/重启/替换动作必须先向用户
     说明意图并获得明确许可才能执行**——"只是说明意图"不够，用户未点头一律不动。
+12. **spec 写完必须先停等用户审核（HARD-GATE，用户强制）**：requirement spec（--kind spec）写完后
+    必须停下来，导出 REQUIREMENTS.md 呈用户审核，**用户明确批准前禁止进入 plan/写实现**——"设计
+    完成即自行实现"是严重违规（曾致 spec 全 open 但代码已提交）。plan 必须对齐 writing-plans 颗粒度：
+    每 task 带 Create/Modify 涉及文件，每 step 带动作+期望结果+TDD 红→绿（`--action test --expected FAIL`
+    → 实现 → 转绿）；**禁止 task 无文件、step 用"待补充"占位**——潦草 plan 等于没写，执行者仍需自行设计。
+13. **有 git 历史时优先用 worktree 隔离开发（用户强制）**：在已有 git 历史的仓库上做新功能/重构时，
+    优先 `git worktree add <路径> -b <分支名>` 建独立工作树再动手，避免污染主工作区与主分支；
+    `git worktree list` / `git branch -a` 等只读查询随时可执行；worktree add/remove 会改仓库状态，
+    remove 前按铁律 1 先向用户确认。
 
 > 本节优先级高于 skill 内其他「经验只写 log 不写 SKILL.md」的约定——用户指令 > skill 内部约定。
 

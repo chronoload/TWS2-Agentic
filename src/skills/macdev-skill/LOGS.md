@@ -1,9 +1,9 @@
 # macdev LOG — 经验沉淀库
 
 > 由 `python -m macdev log` 生成；机器可查入口：`logs.db`（表 logs）。
-> 共 20 条。
+> 共 22 条。
 
-## 随包经验（pkg）— 20 条
+## 随包经验（pkg）— 22 条
 
 ### 经验教训（lessons）— 3 条
 
@@ -32,7 +32,13 @@ macdev audit 的 parse/chain/analyze（端点提取/亲属追逐/def-use）基�
 compact_messages/create_auto_compact/create_context_window 这类无调用方但被 __init__ re-export 的函数：删定义时须同步删 __init__ 的 import 与 __all__，否则 hasattr 断言仍绿、公共 API 残留。
 
 
-### 陷阱（pitfalls）— 8 条
+### 陷阱（pitfalls）— 9 条
+
+#### [23] spec写完未停等审核就实现+plan潦草（HARD-GATE 违反）
+
+- 分类: pitfalls ｜ 标签: — ｜ 时间: 2026-08-14 22:01:17
+
+事故：5 个 spec 全 open 但代码已全部提交（spec1/2/4/5 实现进 git，spec3 只有 plan 0/4）。根因：①spec 写完未导出 REQUIREMENTS.md 呈用户审核，直接进 plan/实现；②plan 潦草——Architecture/Tech Stack 未填、每 task 步骤全是'待补充'占位，颗粒度不对齐 writing-plans。修复：铁律12（spec 写完后必须停等用户明确批准，禁止自行实现；plan 每 task 带 Create/Modify 文件、每 step 带动作+期望结果+TDD 红→绿，禁止'待补充'占位）。教训：设计完成≠可以开工，HARD-GATE 是用户强制门禁。
 
 #### [20] 异步提交期间调 _finishModal 被 submitting 挡 → 复位后必须补 drain
 
@@ -88,7 +94,13 @@ harness/turn.py 的 Turn.id property 与 builtin id() 同名污染符号反射/�
 删除 skills.py 后同名目录 skills/ 仍在，importlib.import_module('mcp.skills') 依然成功(namespace package, __file__=None)。断言模块删除不能用 import 抛异常，改用文件存在性 Path(...skills.py).exists() 或 importlib.util.find_spec(...) is None。
 
 
-### 模式（patterns）— 6 条
+### 模式（patterns）— 7 条
+
+#### [22] 有git历史时用worktree隔离开发
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 22:01:17
+
+在已有 git 历史的仓库做新功能/重构时，优先 git worktree add <路径> -b <分支名> 建独立工作树，避免污染主工作区与主分支（主分支保持可发布）。只读查询（git worktree list / branch -a / status）随时可执行；worktree add/remove 改仓库状态，remove 前按铁律1先问。与铁律11（进程调试新实例优先）同构：不打断现状、独立隔离、收尾合并。铁律13 固化。
 
 #### [21] Agent 并行 ask 挂起：字典按 rid 隔离 + 全局池无条件注册双保险
 

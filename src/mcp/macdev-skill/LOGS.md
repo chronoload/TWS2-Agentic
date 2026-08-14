@@ -1,11 +1,23 @@
 # macdev LOG — 经验沉淀库
 
 > 由 `python -m macdev log` 生成；机器可查入口：`logs.db`（表 logs）。
-> 共 9 条。
+> 共 24 条。
 
-## 随包经验（pkg）— 9 条
+## 随包经验（pkg）— 24 条
 
-### 经验教训（lessons）— 1 条
+### 经验教训（lessons）— 3 条
+
+#### [15] 新对话第一步就查log/plan，不等残缺
+
+- 分类: lessons ｜ 标签: — ｜ 时间: 2026-08-14 14:20:32
+
+用户澄清：看似全新的对话也要第一步查随包+随项目 log/plan，找回历史轨迹——不是等出现残缺/不确定才查。铁律10已强化（任何会话开始第一步查 log/plan）。结合铁律3（压缩后查git）：新会话=查git+查log/plan双查。
+
+#### [14] 进程终止/重启：必须用户明确许可，说明意图不算
+
+- 分类: lessons ｜ 标签: — ｜ 时间: 2026-08-14 14:16:22
+
+用户澄清：进程相关动作（kill/restart/替换）仅'说明意图'不够，必须获得用户明确点头（许可）才能执行。铁律11已强化——'用户未点头一律不动'。新实例优先（换端口/副本后台调试）仍是首选路径。
 
 #### [3] TS monorepo 审计能力边界：完整链仅覆盖 .py，4 维扫描覆盖全仓
 
@@ -20,7 +32,31 @@ macdev audit 的 parse/chain/analyze（端点提取/亲属追逐/def-use）基�
 后续增强方向：TS AST 解析器（tree-sitter）插件化接入 parse 层。
 
 
-### 陷阱（pitfalls）— 3 条
+### 陷阱（pitfalls）— 7 条
+
+#### [23] spec写完未停等审核就实现+plan潦草（HARD-GATE 违反）
+
+- 分类: pitfalls ｜ 标签: — ｜ 时间: 2026-08-14 21:58:04
+
+事故：5 个 spec 全 open 但代码已全部提交（spec1/2/4/5 实现进 git，spec3 只有 plan 0/4）。根因：①spec 写完未导出 REQUIREMENTS.md 呈用户审核，直接进 plan/实现；②plan 潦草——Architecture/Tech Stack 未填、每 task 步骤全是'待补充'占位，颗粒度不对齐 writing-plans。修复：铁律12（spec 写完后必须停等用户明确批准，禁止自行实现；plan 每 task 带 Create/Modify 文件、每 step 带动作+期望结果+TDD 红→绿，禁止'待补充'占位）。教训：设计完成≠可以开工，HARD-GATE 是用户强制门禁。
+
+#### [22] auto_compact消息级保护破坏user-assistant交替-按轮分组根治
+
+- 分类: pitfalls ｜ 标签: — ｜ 时间: 2026-08-14 18:09:19
+
+复现：keyword_preserved+recent按单条消息独立挑选拼接导致压缩后user相邻或assistant开头；sanitize只修tool配对。修复：按轮分组保护+_ensure_valid_sequence收尾+sanitize双保险。测试6用例全过。
+
+#### [16] 数组中间插入后索引型导航块必须整体重建
+
+- 分类: pitfalls ｜ 标签: — ｜ 时间: 2026-08-14 14:27:07
+
+app.js FlowNav：_flowNavBlocks 存 msgIndex=数组绝对下标。压缩历史分页 _loadCompactMorePage 用 splice 中间插入 ui3 后未重建导航块 → 插入点之后 msgIndex 全部偏移，点击导航定位错误/找不到。修复：提取 _makeFlowNavBlock 纯构建 + _rebuildFlowNavBlocksAll 批量重建（插入后调用）。教训：任何'用数组下标做定位'的索引结构，遇中间插入（splice）必须整体重建或改稳定 ID。
+
+#### [11] cmd 传中文参数给 python -c 编码损坏（GBK）
+
+- 分类: pitfalls ｜ 标签: — ｜ 时间: 2026-08-14 14:00:37
+
+Windows cmd 下 python -c 带中文常量会被 GBK 损坏，SQL WHERE 匹配失败且 print 输出被吞。解决：写临时 UTF-8 脚本文件执行，勿用 -c 内联中文。
 
 #### [8] 异步提交期间调 _finishModal 被 submitting 挡 → 复位后必须补 drain
 
@@ -45,7 +81,55 @@ macdev audit 的 parse/chain/analyze（端点提取/亲属追逐/def-use）基�
 教训：工具层的路径参数优先正斜杠；cli_execute 里直接 python -m macdev 不受影响。
 
 
-### 模式（patterns）— 3 条
+### 模式（patterns）— 11 条
+
+#### [24] 有git历史时用worktree隔离开发
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 21:58:04
+
+在已有 git 历史的仓库做新功能/重构时，优先 git worktree add <路径> -b <分支名> 建独立工作树，避免污染主工作区与主分支（主分支保持可发布）。只读查询（git worktree list / branch -a / status）随时可执行；worktree add/remove 改仓库状态，remove 前按铁律1先问。与铁律11（进程调试新实例优先）同构：不打断现状、独立隔离、收尾合并。铁律13 固化。
+
+#### [21] deepseek-harness/cordis 参考：决策归档 + 插件总线分层 + 流程纪律技能
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 15:11:27
+
+为统一 Agent Harness 设计提取的参考：①dsh .agents/notes（archived/implemented/proposed/rejected 四态决策库）→ 项目级 ctx_store 共享记忆，解决多 agent 上下文不同步；②cordis 插件生态（extensions/ cordis-client-runner/host-runner + tool-cordis/ui-cordis）→ harness 分层：前端=client 订阅 EventStream，后端=host 执行，tool/ui 独立插件包；③.agents/skills 流程纪律技能（dsh-code-review/pre-push-checks/merging-stacked-prs/find-simplifications/trim-cot-leakage）→ harness 按任务装载纪律技能；④AGENTS.md/CLAUDE.md 规则文件 → 项目级 harness 配置（approval_policy/工具白名单）；⑤jsonrpc-demo → AgentMessage 协议 JSON-RPC 编码。spec id=3 已记录。
+
+#### [20] 技能双轴扩展：语言驱动（思想） + 工程实践（落地）
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 14:57:03
+
+langdriven skill 升级：范式清单第二位加入开发实践（TDD/BDD/ATDD/重构/测试金字塔/CI/CD/代码评审/DDD/微服务/遗留代码/混沌/ODD/SRE/SDL/敏捷）。响应格式验证段改'测试与验证'（TDD 先写什么测试/分层/框架）；最小核心附测试骨架；触发词增 [TDD]/[BDD]。teammate 更新需 shutdown+spawn（spawn 对已存在报错，无 update 语义）。
+
+#### [19] 前端流式两大支柱：rAF 合帧 + 稳定消息 ID
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 14:55:20
+
+流式渲染最佳实践落地：①渲染调度用 requestAnimationFrame 合帧替代 setTimeout debounce（帧对齐、无尾延迟、高吞吐 token 一帧一次）；②消息对象惰性分配 _uid（_ensureMsgUid 幂等），DOM data-mid + 导航 msgId 稳定定位，根治数组 splice 中间插入下标偏移类 bug（压缩分页/懒加载）。组合：纯函数状态 + 单线程调度 + 稳定标识 = 前端流式免疫竞态与错位。
+
+#### [18] 方法论资产三件套包装：skill + workflow + teammate
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 14:48:28
+
+把可复用方法论（如语言驱动引擎）包装为三件套：① skills/<name>/SKILL.md 技能文档（frontmatter name/description）；② mcp/predefined_workflows.py 注册 <name>_engine_v1 工作流（AGENT 步骤链，checkpoint_after 全步骤）；③ team_spawn_teammate 注册研究员角色（system_prompt=核心准则+响应格式+触发词+禁止行为）。三处独立可组合：skill 供 agent 加载、workflow 供确定性编排、teammate 供委派。
+
+#### [13] 进程调试纪律：新实例优先，不杀运行中进程
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 14:14:54
+
+需要调试/重启/替换运行中的服务进程时，优先换端口/复制副本构建新实例后台调试，禁止 kill/restart 干扰现有运行实例（服务端/长任务/训练）。只读检查（netstat/wmic/tasklist）随时可做；终止/重启前必须说明意图确认不影响现有实例。已固化铁律11。
+
+#### [12] 私有部署同步清单：macdev-skill + 工具包装
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 14:11:54
+
+私有部署 TS2 = C:\Users\qu\Desktop\物理科学与技术论题\TS2（与开发版 TS2_dev 分离）。macdev 相关文件同步：TS2_dev/src/skills/macdev-skill/* → TS2/macdev-skill/*（SKILL.md + skills/子技能 + publish.py）；TS2_dev/src/mcp/macdev_tools.py → TS2/mcp/。同步后 fc /b 字节级一致性验证。服务端需重启才加载新工具定义。
+
+#### [10] 技能整合形态C：纪律进SKILL.md流程 + 细节进skills/子技能
+
+- 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 14:00:37
+
+整合外部技能集（如 superpowers）的最优形态：核心触发纪律提炼进 SKILL.md §1 流程编排（任务类型判定四分支），每个子技能独立 .md 放 macdev-skill/skills/ 包内自含（触发条件+步骤+macdev映射表），发布 publish.py 递归含子目录。requirement --kind spec 替代外部 spec 文件（双轨：db+md+json+csv）。
 
 #### [9] Agent 并行 ask 挂起：字典按 rid 隔离 + 全局池无条件注册双保险
 
@@ -73,7 +157,13 @@ deepseek-harness（@deepseek-ai/dsh-*，vendored Cordis）的规模化开发方�
 与 macdev 哲学同构（插件总线/双轨产物/SKILL.md 指针/经验沉淀），是 monorepo 规模 agent 项目的标杆范式。
 
 
-### 决策（decisions）— 2 条
+### 决策（decisions）— 3 条
+
+#### [17] 会话启动双查协议：git 与 log/plan 地位并列
+
+- 分类: decisions ｜ 标签: — ｜ 时间: 2026-08-14 14:34:19
+
+用户强制：git 查询（铁律3）与 macdev log/plan 查询（铁律10）地位并列，任何会话开始（含全新/压缩后）都必查：先 git branch/status/log 看仓库现状 → 再 log/plan 看开发历史，双查齐备才允许继续操作。
 
 #### [6] SKILL.md 自演化：新增 §8 开发安全铁律（危险 git 先问 + 启动查 git + 双轨产物）
 
