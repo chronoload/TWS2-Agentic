@@ -43,6 +43,17 @@ def _set_loop_for_test(loop):
     _override_loop = loop
 
 
+# 会话上下文回调（spec id=4/5 装配）：{get(sid)->list, append(sid, msgs)}
+# 由 app 层注入真实 agent 会话读写（同一上下文迭代器）；失败/未装配 → loop 退回独立上下文
+_session_ctx = None
+
+
+def _set_session_context(ctx):
+    """注入会话上下文回调（app 启动时调用）。解耦：装配失败不影响普通对话。"""
+    global _session_ctx
+    _session_ctx = ctx
+
+
 def _get_loop():
     """懒加载 AgentLoop 单例 + runner 注入（无 LLM 环境降级为 None runner）"""
     global _override_loop
@@ -50,6 +61,12 @@ def _get_loop():
         return _override_loop
     from ..harness.loop import get_agent_loop
     loop = get_agent_loop()
+    # 装配会话上下文回调（同一上下文迭代器）：仅当未设置时注入，失败静默（解耦）
+    if loop.session_context is None and _session_ctx:
+        try:
+            loop.session_context = _session_ctx
+        except Exception:
+            pass
     if loop.runner is None:
         try:
             from ..harness.runner import HarnessRunner

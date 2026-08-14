@@ -5505,6 +5505,46 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         except Exception as e:
             return err(msg=f"loop 目标注入失败: {e}")
 
+    def _install_loop_session_context():
+        """装配 loop 会话上下文回调（同一上下文迭代器，spec id=4/5）。
+
+        解耦铁律：装配失败/异常 → 静默跳过，loop 退回独立上下文，
+        绝不干扰普通对话（agent.chat 路径零接触）。
+        """
+        try:
+            from . import loop_api
+            def _ctx_get(sid):
+                try:
+                    agent = _get_agent_for_session(app.state.workspace_dir, sid)
+                    if agent is None:
+                        return []
+                    return list(getattr(agent, "messages", None) or [])
+                except Exception:
+                    return []
+            def _ctx_append(sid, msgs):
+                try:
+                    agent = _get_agent_for_session(app.state.workspace_dir, sid)
+                    if agent is None:
+                        return
+                    with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+                        for m in (msgs or []):
+                            if m.get("role") == "assistant":
+                                agent.messages.append(m)
+                    try:
+                        store = _get_session_store()
+                        if store and sid:
+                            _sync_agent_from_store(agent, sid, store)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            loop_api._set_session_context({"get": _ctx_get, "append": _ctx_append})
+            logger.info("loop session_context installed（同一上下文迭代器）")
+        except Exception as e:
+            logger.warning(f"loop session_context install skipped: {e}")
+
+    _install_loop_session_context()
+
     @app.post("/api/agent/inject-skill")
     async def agent_inject_skill(req: AgentInjectSkillRequest):
         """真实注入技能：读取 SKILL.md 全文，作为 user 指令插入 agent 会话上下文。
