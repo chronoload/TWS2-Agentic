@@ -13916,13 +13916,20 @@ function _renderDiscoverList(preserveSel) {
     return;
   }
   let html = '';
-  const matches = (name, desc) => !kw || ((name || '') + ' ' + (desc || '')).toLowerCase().includes(kw);
-  // 排序：名称字母序（大小写不敏感），让列表整齐易找
-  const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh', { sensitivity: 'base' });
-  const byStr = (a, b) => String(a || '').localeCompare(String(b || ''), 'zh', { sensitivity: 'base' });
+  // 搜索匹配 + 排序：名字命中排最前，其次描述命中；无关键词时保持原序
+  const rank = (name, desc) => {
+    if (!kw) return 0;
+    const n = ((name || '') + '').toLowerCase();
+    const d = ((desc || '') + '').toLowerCase();
+    if (n.includes(kw)) return 0; // 名字匹配 → 最前
+    if (d.includes(kw)) return 1; // 仅描述匹配 → 次之
+    return 2;                     // 不匹配 → 过滤
+  };
+  const rankFilter = (name, desc) => rank(name, desc) <= 1;
+  const rankSort = (a, b) => rank(a.name, a.description) - rank(b.name, b.description);
 
   if (_discoverTab === 'skill') {
-    const items = (_discoverData.skills || []).filter((s) => matches(s.name, s.description)).sort(byName);
+    const items = (_discoverData.skills || []).filter((s) => rankFilter(s.name, s.description)).sort(rankSort);
     items.forEach((s) => {
       _discoverItems.push({ type: 'skill', name: s.name, skillName: s.name, description: s.description || '' });
       html += _discoverRow(`⚡ ${s.name}`, s.description || '', _discoverItems.length - 1);
@@ -13942,14 +13949,14 @@ function _renderDiscoverList(preserveSel) {
     });
     if (!html) html = _discoverEmpty();
   } else if (_discoverTab === 'mcp') {
-    const items = (_discoverData.mcp || []).filter((m) => matches(m.name, m.description));
+    const items = (_discoverData.mcp || []).filter((m) => rankFilter(m.name, m.description)).sort(rankSort);
     items.forEach((m) => {
       _discoverItems.push({ type: 'mcp', name: m.name, description: m.description || '' });
       html += _discoverRow(`🔌 ${m.name}`, m.description || '', _discoverItems.length - 1);
     });
     if (!items.length) html = _discoverEmpty();
   } else if (_discoverTab === 'workflow') {
-    const items = (_discoverData.workflows || []).filter((w) => matches(w.name, w.description)).sort(byName);
+    const items = (_discoverData.workflows || []).filter((w) => rankFilter(w.name, w.description)).sort(rankSort);
     items.forEach((w) => {
       const sub = [w.description, w.version ? `v${w.version}` : ''].filter(Boolean).join(' · ');
       _discoverItems.push({ type: 'workflow', name: w.name, workflowId: w.workflow_id || '', description: w.description || '' });
@@ -13957,7 +13964,7 @@ function _renderDiscoverList(preserveSel) {
     });
     if (!items.length) html = _discoverEmpty();
   } else if (_discoverTab === 'plugin') {
-    const items = (_discoverData.plugins || []).filter((p) => matches(p.name, p.description));
+    const items = (_discoverData.plugins || []).filter((p) => rankFilter(p.name, p.description)).sort(rankSort);
     items.forEach((p) => {
       const sub = p.description || '';
       _discoverItems.push({ type: 'plugin', name: p.name, description: p.description || '' });
