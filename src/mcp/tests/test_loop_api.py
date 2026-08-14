@@ -15,8 +15,8 @@ from mcp.harness.loop import AgentLoop  # noqa: E402
 from mcp.harness.turn import TurnResult, TurnStatus  # noqa: E402
 from mcp.server.loop_api import (  # noqa: E402
     ControlRequest, SubmitRequest, TaskMessageRequest, _set_loop_for_test,
-    loop_control, loop_state, loop_submit, loop_task_detail, loop_task_message,
-    loop_tasks_by_session,
+    loop_audit, loop_control, loop_state, loop_submit, loop_task_detail,
+    loop_task_message, loop_tasks_by_session,
 )
 
 
@@ -86,6 +86,36 @@ def test_task_message_intervene():
     assert task.messages[-1]["role"] == "user"
     assert task.messages[-1]["content"] == "注意细节"
     assert task.pending_input == "注意细节"
+
+
+# ── macdev 回审（交接第二轨，对抗性）：验证 handoff artifacts 断言 ──
+def test_audit_verifies_artifacts():
+    import tempfile
+
+    loop = AgentLoop(runner=FakeRunner())
+    _set_loop_for_test(loop)
+    body = loop_submit(SubmitRequest(goal="回审任务", auto_start=False))
+    tid = body["task_id"]
+    task = loop.get_task(tid)
+    # 构造真实存在的临时产出 + 不存在的断言
+    tmp = tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w", encoding="utf-8")
+    tmp.write("x = 1\n")
+    tmp.close()
+    task.handoff = {
+        "goal": "回审任务", "status": "completed", "turns": 1, "summary": "ok",
+        "decisions": ["write_file"], "artifacts": [f"write_file: {tmp.name}"], "open_issues": [],
+    }
+    res = loop_audit(tid)
+    assert res["verified"] == [f"write_file: {tmp.name}"]
+    assert res["failed"] == []
+    # 不存在的路径 → failed
+    task.handoff["artifacts"] = ["write_file: /no/such/file_xyz.py"]
+    res2 = loop_audit(tid)
+    assert res2["failed"] and "不存在" in res2["failed"][0]
+    # 无 handoff → verified/failed 为空
+    task.handoff = None
+    res3 = loop_audit(tid)
+    assert res3["verified"] == [] and res3["failed"] == []
 
 
 # ── 会话级模式切换：submit 带 session_id + 按会话查询 ──

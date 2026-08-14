@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -119,6 +121,65 @@ def loop_task_detail(task_id: str):
     if task is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     return task.snapshot()
+
+
+@router.post("/audit/{task_id}")
+def loop_audit(task_id: str):
+    """macdev 回审（交接第二轨，对抗性）：验证 handoff artifacts 断言。
+
+    不采信模型自述——真实检查产出路径是否存在 + 源码文件可编译。
+    解耦：独立端点，由前端/审核者主动触发，不阻塞 loop 主路径；
+    失败仅反馈验证结果，不影响任务状态。
+    """
+    loop = _get_loop()
+    task = loop.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    handoff = task.handoff or {}
+    artifacts = list(handoff.get("artifacts") or [])
+    verified, failed, skipped = [], [], []
+    for a in artifacts:
+        name, _, path = a.partition(": ")
+        path = (path or "").strip()
+        if not path:
+            skipped.append(a)
+            continue
+        p = Path(path)
+        if not p.is_absolute():
+            # 相对路径：cwd 与项目根都试
+            cwd_p = Path.cwd() / path
+            root_p = Path(__file__).resolve().parent.parent.parent / path
+            p = cwd_p if cwd_p.exists() else root_p
+        if not p.exists():
+            failed.append(f"{a}（文件不存在）")
+            continue
+        # 源码文件语法级验证（对抗性：能编译才算产出有效）
+        ok = True
+        if p.suffix == ".py":
+            try:
+                subprocess.run([__import__("sys").executable, "-m", "py_compile", str(p)],
+                               capture_output=True, timeout=30, check=True)
+            except Exception:
+                ok = False
+        elif p.suffix == ".js":
+            try:
+                subprocess.run(["node", "--check", str(p)],
+                               capture_output=True, timeout=30, check=True)
+            except Exception:
+                ok = False
+        if ok:
+            verified.append(a)
+        else:
+            failed.append(f"{a}（语法检查未通过）")
+    return {
+        "task_id": task_id,
+        "status": task.status.value,
+        "handoff_status": handoff.get("status"),
+        "verified": verified,
+        "failed": failed,
+        "skipped": skipped,
+        "detail": "macdev 回审·对抗性验证：产出路径真实存在 + 源码可编译（不采信模型自述）",
+    }
 
 
 @router.post("/task/{task_id}/message")
