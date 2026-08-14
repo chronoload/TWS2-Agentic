@@ -1622,6 +1622,99 @@ def lean4_param_chain_workflow() -> WorkflowDefinition:
     )
 
 
+def langdriven_engine_workflow() -> WorkflowDefinition:
+    """语言驱动计算科学引擎：语言范式（对象/消息/函数/类型/并发）置于第一位分析系统，
+    然后才是算法/存储/分布式等经典范式。6 步 AGENT 编排产出语言建模→方案→验证→边界→核心。"""
+    return WorkflowDefinition(
+        workflow_id="langdriven_engine_v1",
+        name="语言驱动研究引擎",
+        description="计算科学专家·语言驱动：先用编程语言抽象（对象/消息/函数/类型/并发）建模问题，再匹配范式、设计方案、验证边界、产出最小可运行核心",
+        entry_step="language_modeling",
+        checkpoint_after={"language_modeling", "paradigm_match", "design", "verification", "failure_boundary", "minimal_core"},
+        steps=[
+            StepDefinition(
+                step_id="language_modeling",
+                name="语言建模",
+                step_type=StepType.AGENT,
+                prompt_template="""以**语言驱动**为第一视角分析问题。禁止跳过语言建模直接给技术选型。
+
+问题: {problem}
+
+请执行语言建模：
+1. 用哪些语言抽象刻画问题？（对象？消息？纯函数？类型约束？Actor？协程？）
+2. 每个抽象对应问题中的哪个实体/关系/行为？
+3. 语言抽象如何映射到系统？（对象→模块/服务；消息→通信协议；函数→无状态处理；类型→契约/校验）
+
+输出「语言建模」结构化结果，明确标注每个抽象及其理由。""",
+                tools=["calculate", "web_search"],
+            ),
+            StepDefinition(
+                step_id="paradigm_match",
+                name="范式匹配",
+                step_type=StepType.AGENT,
+                prompt_template="""基于语言建模结果，显式匹配范式（**编程语言范式优先**）：
+
+{step_results}
+
+从以下清单选出匹配范式并说明原因（语言范式第一位，其后才是经典范式）：
+- 语言范式: 面向对象 / 函数式 / 过程式 / 逻辑式 / 并发模型(Actor·CSP·STM·协程) / 类型系统 / 元编程
+- 算法范式: 分治 / DP / 贪心 / 回溯 / 搜索 / 随机化 / 流式 / 图算法
+- 存储范式: B+树 / LSM / 索引 / 文档-键值-图-时序-向量 / 缓存 / 分区复制分片
+- 分布式: CAP / 一致 / Raft / Saga / Outbox / 事件驱动 / CQRS / 微服务
+- 架构: 分层 / 六边形 / 微内核 / 管道过滤器 / 事件驱动 / DDD
+- 性能 / 安全范式
+
+禁止空泛使用范式名称——必须指出具体用到封装/继承/多态/纯函数/不可变/Actor信箱等哪个构件解决什么问题。""",
+                tools=["calculate"],
+            ),
+            StepDefinition(
+                step_id="design",
+                name="方案设计",
+                step_type=StepType.AGENT,
+                prompt_template="""基于范式匹配结果设计完整方案：
+
+{step_results}
+
+输出「方案设计」：核心思路 + 关键组件/流程（代码框架或架构图）+ 关键接口/数据契约（类型约束）。""",
+                tools=["write_file", "calculate"],
+            ),
+            StepDefinition(
+                step_id="verification",
+                name="验证方法",
+                step_type=StepType.AGENT,
+                prompt_template="""为方案设计验证方法（不得跳过）：
+
+{step_results}
+
+输出「验证方法」：基准测试 / 复杂度分析 / 失效注入 / 类型检查 / 单元测试 / 竞态检测等，具体到验证什么、怎么验证、通过标准。""",
+                tools=["calculate", "cli_execute"],
+            ),
+            StepDefinition(
+                step_id="failure_boundary",
+                name="失效边界",
+                step_type=StepType.AGENT,
+                prompt_template="""分析方案失效边界（诚实声明）：
+
+{step_results}
+
+输出「失效边界」：方案在什么条件下会退化/失败？哪些假设可能不成立？给出基于语言范式的假设与知识边界。不确定时明确说明，禁止编造。""",
+                tools=[],
+            ),
+            StepDefinition(
+                step_id="minimal_core",
+                name="最小可运行核心",
+                step_type=StepType.AGENT,
+                prompt_template="""输出最小可运行核心：
+
+{step_results}
+
+输出 30-50 行代码或核心类型/接口定义（含注释），演示语言范式落地。若有触发词 [OO]/[FP]/[并发]/[类型]，按其强制约束输出。""",
+                tools=["write_file", "cli_execute"],
+            ),
+        ],
+    )
+
+
 WORKFLOW_REGISTRY: Dict[str, WorkflowDefinition] = {
     "code_analysis": code_analysis_workflow(),
     "research": research_workflow(),
@@ -1647,6 +1740,7 @@ WORKFLOW_REGISTRY: Dict[str, WorkflowDefinition] = {
     "autoresearch": autoresearch_workflow(),
     "param_chain_demo": param_chain_demo_workflow(),
     "lean4_param_chain": lean4_param_chain_workflow(),
+    "langdriven_engine": langdriven_engine_workflow(),
 }
 
 # 注册 macdev 工作流（macdev 开发库 → 可编排工作流）
@@ -1673,6 +1767,7 @@ __all__ = [
     "code_analysis_workflow", "research_workflow",
     "note_generation_workflow", "code_review_workflow",
     "dependency_scan_workflow", "rmd_workflow_workflow",
+    "langdriven_engine_workflow",
     "WORKFLOW_REGISTRY", "get_workflow", "list_workflows",
     "register_workflow",
 ]
