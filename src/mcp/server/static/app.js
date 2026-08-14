@@ -10241,43 +10241,46 @@ function addLoopMessage(content, extra) {
 // 自主模式提交（方案A：注入 + 自动建 LoopTask 保障，spec id=4/5 + handoff/回审闭环）：
 // 1) loop-goal 注入目标到 agent 会话上下文（同一上下文迭代器）
 // 2) loop/submit 建 LoopTask(session_id) → 后台自主推进：防打断 + 达成判定 + handoff + macdev 回审
-// 解耦：注入失败不影响普通对话；保障任务创建失败仅降级提示（agent 仍自然推进）
+// 非阻塞（fire-and-forget）：发送不卡顿，网络请求 setTimeout 后台执行，错误 toast 反馈
 async function _submitLoopTask(goal) {
   const sid = _getAgentSessionId() || '';
-  // 1) 注入目标（spec id=5）
-  try {
-    const res = await fetch(API_BASE + '/api/agent/loop-goal', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ goal: goal, session_id: sid }),
-    });
-    const data = await res.json();
-    if (!data || data.code !== 0) {
-      showToast('⚠️ 目标注入失败：' + ((data && data.msg) || '未知错误'), 'error');
+  // 立即显示「已提交自主任务」卡片（不等待网络，发送即时响应）
+  addLoopMessage(goal, { loopKind: 'submitted', loopTaskId: '' });
+  // 后台执行：注入 → 建保障任务（不阻塞 UI）
+  setTimeout(async function () {
+    let taskId = null;
+    try {
+      const res = await fetch(API_BASE + '/api/agent/loop-goal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goal: goal, session_id: sid }),
+      });
+      const data = await res.json();
+      if (!data || data.code !== 0) {
+        showToast('⚠️ 目标注入失败：' + ((data && data.msg) || '未知错误'), 'error');
+        return;
+      }
+    } catch (e) {
+      showToast('目标注入失败：' + (e.message || e), 'error');
       return;
     }
-  } catch (e) {
-    showToast('目标注入失败：' + (e.message || e), 'error');
-    return;
-  }
-  // 2) 建 LoopTask（保障层）
-  let taskId = null;
-  try {
-    const res = await fetch(API_BASE + '/api/loop/submit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ goal: goal, session_id: sid }),
-    });
-    const data = await res.json();
-    taskId = data.task_id || null;
-  } catch (e) {
-    showToast('⚠️ 保障任务创建失败（目标已注入，agent 仍会自然推进）：' + (e.message || e), 'error');
-  }
-  addLoopMessage(goal, { loopKind: 'submitted', loopTaskId: taskId || '' });
-  if (taskId) { _seenLoopTaskIds[taskId] = true; _seenLoopTasks[taskId] = 0; }
-  showToast(taskId
-    ? '⚡ Loop 目标已注入 + 保障任务已启动（防打断/达成判定/交接回审）'
-    : '⚡ Loop 目标已注入（保障任务未创建，agent 自然推进）', 'success');
+    try {
+      const res = await fetch(API_BASE + '/api/loop/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goal: goal, session_id: sid }),
+      });
+      const data = await res.json();
+      taskId = data.task_id || null;
+    } catch (e) {
+      showToast('⚠️ 保障任务创建失败（目标已注入，agent 仍会自然推进）：' + (e.message || e), 'error');
+    }
+    // 标记已见（轮询不再重复插入提交卡片，只追加回合）
+    if (taskId) { _seenLoopTaskIds[taskId] = true; _seenLoopTasks[taskId] = 1; }
+    showToast(taskId
+      ? '⚡ Loop 目标已注入 + 保障任务已启动（防打断/达成判定/交接回审）'
+      : '⚡ Loop 目标已注入（保障任务未创建，agent 自然推进）', 'success');
+  }, 0);
 }
 
 // macdev 回审（交接第二轨）：验证 handoff artifacts 断言（对抗性，不采信模型自述）
@@ -13181,7 +13184,10 @@ async function sendAgentMessage() {
   if (_agentLoopMode) {
     if (!_modeText) return;
     _modeInput.value = '';
-    await _submitLoopTask(_modeText);
+    // 用户消息正常显示（用户气泡，不被当成回复）
+    addAgentMessage('user', _modeText);
+    // 非阻塞提交（fire-and-forget：发送不卡顿，网络请求后台执行）
+    _submitLoopTask(_modeText);
     return;
   }
   // 检查是否正在恢复会话
@@ -15862,8 +15868,32 @@ function toggleHarnessPanel(e) {
   if (!panel) return;
   const show = panel.style.display === 'none';
   panel.style.display = show ? 'flex' : 'none';
-  if (show) refreshHarnessControls().catch(() => {});
+  if (show) {
+    refreshHarnessControls().catch(() => {});
+    _adaptHarnessPanelDirection(panel);
+  }
 }
+
+// 触底反弹：面板默认向下展开，若下方空间不足（视口/父容器截断）则向上翻转
+function _adaptHarnessPanelDirection(panel) {
+  requestAnimationFrame(() => {
+    try {
+      const r = panel.getBoundingClientRect();
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+      if (r.bottom > vh - 8) {
+        panel.classList.add('up');
+      } else {
+        panel.classList.remove('up');
+      }
+    } catch (e) { /* 静默 */ }
+  });
+}
+
+// 窗口尺寸变化时，若面板已打开则重新适配方向，避免被视口截断
+window.addEventListener('resize', () => {
+  const panel = document.getElementById('harnessPanel');
+  if (panel && panel.style.display !== 'none') _adaptHarnessPanelDirection(panel);
+});
 
 // 点击面板外部关闭
 document.addEventListener('click', (e) => {
