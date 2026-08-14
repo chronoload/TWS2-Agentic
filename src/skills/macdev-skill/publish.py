@@ -1,5 +1,5 @@
 """发布 macdev-skill → .trae/skills/macdev 与 docs/macdev（独立管理，不走 TS2 同步脚本）。
-复制：*.md 文档 + examples/ 示范目录。
+复制：*.md 文档 + examples/ 示范目录 + skills/ 子技能目录。
 """
 from __future__ import annotations
 import shutil
@@ -18,3 +18,9 @@ for dst in (ROOT / ".trae" / "skills" / "macdev", ROOT / "docs" / "macdev"):
         shutil.rmtree(examples_dst, ignore_errors=True)
         shutil.copytree(SRC / "examples", examples_dst)
         print(f"publish → {examples_dst}/")
+    # skills/ 子技能目录（superpowers 纪律整合，14 个）
+    skills_dst = dst / "skills"
+    if (SRC / "skills").exists():
+        shutil.rmtree(skills_dst, ignore_errors=True)
+        shutil.copytree(SRC / "skills", skills_dst)
+        print(f"publish → {skills_dst}/")
