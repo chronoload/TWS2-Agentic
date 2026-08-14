@@ -1,9 +1,9 @@
 # macdev LOG — 经验沉淀库
 
 > 由 `python -m macdev log` 生成；机器可查入口：`logs.db`（表 logs）。
-> 共 22 条。
+> 共 23 条。
 
-## 随包经验（pkg）— 22 条
+## 随包经验（pkg）— 23 条
 
 ### 经验教训（lessons）— 3 条
 
@@ -32,7 +32,13 @@ macdev audit 的 parse/chain/analyze（端点提取/亲属追逐/def-use）基�
 compact_messages/create_auto_compact/create_context_window 这类无调用方但被 __init__ re-export 的函数：删定义时须同步删 __init__ 的 import 与 __all__，否则 hasattr 断言仍绿、公共 API 残留。
 
 
-### 陷阱（pitfalls）— 9 条
+### 陷阱（pitfalls）— 10 条
+
+#### [24] 并发修改同一文件：主工作区 vs worktree 双线冲突
+
+- 分类: pitfalls ｜ 标签: — ｜ 时间: 2026-08-14 23:09:28
+
+本次事故：主工作区（master 带用户未提交改动）与 worktree（feat/msg-queue 带 FIFO 改动）同时改 loop.py——两边基线不同，只能逐处精确合并。根因：单主体错误使用 worktree 造成双写。教训：单主体单线，多主体（子代理）才 worktree；并发前先查两边基线；绝不整文件覆盖。铁律13 已修正固化。
 
 #### [23] spec写完未停等审核就实现+plan潦草（HARD-GATE 违反）
 
@@ -96,11 +102,11 @@ harness/turn.py 的 Turn.id property 与 builtin id() 同名污染符号反射/�
 
 ### 模式（patterns）— 7 条
 
-#### [22] 有git历史时用worktree隔离开发
+#### [22] worktree 仅用于子代理/多线并行隔离（非默认开发方式）
 
 - 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 22:01:17
 
-在已有 git 历史的仓库做新功能/重构时，优先 git worktree add <路径> -b <分支名> 建独立工作树，避免污染主工作区与主分支（主分支保持可发布）。只读查询（git worktree list / branch -a / status）随时可执行；worktree add/remove 改仓库状态，remove 前按铁律1先问。与铁律11（进程调试新实例优先）同构：不打断现状、独立隔离、收尾合并。铁律13 固化。
+主开发流保持单线（master 直接改）。只有子代理并行开发、多分支实验、高风险隔离才建 worktree。单主体单线最简。铁律13 已修正。
 
 #### [21] Agent 并行 ask 挂起：字典按 rid 隔离 + 全局池无条件注册双保险
 

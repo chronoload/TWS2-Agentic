@@ -1,9 +1,9 @@
 # macdev LOG — 经验沉淀库
 
 > 由 `python -m macdev log` 生成；机器可查入口：`logs.db`（表 logs）。
-> 共 24 条。
+> 共 25 条。
 
-## 随包经验（pkg）— 24 条
+## 随包经验（pkg）— 25 条
 
 ### 经验教训（lessons）— 3 条
 
@@ -32,7 +32,13 @@ macdev audit 的 parse/chain/analyze（端点提取/亲属追逐/def-use）基�
 后续增强方向：TS AST 解析器（tree-sitter）插件化接入 parse 层。
 
 
-### 陷阱（pitfalls）— 7 条
+### 陷阱（pitfalls）— 8 条
+
+#### [25] 并发修改同一文件：主工作区 vs worktree 双线冲突
+
+- 分类: pitfalls ｜ 标签: — ｜ 时间: 2026-08-14 23:09:21
+
+本次事故：主工作区（master 带用户未提交改动 update_max_duration）与 worktree（feat/msg-queue 带我的 FIFO 改动）同时改 loop.py/test 文件——两边基线不同（a0792c5 vs 6247159），直接复制会覆盖对方改动，只能逐处精确合并，且测试基线差异导致 3 个存量失败难辨归属。根因：单主体错误使用 worktree 造成双写。教训：①单主体（我一个 agent）开发用单线，绝不分叉；②多主体（子代理并行）才 worktree 隔离；③并发前先查 git status/log 看清两边基线；④绝不整文件覆盖，逐处合并 + diff 验证。铁律13 已修正固化。
 
 #### [23] spec写完未停等审核就实现+plan潦草（HARD-GATE 违反）
 
@@ -83,11 +89,11 @@ Windows cmd 下 python -c 带中文常量会被 GBK 损坏，SQL WHERE 匹配失
 
 ### 模式（patterns）— 11 条
 
-#### [24] 有git历史时用worktree隔离开发
+#### [24] worktree 仅用于子代理/多线并行隔离（非默认开发方式）
 
 - 分类: patterns ｜ 标签: — ｜ 时间: 2026-08-14 21:58:04
 
-在已有 git 历史的仓库做新功能/重构时，优先 git worktree add <路径> -b <分支名> 建独立工作树，避免污染主工作区与主分支（主分支保持可发布）。只读查询（git worktree list / branch -a / status）随时可执行；worktree add/remove 改仓库状态，remove 前按铁律1先问。与铁律11（进程调试新实例优先）同构：不打断现状、独立隔离、收尾合并。铁律13 固化。
+主开发流保持单线（master 直接改）。只有子代理并行开发、多分支实验、高风险隔离才建 worktree（git worktree add 路径 -b 分支）。单主体单线最简。铁律13 已修正。
 
 #### [21] deepseek-harness/cordis 参考：决策归档 + 插件总线分层 + 流程纪律技能
 

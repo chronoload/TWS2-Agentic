@@ -218,10 +218,14 @@ python -m macdev project list                        # 列出已初始化的产�
     完成即自行实现"是严重违规（曾致 spec 全 open 但代码已提交）。plan 必须对齐 writing-plans 颗粒度：
     每 task 带 Create/Modify 涉及文件，每 step 带动作+期望结果+TDD 红→绿（`--action test --expected FAIL`
     → 实现 → 转绿）；**禁止 task 无文件、step 用"待补充"占位**——潦草 plan 等于没写，执行者仍需自行设计。
-13. **有 git 历史时优先用 worktree 隔离开发（用户强制）**：在已有 git 历史的仓库上做新功能/重构时，
-    优先 `git worktree add <路径> -b <分支名>` 建独立工作树再动手，避免污染主工作区与主分支；
-    `git worktree list` / `git branch -a` 等只读查询随时可执行；worktree add/remove 会改仓库状态，
-    remove 前按铁律 1 先向用户确认。
+13. **worktree 仅用于子代理/多线并行隔离（用户强制，并发冲突教训）**：主开发流保持**单线**
+    （master 直接改，避免并发冲突）——本次教训：主工作区与 worktree 并发改同一文件（loop.py），
+    两边改动需逐处手动合并，成本极高。**只有以下场景才建 worktree**：
+    - 子代理（sub_agent）并行开发——各自独立工作树互不干扰，完成后合回；
+    - 多分支并行实验（如 A/B 方案、调研分支），需保留主工作区可发布；
+    - 高风险实验隔离（不污染主工作区）。
+    单主体单线最简；多主体（子代理）才 worktree。只读查询（`git worktree list`/`git branch -a`）随时可执行；
+    worktree add/remove 会改仓库状态，remove 前按铁律 1 先向用户确认。
 
 > 本节优先级高于 skill 内其他「经验只写 log 不写 SKILL.md」的约定——用户指令 > skill 内部约定。
 
