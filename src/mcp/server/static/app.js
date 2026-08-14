@@ -10220,6 +10220,7 @@ function _stopLoopPolling() {
 
 // loop 消息增量追加（1:1 对齐单例模式：与普通会话流式消息一样只 append DOM，不重建容器）。
 // 避免 loop 回合加入触发 renderAgentMessages 全量重建 → 闪烁 / 吞消息 / 打扰普通对话（解耦）。
+// 返回消息索引，供 _updateLoopMessage 分阶段更新（提交过程可见反馈）。
 function addLoopMessage(content, extra) {
   state.agentMessages.push({ role: 'loop', content: content || '', ...(extra || {}) });
   const index = state.agentMessages.length - 1;
@@ -10236,16 +10237,30 @@ function addLoopMessage(content, extra) {
     container.scrollTop = container.scrollHeight;
   }
   try { _addFlowNavBlock('loop', content || '', index, extra); } catch (e) {}
+  return index;
+}
+
+// 更新单条 loop 消息（按 data-mid 重渲染，不重建容器）——提交过程分阶段反馈用
+function _updateLoopMessage(index, patch) {
+  const msg = state.agentMessages[index];
+  if (!msg) return;
+  Object.assign(msg, patch);
+  const mid = msg._mid || _ensureMsgUid(msg);
+  const el = document.querySelector('.agent-msg[data-mid="' + mid + '"]');
+  if (el) {
+    const html = _renderAgentMessageHtml(msg, index);
+    el.outerHTML = html;
+  }
 }
 
 // 自主模式提交（方案A：注入 + 自动建 LoopTask 保障，spec id=4/5 + handoff/回审闭环）：
 // 1) loop-goal 注入目标到 agent 会话上下文（同一上下文迭代器）
 // 2) loop/submit 建 LoopTask(session_id) → 后台自主推进：防打断 + 达成判定 + handoff + macdev 回审
-// 非阻塞（fire-and-forget）：发送不卡顿，网络请求 setTimeout 后台执行，错误 toast 反馈
+// 非阻塞（fire-and-forget）：发送不卡顿；提交卡片分阶段更新（注入中→启动中→已启动），过程可见
 async function _submitLoopTask(goal) {
   const sid = _getAgentSessionId() || '';
-  // 立即显示「已提交自主任务」卡片（不等待网络，发送即时响应）
-  addLoopMessage(goal, { loopKind: 'submitted', loopTaskId: '' });
+  // 立即显示「已提交自主任务」卡片（阶段：注入中）
+  const cardIdx = addLoopMessage(goal, { loopKind: 'submitted', loopTaskId: '', statusText: '⏳ 正在注入目标…' });
   // 后台执行：注入 → 建保障任务（不阻塞 UI）
   setTimeout(async function () {
     let taskId = null;
@@ -10257,13 +10272,17 @@ async function _submitLoopTask(goal) {
       });
       const data = await res.json();
       if (!data || data.code !== 0) {
+        _updateLoopMessage(cardIdx, { statusText: '❌ 目标注入失败', phase: 'error' });
         showToast('⚠️ 目标注入失败：' + ((data && data.msg) || '未知错误'), 'error');
         return;
       }
     } catch (e) {
+      _updateLoopMessage(cardIdx, { statusText: '❌ 目标注入失败', phase: 'error' });
       showToast('目标注入失败：' + (e.message || e), 'error');
       return;
     }
+    // 注入成功 → 启动保障任务
+    _updateLoopMessage(cardIdx, { statusText: '✅ 目标已注入，正在启动保障任务…', phase: 'starting' });
     try {
       const res = await fetch(API_BASE + '/api/loop/submit', {
         method: 'POST',
@@ -10273,10 +10292,16 @@ async function _submitLoopTask(goal) {
       const data = await res.json();
       taskId = data.task_id || null;
     } catch (e) {
+      _updateLoopMessage(cardIdx, { statusText: '⚠️ 目标已注入（保障任务创建失败）', phase: 'warning' });
       showToast('⚠️ 保障任务创建失败（目标已注入，agent 仍会自然推进）：' + (e.message || e), 'error');
     }
     // 标记已见（轮询不再重复插入提交卡片，只追加回合）
     if (taskId) { _seenLoopTaskIds[taskId] = true; _seenLoopTasks[taskId] = 1; }
+    _updateLoopMessage(cardIdx, {
+      loopTaskId: taskId || '',
+      statusText: taskId ? '🚀 保障任务已启动（防打断/达成判定/交接回审）' : '⚡ 目标已注入，agent 自然推进',
+      phase: taskId ? 'running' : 'warning',
+    });
     showToast(taskId
       ? '⚡ Loop 目标已注入 + 保障任务已启动（防打断/达成判定/交接回审）'
       : '⚡ Loop 目标已注入（保障任务未创建，agent 自然推进）', 'success');
@@ -12392,13 +12417,18 @@ function _renderAgentMessageHtml(msg, mi) {
   if (msg.role === 'loop') {
     var _loopTid = msg.loopTaskId ? '<code style="font-size:10px;opacity:.8">' + escapeHtml(String(msg.loopTaskId).slice(0, 8)) + '</code>' : '';
     if (msg.loopKind === 'submitted') {
+      var _phaseBadge = msg.statusText
+        ? '<span class="lp-phase lp-phase-' + String(msg.phase || 'pending')
+          + '" style="font-size:11px;opacity:.85;' + (msg.phase === 'error' ? 'color:#e5484d' : (msg.phase === 'warning' ? 'color:#d29922' : 'color:var(--accent)')) + '">'
+          + escapeHtml(msg.statusText) + '</span>'
+        : '';
       var _auditBtn = msg.loopTaskId
         ? '<span class="lp-audit-btn" data-tid="' + escapeHtml(String(msg.loopTaskId))
           + '" onclick="event.stopPropagation();_runLoopAudit(this.dataset.tid)" style="cursor:pointer;color:var(--accent);font-size:11px;border:1px solid var(--accent);border-radius:4px;padding:1px 6px;opacity:.85">🔍 回审</span>'
         : '';
       rendered = '<div class="loop-submitted" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
         + '<span>⚡</span><span style="flex:1">已提交自主任务：<b>' + escapeHtml(msg.content || '') + '</b></span>'
-        + _loopTid + _auditBtn + '</div>';
+        + _phaseBadge + _loopTid + _auditBtn + '</div>';
       return '<div class="agent-msg loop" data-index="' + mi + '" data-mid="' + _mid + '">' +
         '<div class="msg-role">⚡ 自主任务</div><div class="msg-content">' + rendered + '</div></div>';
     }
@@ -12807,18 +12837,46 @@ function _mdStructuralIncomplete(text) {
   // 行内公式 $...$ 未闭合（奇数个未转义单 $，排除 $$）
   var dollars = text.match(/(?<!\$)\$(?!\$)/g);
   if (dollars && dollars.length % 2 === 1) return true;
+  // 表格头未闭合（| a | b | 已出现但分隔行 |---| 未到）→ 结构未完成，
+  // 避免流式中「文本行 ↔ 表格」反复跳变闪烁（分隔行到达前保守纯文本，
+  // 流结束 forceRender 一次性渲染成最终表格）
+  var inTableBlock = false;
+  var tableHasSeparator = false;
+  for (var j = 0; j < lines.length; j++) {
+    var lt = lines[j].trim();
+    if (lt.indexOf('|') === -1 || /^```/.test(lt) || /^~~~/.test(lt)) {
+      inTableBlock = false; tableHasSeparator = false; continue;
+    }
+    if (/-{3,}/.test(lt) && /^[\s\-:|]+$/.test(lt)) {
+      tableHasSeparator = true;   // 分隔行（|---|---| 等）
+    } else if (!tableHasSeparator && lt.indexOf('|') === 0) {
+      inTableBlock = true;        // 标准表格头（| 开头）在分隔行之前
+    } else if (!tableHasSeparator) {
+      inTableBlock = false;       // 普通文本含 |（a | b）不触发表格未闭合
+    }
+  }
+  if (inTableBlock && !tableHasSeparator) return true;
   return false;
 }
 
 function _applyStreamContent(el, content, container, forceRender) {
   if (!el) return;
-  // 自适应：结构未完成（防闪烁）或超长回复（>800 行，防每 30ms 全量解析卡顿）→ 保守纯文本；
-  // 否则流式中直接 renderSimpleMarkdown（适当激进）。forceRender=true（流结束收尾）强制渲染。
+  // 渲染模式锁定（根治流式闪烁）：首次渲染时决策 md/text 并锁定到流结束，
+  // 流式中不再因结构开合来回横跳（旧实现每 token 在 textContent ↔ innerHTML
+  // 间切换，整条消息 markdown 格式闪现/消失）。forceRender=true（流结束收尾）
+  // 总是渲染最终 md + KaTeX，并清除锁定（下条消息重新决策）。
   var incomplete = _mdStructuralIncomplete(content);
   var tooLong = content.split('\n').length > 800;
-  var renderKey;
-  if (!forceRender && (incomplete || tooLong)) {
-    renderKey = 'TEXT:' + content;
+  var mode = el._streamMode;
+  if (!mode) {
+    // 首次渲染：决策并锁定模式（结构未完成/超长 → 保守纯文本；否则 md）
+    mode = (incomplete || tooLong) ? 'text' : 'md';
+    el._streamMode = mode;
+  }
+  if (!forceRender && mode === 'text') {
+    // 保守纯文本：流式中保持 textContent（'TEXT:' 前缀 key 与 md 分支区分，
+    // 保证 forceRender 收尾时必然触发一次 md 渲染）
+    var renderKey = 'TEXT:' + content;
     if (el._streamRendered !== renderKey) {
       el._streamRendered = renderKey;
       el.textContent = content;
@@ -12834,6 +12892,7 @@ function _applyStreamContent(el, content, container, forceRender) {
       }, 350);
     }
   }
+  if (forceRender) el._streamMode = null;
   if (container.scrollHeight - container.scrollTop - container.clientHeight < 100) {
     container.scrollTop = container.scrollHeight;
   }
@@ -12896,7 +12955,7 @@ function updateLastAssistantMessage(content, forceIdx) {
         }
       }
       _agentRenderTimer = null;
-    }, 30);  // 30ms debounce，平衡流畅度和性能
+    });  // rAF 帧对齐合帧（标准 rAF 单参数：高吞吐 token 每帧最多一次，无 debounce 尾延迟）
   } else {
     // 如果没有找到，创建一条新的
     _agentStreamMsgIndex = state.agentMessages.length;
@@ -13084,8 +13143,8 @@ function renderSimpleMarkdown(text) {
       continue;
     }
 
-    // 代码块
-    if (trimmed.startsWith('```')) {
+    // 代码块（``` 或 ~~~ 围栏；与 _mdStructuralIncomplete 检测一致，消除检测/渲染不一致）
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
       if (inCodeBlock) {
         // 结束代码块
         var codeText = escapeHtml(codeContent.join('\n'));
@@ -13205,15 +13264,34 @@ async function sendAgentMessage() {
   }
   if (!text) return;
 
-  // 流式中发送：不打断当前回答，消息先入队（当前流式结束后自动发送）
+  // 流式中发送（spec id=7 决策D4=B）：打断插入——POST interrupt（cancel 当前流 + 入队）+ 本地显示
   if (state.agentStreaming) {
-    _pendingSendQueue.push({ text, attachments: _buildAttachmentsPayload() });
+    const sid = _getAgentSessionId();
+    const attachmentsPayload = _buildAttachmentsPayload();
     _clearMediaAttachments();
     input.value = '';
-    // 本地立即显示用户消息，并提示已排队
+    // 本地立即显示用户消息 + 打断提示
     addAgentMessage('user', text);
-    showToast('📥 消息已排队，当前回答结束后自动发送', 'info');
+    showToast('⚡ 已打断当前生成，正在处理新消息…', 'info');
     renderAgentMessages();
+    // 后端 interrupt：cancel 当前 SSE + content 入队（持久化，刷新/多标签共享）
+    fetch(`${API_BASE}/api/agent/chat/interrupt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid || '', content: text }),
+    }).then(function (res) { return res.json(); })
+      .then(function (data) {
+        // 打断成功后：abort 本地 XHR + 立即消费队首（打断插入语义）
+        if (state.agentXHR) { try { state.agentXHR.abort(); } catch (e) {} }
+        cancelAgentChat();
+        _renderPendingSendBadge(data && data.queue_len || 0);
+        _dequeueAndSendNext(sid, text, attachmentsPayload);
+      })
+      .catch(function () {
+        // 后端不可用：退回前端内存队列（兼容）
+        _pendingSendQueue.push({ text: text, attachments: attachmentsPayload });
+        _renderPendingSendBadge(_pendingSendQueue.length);
+      });
     return;
   }
 
@@ -13298,6 +13376,35 @@ async function sendAgentMessage() {
       }, 100);
     }
   }
+}
+
+// 待发送队列徽标（spec id=7）：输入框上方显示「待发送 N 条」
+function _renderPendingSendBadge(n) {
+  const badge = document.getElementById('agentPendingQueueBadge');
+  if (!badge) return;
+  if (n > 0) {
+    badge.textContent = '📥 待发送 ' + n + ' 条';
+    badge.style.display = 'inline-block';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+// 打断插入：发送当前打断消息（队首即本条），并同步后端剩余队列长度到徽标
+// 多标签/刷新时以后端持久化队列为准（spec id=7 决策D5=B）
+function _dequeueAndSendNext(sid, text, attachmentsPayload) {
+  // 先清前端内存队列（后端已接管持久化）
+  _pendingSendQueue = [];
+  // 发送当前打断消息（打断插入语义：立即处理新消息）
+  _doSendMessage(text, attachmentsPayload || {});
+  // 查询后端剩余队列并更新徽标
+  fetch(`${API_BASE}/api/agent/queue?session_id=${encodeURIComponent(sid || '')}`, {
+    cache: 'no-store',
+  }).then(function (res) { return res.json(); })
+    .then(function (data) {
+      const q = data && data.data && data.data.queue_len || 0;
+      _renderPendingSendBadge(q);
+    }).catch(function () {});
 }
 
 // 实际发送消息（供流式结束后的队列消费）
@@ -13917,7 +14024,8 @@ async function cancelAgentChat() {
 
 document.getElementById('agentSend').addEventListener('click', () => {
   if (state.agentStreaming) {
-    cancelAgentChat();
+    // 流式中发送（spec id=7 决策D4=B）：打断插入——cancel 当前流 + 新消息入队 + 立即消费队首
+    sendAgentMessage();
   } else {
     sendAgentMessage();
   }
@@ -13925,7 +14033,7 @@ document.getElementById('agentSend').addEventListener('click', () => {
 document.getElementById('agentInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    if (state.agentStreaming) return;
+    // 流式中 Enter 不再丢弃/return：走 sendAgentMessage 内部打断插入分支
     sendAgentMessage();
     return;
   }
