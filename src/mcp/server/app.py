@@ -6966,81 +6966,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 if not messages_source:
                     return None
                 
-                # 【压缩视图】若当前消息含 [对话历史摘要] system 消息，计算展开历史总数，
-                # 随每条摘要 system 消息附带 expanded_total（仅总数，不附内容）。
-                # 完整展开历史改由前端经 /api/agent/messages/expand 分页懒加载，
-                # 避免一次会话轮询就把数千条历史全量推给前端（加载性能优化）。
-                compact_expanded_total = 0
-                if _has_compact_summary(messages_source):
-                    try:
-                        from ..cache.context_reloader import get_context_reloader
-                        _rel = get_context_reloader()
-                        _cex = _expand_for_snapshot(_rel, messages_source)
-                        compact_expanded_total = len(_cex) if _cex else 0
-                        _cex = None
-                    except Exception as _ce:
-                        logger.debug(f"[session-get] compact expand 失败: {_ce}")
-                        compact_expanded_total = 0
+                # 【压缩视图】展开历史总数（共用 _compact_expanded_total，单一事实源）
+                compact_expanded_total = _compact_expanded_total(messages_source)
                 
-                # 构造 UI 消息列表
-                ui_messages = []
-                for msg in messages_source:
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    # 【诚实渲染】系统消息不再剔除，原样返回给前端展示。
-                    # 此前直接 continue 跳过 system，前端永远看不到 system，
-                    # 会话 UI 与后端 agent.messages 不一致，掩盖真实状态。
-                    if role == "system":
-                        entry = {
-                            "role": "system",
-                            "content": content if isinstance(content, str) else str(content),
-                        }
-                        # 压缩摘要：附带可找回总数（内容由 expand 端点分页懒加载）
-                        if isinstance(content, str) and content.startswith("[对话历史摘要") and compact_expanded_total > 0:
-                            entry["expanded_total"] = compact_expanded_total
-                        ui_messages.append(entry)
-                    elif role == "tool":
-                        tool_call_id = msg.get("tool_call_id", "")
-                        tool_content = content if isinstance(content, str) else str(content)
-                        tool_name = ""
-                        checkpoint_hash = msg.get("checkpoint_hash", "")
-                        try:
-                            for prev in reversed(ui_messages):
-                                if prev.get("role") == "assistant" and prev.get("tool_calls"):
-                                    for tc in prev["tool_calls"]:
-                                        tc_dict = tc if isinstance(tc, dict) else {}
-                                        if tc_dict.get("id") == tool_call_id:
-                                            tool_name = tc_dict.get("function", {}).get("name", "")
-                                            if not checkpoint_hash:
-                                                checkpoint_hash = tc_dict.get("checkpoint_hash", "")
-                                            break
-                                break
-                        except Exception:
-                            pass
-                        ui_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "tool_name": tool_name,
-                            "content": tool_content,
-                            "checkpoint_hash": checkpoint_hash,
-                        })
-                    elif role == "assistant":
-                        entry = {
-                            "role": "assistant",
-                            "content": content if isinstance(content, str) else str(content),
-                        }
-                        # 【诚实渲染】思考过程与内容分开透传，前端在同一气泡内按
-                        # "思考 → 内容 → 工具卡" 顺序渲染，保持与 agent.messages 一致。
-                        if msg.get("reasoning_content"):
-                            entry["reasoning_content"] = msg["reasoning_content"]
-                        if msg.get("tool_calls"):
-                            entry["tool_calls"] = msg["tool_calls"]
-                        ui_messages.append(entry)
-                    elif role == "user" and content:
-                        ui_messages.append({
-                            "role": "user",
-                            "content": content if isinstance(content, str) else str(content),
-                        })
+                # 构造 UI 消息列表（共用 _build_ui_messages 唯一事实源：
+                # system 保留 + reasoning_content 透传 + tool_name/checkpoint_hash 补充）
+                ui_messages = _build_ui_messages(messages_source, compact_expanded_total)
                 
                 return {
                     "messages": ui_messages,
@@ -7214,73 +7145,11 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 
                 logger.info(f"[switch] Session '{req.session_id[:12]}' activated: {len(messages_source)} msgs (source={source_type})")
                 
-                # 【压缩视图】计算展开历史总数（对齐 GET /sessions/{id}）：
-                # 压缩摘要 system 消息附带 expanded_total，前端据此生成摘要卡并分页懒加载压缩前快照
-                compact_expanded_total = 0
-                try:
-                    if _has_compact_summary(messages_source):
-                        from ..cache.context_reloader import get_context_reloader
-                        _rel = get_context_reloader()
-                        _cex = _expand_for_snapshot(_rel, messages_source)
-                        compact_expanded_total = len(_cex) if _cex else 0
-                except Exception as _ce:
-                    logger.debug(f"[switch] compact expand 失败: {_ce}")
-                
-                # 构造 UI 消息列表（诚实渲染：system 消息保留——与 GET /sessions/{id} 一致，
-                # 压缩摘要卡供前端滚动懒加载压缩前快照。旧逻辑 continue 剔除 system，
-                # 导致切换会话后压缩历史不可见/不可加载）
-                ui_messages = []
-                for msg in messages_source:
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    if role == "system":
-                        entry = {
-                            "role": "system",
-                            "content": content if isinstance(content, str) else str(content),
-                        }
-                        # 压缩摘要：附带可找回总数（内容由 expand 端点分页懒加载）
-                        if isinstance(content, str) and content.startswith("[对话历史摘要") and compact_expanded_total > 0:
-                            entry["expanded_total"] = compact_expanded_total
-                        ui_messages.append(entry)
-                        continue
-                    if role == "tool":
-                        tool_call_id = msg.get("tool_call_id", "")
-                        tool_content = content if isinstance(content, str) else str(content)
-                        tool_name = ""
-                        checkpoint_hash = msg.get("checkpoint_hash", "")
-                        try:
-                            for prev in reversed(ui_messages):
-                                if prev.get("role") == "assistant" and prev.get("tool_calls"):
-                                    for tc in prev["tool_calls"]:
-                                        tc_dict = tc if isinstance(tc, dict) else {}
-                                        if tc_dict.get("id") == tool_call_id:
-                                            tool_name = tc_dict.get("function", {}).get("name", "")
-                                            if not checkpoint_hash:
-                                                checkpoint_hash = tc_dict.get("checkpoint_hash", "")
-                                            break
-                                    break
-                        except Exception:
-                            pass
-                        ui_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "tool_name": tool_name,
-                            "content": tool_content,
-                            "checkpoint_hash": checkpoint_hash,
-                        })
-                    elif role == "assistant":
-                        entry = {
-                            "role": "assistant",
-                            "content": content if isinstance(content, str) else str(content),
-                        }
-                        if msg.get("tool_calls"):
-                            entry["tool_calls"] = msg["tool_calls"]
-                        ui_messages.append(entry)
-                    elif role == "user" and content:
-                        ui_messages.append({
-                            "role": "user",
-                            "content": content if isinstance(content, str) else str(content),
-                        })
+                # 【压缩视图】展开历史总数 + UI 消息构造（共用 _compact_expanded_total/_build_ui_messages
+                # 单一事实源：system 保留 + reasoning_content 透传 + tool_name/checkpoint_hash 补充，
+                # 与 GET /sessions/{id} 完全一致，杜绝漂移）
+                compact_expanded_total = _compact_expanded_total(messages_source)
+                ui_messages = _build_ui_messages(messages_source, compact_expanded_total)
                 return ui_messages
 
             # 获取会话状态信息（在 _switch_session 外部获取，统一口径：_agent_state_of）
@@ -7836,6 +7705,83 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
     def _has_compact_summary(messages: list) -> bool:
         return any(_is_compact_summary_msg(m) for m in messages)
+
+    def _compact_expanded_total(messages: list) -> int:
+        """压缩视图展开总数（GET/switch 共用，防漂移）"""
+        if not _has_compact_summary(messages):
+            return 0
+        try:
+            from ..cache.context_reloader import get_context_reloader
+            _rel = get_context_reloader()
+            _cex = _expand_for_snapshot(_rel, messages)
+            return len(_cex) if _cex else 0
+        except Exception as _ce:
+            logger.debug(f"[compact] expand 失败: {_ce}")
+            return 0
+
+    def _build_ui_messages(messages_source: list, compact_expanded_total: int = 0) -> list:
+        """backend messages → UI 消息（唯一事实源，GET /sessions/{id} 与 /sessions/switch 共用）
+
+        诚实渲染规则（防漂移：所有会话视图入口必须走本函数，禁止另写手写简版）：
+        - system：保留原样返回（含压缩摘要卡 + expanded_total 元数据，供前端滚动懒加载压缩前快照）
+        - tool：向前匹配 assistant.tool_calls 补 tool_name / checkpoint_hash
+        - assistant：content + reasoning_content（思考透传）+ tool_calls
+        - user：content
+        """
+        ui_messages = []
+        for msg in messages_source:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                entry = {
+                    "role": "system",
+                    "content": content if isinstance(content, str) else str(content),
+                }
+                if isinstance(content, str) and content.startswith("[对话历史摘要") and compact_expanded_total > 0:
+                    entry["expanded_total"] = compact_expanded_total
+                ui_messages.append(entry)
+            elif role == "tool":
+                tool_call_id = msg.get("tool_call_id", "")
+                tool_content = content if isinstance(content, str) else str(content)
+                tool_name = ""
+                checkpoint_hash = msg.get("checkpoint_hash", "")
+                try:
+                    for prev in reversed(ui_messages):
+                        if prev.get("role") == "assistant" and prev.get("tool_calls"):
+                            for tc in prev["tool_calls"]:
+                                tc_dict = tc if isinstance(tc, dict) else {}
+                                if tc_dict.get("id") == tool_call_id:
+                                    tool_name = tc_dict.get("function", {}).get("name", "")
+                                    if not checkpoint_hash:
+                                        checkpoint_hash = tc_dict.get("checkpoint_hash", "")
+                                    break
+                            break
+                except Exception:
+                    pass
+                ui_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "content": tool_content,
+                    "checkpoint_hash": checkpoint_hash,
+                })
+            elif role == "assistant":
+                entry = {
+                    "role": "assistant",
+                    "content": content if isinstance(content, str) else str(content),
+                }
+                # 思考过程与内容分开透传，前端在同一气泡内按「思考 → 内容 → 工具卡」渲染
+                if msg.get("reasoning_content"):
+                    entry["reasoning_content"] = msg["reasoning_content"]
+                if msg.get("tool_calls"):
+                    entry["tool_calls"] = msg["tool_calls"]
+                ui_messages.append(entry)
+            elif role == "user" and content:
+                ui_messages.append({
+                    "role": "user",
+                    "content": content if isinstance(content, str) else str(content),
+                })
+        return ui_messages
 
     def _expand_compact_checkpoint(reloader, cp_id: str, snapshot_msgs: list) -> Optional[list]:
         """压缩视图展开（日志式）：回退到含摘要的检查点时，向上合并最近的完整基底快照，
