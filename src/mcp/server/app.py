@@ -7171,10 +7171,23 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                         loop_mode = bool((target_rec.metadata or {}).get("loop_mode", False))
                 except Exception:
                     loop_mode = False
+                # P1 窗口裁剪：默认只返回最近 N 条，窗口外历史由前端经 /api/agent/messages/expand 懒加载。
+                # 压缩摘要卡（expanded_total）随窗口内消息保留；has_more 指示前端可补载更早历史。
+                _WINDOW_N = 200
+                _total = len(ui_messages)
+                if _total > _WINDOW_N:
+                    _window = ui_messages[-_WINDOW_N:]
+                    _has_more = True
+                else:
+                    _window = ui_messages
+                    _has_more = False
                 return ok(data={
                     "switched": True,
                     "session_id": req.session_id,
-                    "messages": ui_messages,
+                    "messages": _window,
+                    "total": _total,
+                    "has_more": _has_more,
+                    "window_size": _WINDOW_N,
                     "is_streaming": session_is_streaming,
                     "is_active": session_is_active,
                     "source": "agent_live" if (session_is_streaming or session_is_active) else "session_store",
