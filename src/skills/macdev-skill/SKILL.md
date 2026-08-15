@@ -181,16 +181,22 @@ python -m macdev project list                        # 列出已初始化的产�
 1. **危险 git 命令必须先问**：自演化/开发流程中，绝不允许在未向用户提问确认前直接执行任何危险 git 命令
    （`checkout` / `reset` / `clean` / `push` / `force-push` / `merge` / `revert` / `branch -D` / `rm` 等）。
    只读命令（`status` / `branch` / `log` / `diff` / `show`）可随时直接执行。
-2. **绝不假设未追踪（untracked）文件不重要**：`git status` 中的 `??` 项在删除/覆盖/忽略前必须逐项向用户确认，
-   不得擅自忽略或清理。
+2. **绝不假设未追踪（untracked）文件不重要（违反即停）**：`git status` 中的 `??` 项在删除/覆盖/忽略前必须逐项向用户确认，
+   不得擅自忽略或清理。**`??` 项可能是用户的成果/调试线索（如本会话 `_verify_*` 脚本、`music/` 目录）——默认视为重要，先问后动**。
 3. **任何会话开始第一步查 git 状态（与铁律 10 查 log/plan 并列，用户强制）**：**任何新对话/会话（即使看似全新）开始、或上下文压缩恢复后，第一时间执行**
    `git branch -a` + `git status --short` + `git log --oneline -15`，看清分支/提交/工作区现状再动手。
+   **同步做产物收敛扫描（铁律 5 的检查信号）**：`git status --short` 里出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*`/`_diag_*` 等调试文件 = 产物散落违规，**立即归位 `<name>-project/verify/` 后再继续**。
    git 查询与铁律 10 的 macdev log/plan 查询**地位并列、同为会话启动必查项**：先 git（看仓库现状）→
    再 log/plan（看开发历史与既定事实），双查齐备后才允许继续操作。
-4. **动手前查阅 macdev log 与 plan**：用 `log list/query` 与 `plan list` 了解开发历史与进行中的计划，
-   避免重复劳动或遗漏未完成事项。
-5. **macdev 操作必须生成双轨产物**：机器可读（db/csv/json）+ 人类可读（md）双轨缺一不可；
-   产物收敛到 `<name>-project/`，重跑覆写、不另建新目录。
+4. **动手前必须查阅 macdev log 与 plan（未查即动手 = 违规，用户强制）**：用 `log list/query` 与 `plan list` 了解开发历史与进行中的计划，
+   避免重复劳动或遗漏未完成事项；**任何会话启动后/上下文恢复后，在动手（含澄清/探索/读文件）前未完成 git 状态（铁律 3）+ log/plan（本铁律）双查即属违规**。
+5. **🔴🔴 产物收敛铁律（用户强制 · 违反即停 · 本次违规教训固化）**：
+   **一切 macdev 产物——audit 输出 / plan / log / requirement / 调试脚本 / 验证脚本 / 一次性工具 / 日志——必须收敛到 `<name>-project/`**（如 `ts2-project/verify/`、`ts2-project/audit/`、`ts2-project/plans.db`），
+   **绝对禁止散落开发环境**（`src/` 根目录、项目根、工作区任意位置都算散落）。
+   - **双轨产物**：机器可读（db/csv/json）+ 人类可读（md）双轨缺一不可；重跑覆写、不另建新目录；
+   - **调试/验证/一次性脚本**：第一时间写入 `<name>-project/verify/`，收尾统一归位，**不得先在别处创建再移**；
+   - **违规检查信号**：`git status` 出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*` 等调试文件 = 已违规，立即归位；
+   - **违反后果**：污染开发环境、产物不可追踪、与提交基线混杂、污染 untracked 列表（本次 `_verify_*.py`/`_boot_verify.py` 散落 `src/` 根即为此教训，用户指正后归位 `ts2-project/verify/`）。
 6. **自演化优先**：新教训/规则优先固化进本 SKILL.md（§8 或新章节）+ 随包 log（scope=pkg），
    让能力随使用进化，而非仅停留在项目级 log。
 7. **跨目录覆盖/部署/批量删除文件先问**：向私有部署或其他目录复制/覆盖文件（`copy`/`cp` 覆盖部署、
