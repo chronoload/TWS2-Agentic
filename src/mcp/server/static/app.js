@@ -13672,6 +13672,19 @@ async function sendAgentStream(text, attachments) {
       }
     }
     
+    // 辅助函数：按稳定 uid 同步删除双数组消息（根治独立 splice 不同步——
+    // 旧实现 streamState.messages 按 currentIndex 删、state.agentMessages 按尾部 role 匹配删，
+    // 删除的不是同一条 → 后续 addStreamMessage/update 的 streamState 下标在 state 上错位 → 语义漂移）
+    function removeStreamMessage(idx) {
+      const m = streamState.messages[idx];
+      const uid = m && m._uid;
+      streamState.messages.splice(idx, 1);
+      if (isCurrentSession() && uid) {
+        const ui = _findMsgIndexByUid(state.agentMessages, uid);
+        if (ui >= 0) state.agentMessages.splice(ui, 1);
+      }
+    }
+
     // 辅助函数：更新指定索引的消息
     function updateStreamMessage(idx, updates) {
       if (streamState.messages[idx]) {
@@ -13745,19 +13758,14 @@ async function sendAgentStream(text, attachments) {
             // （整段覆盖/追加会把整个回复重复一遍）。最终一致性由诚实重建保证。
             state.streamingToolCalls = [];
             if (!streamState.toolCallHappened && !streamState.fullContent) {
-              // 无 tool call 且无文本，移除空 assistant 消息
-              if (streamState.currentIndex >= 0 && streamState.messages[streamState.currentIndex]) {
-                streamState.messages.splice(streamState.currentIndex, 1);
+              // 无 tool call 且无文本，移除空 assistant 消息（uid 定位双数组同步删除）
+              if (streamState.currentIndex >= 0 && streamState.messages[streamState.currentIndex] &&
+                  streamState.messages[streamState.currentIndex].role === 'assistant' &&
+                  !streamState.messages[streamState.currentIndex].content) {
+                removeStreamMessage(streamState.currentIndex);
+                streamState.currentIndex = -1;
               }
-              if (isCurrentSession()) {
-                for (let i = state.agentMessages.length - 1; i >= 0; i--) {
-                  if (state.agentMessages[i].role === 'assistant' && !state.agentMessages[i].content) {
-                    state.agentMessages.splice(i, 1);
-                    break;
-                  }
-                }
-                renderAgentMessages();
-              }
+              if (isCurrentSession()) renderAgentMessages();
             }
             // 标记未返回结果的工具（FIFO 数组：遍历所有排队索引）
             for (var tName in streamState.toolMsgMap) {
@@ -13803,17 +13811,12 @@ async function sendAgentStream(text, attachments) {
                 if (streamState.fullContent) {
                   updateStreamAssistant(streamState.fullContent);
                 } else {
-                  // 无文本，移除空的 assistant 消息
-                  if (streamState.currentIndex >= 0 && streamState.messages[streamState.currentIndex]) {
-                    streamState.messages.splice(streamState.currentIndex, 1);
-                  }
-                  if (isCurrentSession()) {
-                    for (let j = state.agentMessages.length - 1; j >= 0; j--) {
-                      if (state.agentMessages[j].role === 'assistant' && !state.agentMessages[j].content) {
-                        state.agentMessages.splice(j, 1);
-                        break;
-                      }
-                    }
+                  // 无文本，移除空的 assistant 消息（uid 定位双数组同步删除——根治独立 splice 不同步的语义漂移）
+                  if (streamState.currentIndex >= 0 && streamState.messages[streamState.currentIndex] &&
+                      streamState.messages[streamState.currentIndex].role === 'assistant' &&
+                      !streamState.messages[streamState.currentIndex].content) {
+                    removeStreamMessage(streamState.currentIndex);
+                    streamState.currentIndex = -1;
                   }
                 }
                 streamState.toolCallHappened = true;
@@ -13924,19 +13927,14 @@ async function sendAgentStream(text, attachments) {
                   }
                 }
                 if (!streamState.toolCallHappened && !streamState.fullContent && !doneContent) {
-                  // 无 token 无工具，移除空 assistant 气泡
-                  if (streamState.currentIndex >= 0 && streamState.messages[streamState.currentIndex]) {
-                    streamState.messages.splice(streamState.currentIndex, 1);
+                  // 无 token 无工具，移除空 assistant 气泡（uid 定位双数组同步删除）
+                  if (streamState.currentIndex >= 0 && streamState.messages[streamState.currentIndex] &&
+                      streamState.messages[streamState.currentIndex].role === 'assistant' &&
+                      !streamState.messages[streamState.currentIndex].content) {
+                    removeStreamMessage(streamState.currentIndex);
+                    streamState.currentIndex = -1;
                   }
-                  if (isCurrentSession()) {
-                    for (let i = state.agentMessages.length - 1; i >= 0; i--) {
-                      if (state.agentMessages[i].role === 'assistant' && !state.agentMessages[i].content) {
-                        state.agentMessages.splice(i, 1);
-                        break;
-                      }
-                    }
-                    renderAgentMessages();
-                  }
+                  if (isCurrentSession()) renderAgentMessages();
                 }
                 // 标记未返回结果的工具（FIFO 数组：遍历所有排队索引；updateStreamMessage 已按 uid 稳定定位）
                 for (var tName in streamState.toolMsgMap) {
@@ -14004,18 +14002,13 @@ async function sendAgentStream(text, attachments) {
       // 剩余缓冲一般只含 [DONE] 哨兵；即使含 done 也不再整段重填
       // （token 已按序实时渲染，重填会造成重复）。最终一致性交给诚实重建。
       if (!streamState.toolCallHappened && !streamState.fullContent) {
-        if (streamState.currentIndex >= 0 && streamState.messages[streamState.currentIndex]) {
-          streamState.messages.splice(streamState.currentIndex, 1);
+        if (streamState.currentIndex >= 0 && streamState.messages[streamState.currentIndex] &&
+            streamState.messages[streamState.currentIndex].role === 'assistant' &&
+            !streamState.messages[streamState.currentIndex].content) {
+          removeStreamMessage(streamState.currentIndex);
+          streamState.currentIndex = -1;
         }
-        if (isCurrentSession()) {
-          for (let i = state.agentMessages.length - 1; i >= 0; i--) {
-            if (state.agentMessages[i].role === 'assistant' && !state.agentMessages[i].content) {
-              state.agentMessages.splice(i, 1);
-              break;
-            }
-          }
-          renderAgentMessages();
-        }
+        if (isCurrentSession()) renderAgentMessages();
       }
       // 标记未返回结果的工具（FIFO 数组：遍历所有排队索引；updateStreamMessage 已按 uid 稳定定位）
       for (var tName in streamState.toolMsgMap) {
