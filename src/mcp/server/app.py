@@ -5468,7 +5468,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             def _agent_status_callback(agent_instance, event_type, **kwargs):
                 if _push_agent_pool_status_ref[0]:
                     try:
-                        _push_agent_pool_status_ref[0]()
+                        # 事件源会话：状态变化归属的 session_id（供前端会话隔离过滤——
+                        # 其他会话/标签页的状态变化不覆盖本页流式状态）
+                        sid = kwargs.get("session_id") or getattr(
+                            agent_instance, "_active_session_id", None
+                        )
+                        _push_agent_pool_status_ref[0](changed_session=sid)
                     except Exception:
                         pass
             
@@ -6951,8 +6956,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         })
 
     # Agent 池状态推送 — 供后台线程调用
-    def _push_agent_pool_status():
-        """推送 Agent 池状态到 WebSocket — 线程安全"""
+    def _push_agent_pool_status(changed_session=None):
+        """推送 Agent 池状态到 WebSocket — 线程安全
+
+        changed_session：触发本次广播的状态变化归属会话（事件源）。
+        前端据此做会话隔离——其他会话的状态变化不覆盖本页流式状态。
+        """
         try:
             ws_mgr = app.state.ws_manager
             if not ws_mgr:
@@ -6962,6 +6971,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             status_data = {
                 "pool_size": len(_agent_pool),
                 "timestamp": time.time(),
+                "changed_session": changed_session,
                 "instances": _build_agent_pool_snapshot(),
             }
             
