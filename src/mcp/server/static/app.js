@@ -14957,10 +14957,10 @@ async function switchToSession(sessionId) {
     updateSessionInfo(isStreaming ? '流式中...' : '会话管理');
   }
   
-  // P1 窗口懒加载：后端返回 has_more（窗口外还有更早历史）→ 消息区顶部加"加载更早历史"入口，
-  // 点击经 expand 端点分页补载窗口外历史并插入现有消息之前（保持顺序）。失败静默降级。
+  // P1 窗口懒加载：后端返回 has_more（窗口外还有更早历史）→ 无感滚动加载
+  // （向上滚到顶部自动补载 expand 分页历史，滚动位置补偿，无需按钮）
   if (res.data.has_more) {
-    _ensureLoadEarlierButton(sessionId, res.data.total || restoredMessages.length);
+    _ensureLoadEarlierAuto(sessionId, res.data.total || restoredMessages.length);
   } else {
     _removeLoadEarlierButton();
   }
@@ -14987,57 +14987,58 @@ function _msgSigKey(m) {
 }
 
 function _removeLoadEarlierButton() {
+  _earlierActive = false;
+  _earlierLoading = false;
+  _earlierOffset = 0;
+  if (_earlierScrollTimer) { clearTimeout(_earlierScrollTimer); _earlierScrollTimer = null; }
   document.querySelectorAll('[data-load-earlier], .load-earlier').forEach(function(el) { el.remove(); });
 }
+// 无感滚动加载状态（P1）：向上滚到顶部 → 自动补载窗口外更早历史，无需按钮
+let _earlierScrollTimer = null;
+let _earlierLoading = false;
+let _earlierOffset = 0;
+let _earlierActive = false;
 
-function _ensureLoadEarlierButton(sessionId, total) {
+function _ensureLoadEarlierAuto(sessionId, total) {
   _removeLoadEarlierButton();
-  // 按钮挂到消息区父级（agentChatMain）顶部：agentMessages 会被轮询/流式 innerHTML 重绘，
-  // 若按钮在容器内会被清掉（实测 600ms 内消失）；父级不随消息重绘 → 按钮常驻。
-  const holder = document.getElementById('agentChatMain') || document.querySelector('.agent-chat-main');
-  if (!holder) return;
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'load-earlier';
-  btn.dataset.loadEarlier = '1';
-  btn.textContent = '⬆ 加载更早历史（共 ' + (total || '') + ' 条）';
-  btn.style.cssText = 'display:block;margin:8px auto;padding:6px 16px;cursor:pointer;'
-    + 'background:#f0f4ff;border:1px solid #c9d8f5;border-radius:6px;font-size:12px;color:#3a5a9f;';
-  holder.prepend(btn);
-  let loading = false;
-  btn.addEventListener('click', function() {
-    if (loading) return;
-    loading = true;
-    btn.disabled = true;
-    btn.textContent = '加载中...';
-    // 窗口外更早历史：expand 分页取第一页（offset=0 最早历史），去重后插入头部
-    _fetchCompactPage(sessionId, 0, 500).then(function(res) {
-      const expanded = (res && res.expanded) || [];
-      if (!expanded.length) {
-        // 无更多可加载（无压缩归档/已到头）→ 静默移除
-        _removeLoadEarlierButton();
-        return;
-      }
-      const ui = _expandBackendMessages(expanded).filter(function(m) { return !(m && m.isCompactSummary); });
-      const existing = new Set(state.agentMessages.map(_msgSigKey));
-      const fresh = ui.filter(function(m) { return !existing.has(_msgSigKey(m)); });
-      if (fresh.length) {
-        state.agentMessages = fresh.concat(state.agentMessages);
-        _batchSetAgentMessages(state.agentMessages);
-        updateSessionInfo(state.agentMessages.length + '条消息');
-      }
-      // 若 expand 显示还有更早（res.has_more）可继续点；否则移除
-      if (res.has_more) {
-        btn.textContent = '⬆ 继续加载更早历史';
-        btn.disabled = false;
-        loading = false;
-      } else {
-        _removeLoadEarlierButton();
-      }
-    }).catch(function(e) {
-      console.warn('[Agent] 加载更早历史失败:', e);
-      _removeLoadEarlierButton();
-    });
+  const container = document.getElementById('agentMessages');
+  if (!container) return;
+  _earlierActive = true;
+  _earlierOffset = 0;
+  // 无感：scrollTop 接近顶部（<80px）且 has_more → 防抖 250ms 自动补载，滚动位置补偿
+  container.addEventListener('scroll', function() {
+    if (!_earlierActive || _earlierLoading) return;
+    if (container.scrollTop < 80) {
+      if (_earlierScrollTimer) clearTimeout(_earlierScrollTimer);
+      _earlierScrollTimer = setTimeout(function() { _loadEarlierPage(sessionId, container); }, 250);
+    }
+  }, { passive: true });
+}
+
+function _loadEarlierPage(sessionId, container) {
+  if (!_earlierActive || _earlierLoading) return;
+  _earlierLoading = true;
+  const beforeScrollH = container.scrollHeight;
+  const beforeTop = container.scrollTop;
+  _fetchCompactPage(sessionId, _earlierOffset, 500).then(function(res) {
+    _earlierLoading = false;
+    const expanded = (res && res.expanded) || [];
+    if (!expanded.length) { _removeLoadEarlierButton(); return; }  // 无更多可加载 → 结束
+    _earlierOffset += expanded.length;
+    const ui = _expandBackendMessages(expanded).filter(function(m) { return !(m && m.isCompactSummary); });
+    const existing = new Set(state.agentMessages.map(_msgSigKey));
+    const fresh = ui.filter(function(m) { return !existing.has(_msgSigKey(m)); });
+    if (fresh.length) {
+      state.agentMessages = fresh.concat(state.agentMessages);
+      _batchSetAgentMessages(state.agentMessages);
+      // 滚动位置补偿：prepend 后 scrollHeight 增大，保持用户当前视觉位置（底部消息不动）
+      container.scrollTop = beforeTop + (container.scrollHeight - beforeScrollH);
+      updateSessionInfo(state.agentMessages.length + '条消息');
+    }
+    if (!res.has_more) { _removeLoadEarlierButton(); }  // 全部加载完 → 结束
+  }).catch(function(e) {
+    _earlierLoading = false;
+    console.warn('[Agent] 加载更早历史失败:', e);
   });
 }
 

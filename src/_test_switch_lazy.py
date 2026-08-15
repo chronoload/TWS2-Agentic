@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
-"""T2 TDD：切换长会话 → 窗口渲染（≤200）+ 加载更早历史入口 + 点击增长 + 无 JS 错误
-红：前端尚未适配 has_more（无加载入口）→ FAIL；绿：实现后 PASS
+"""T2 TDD（无感版）：切换长会话 → 窗口渲染（≤200）+ 无按钮 + 滚动到顶部自动补载 + 无 JS 错误
 """
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
 from playwright.sync_api import sync_playwright
 
-BASE = "http://127.0.0.1:6908/"
+BASE = "http://127.0.0.1:6907/"
 
 def run():
     with sync_playwright() as p:
@@ -17,9 +16,7 @@ def run():
         page.goto(BASE, wait_until="domcontentloaded", timeout=20000)
         page.wait_for_function("typeof switchToSession === 'function'", timeout=20000)
 
-        # 切到长会话
-        sw = page.evaluate("switchToSession('sess_312047a51c36')")
-        print("switchToSession 返回:", str(sw)[:200])
+        page.evaluate("switchToSession('sess_312047a51c36')")
         page.wait_for_timeout(1500)
 
         # 断言 1：窗口消息数 ≤ 200
@@ -27,24 +24,22 @@ def run():
         print(f"窗口消息数: {count}")
         assert count <= 200, f"FAIL: 窗口 {count} > 200"
 
-        # 断言 2：有"加载更早历史"入口
+        # 断言 2：无按钮（无感滚动加载，无手动入口）
         has_btn = page.evaluate(
             "!!(document.querySelector('[data-load-earlier]') || document.querySelector('.load-earlier'))")
-        print(f"加载更早历史入口: {has_btn}")
-        assert has_btn, "FAIL: 无加载更早历史入口"
+        print(f"加载按钮（应无）: {has_btn}")
+        assert not has_btn, "FAIL: 不应有加载按钮（无感滚动）"
 
-        # 断言 3：点击 → 消息数增长
+        # 断言 3：滚动到顶部 → 自动补载（消息增长 + 滚动位置补偿）
         before = count
-        clicked = page.evaluate("""() => {
-            const el = document.querySelector('[data-load-earlier]') || document.querySelector('.load-earlier');
-            if (el) { el.click(); return true; }
-            return false;
+        page.evaluate("""() => {
+            const c = document.getElementById('agentMessages');
+            if (c) { c.scrollTop = 0; c.dispatchEvent(new Event('scroll')); }
         }""")
-        print(f"点击入口: {clicked}")
         page.wait_for_timeout(2500)
         after = page.evaluate("(state.agentMessages || []).length")
-        print(f"加载后消息数: {after} (前 {before})")
-        assert after > before, f"FAIL: 加载后 {after} 未增长 (前 {before})"
+        print(f"滚动到顶部后消息数: {after} (前 {before})")
+        assert after > before, f"FAIL: 滚动到顶部未自动补载 ({after} == {before})"
 
         # 断言 4：无 JS 错误
         print("JS 错误:", js_errors if js_errors else "无")
