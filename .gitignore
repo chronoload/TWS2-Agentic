@@ -79,3 +79,7 @@ src/.ts2_data/
 
 # 技能市场镜像（模仿 git：主仓库不跟踪远程克隆/市场副本，自演化权威在 skills/）
 src/skills_market/
+
+# throwaway 调试/验证脚本（_ 前缀一次性产物：_t*_*/_diag_*/_verify_*/_test_*/_debug_*/_boot_* 等）
+/src/_*
+!/src/__init__.py

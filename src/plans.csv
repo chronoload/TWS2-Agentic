@@ -44,3 +44,13 @@
 20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,11,T2 注册 langdriven_engine_v1 workflow,done,,,,
 20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,12,T4 验证+提交+同步私有部署,done,,,,
 20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,13,T3 注册 langdriven teammate,done,,,,
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,36,T1 P1后端：switch 响应裁剪（窗口 + has_more）,done,35,1,TDD红：写 _test_switch_window.py（短会话全量无 has_more；长会话 has_more=True 且条数<=200）,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,36,T1 P1后端：switch 响应裁剪（窗口 + has_more）,done,36,2,TDD绿：app.py switch 端点实现窗口裁剪（_build_ui_messages 后取最近 N 条 + has_more/total），复用 _build_ui_messages 单一事实源,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,37,T2 P1前端：切换懒加载（has_more → 滚动/按钮加载 expand）,done,37,1,TDD红：写 _test_switch_lazy.js（切长会话：初始 DOM≈窗口、触发加载后条数增长、无 JS 错误）,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,37,T2 P1前端：切换懒加载（has_more → 滚动/按钮加载 expand）,done,38,2,TDD绿：app.js switchToSession 适配 has_more 懒加载（复用 _expandBackendMessages，摘要卡先行，滚动到底部/按钮触发 expand 分页补载）,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,38,T3 P2后端：消息 schema 归一化（_normalize_message）,done,39,1,TDD红：写 _test_schema_normalize.py（畸形消息：tool_calls=null/function缺name/role=undefined → 输出合法 UI 结构不崩）,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,38,T3 P2后端：消息 schema 归一化（_normalize_message）,done,40,2,TDD绿：app.py _build_ui_messages 加 _normalize_message 防御归一化（tool_calls/function/content/tool_call_id 全兜底），历史漂移不再崩渲染,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,39,T4 P2前端：渲染防御补全（pageerror 可见化 + 畸形兜底）,done,41,1,TDD红：写 _test_render_defense.js（注入畸形消息：tool_calls=null → 页面不崩 + 错误提示可见）,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,39,T4 P2前端：渲染防御补全（pageerror 可见化 + 畸形兜底）,done,42,2,TDD绿：app.js 渲染防御补全（所有渲染路径 Array.isArray/?. 兜底 + pageerror 提示条）,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,40,T5 P3多标签页：会话协调（storage 同步 + 切换广播）,done,43,1,TDD红：写 _test_multi_tab.js（双页：A 切会话 → B storage 事件触发状态同步）,done
+20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,40,T5 P3多标签页：会话协调（storage 同步 + 切换广播）,done,44,2,TDD绿：app.js storage 事件监听 + 会话切换广播 + 轮询防抖（多标签页状态一致）,done
