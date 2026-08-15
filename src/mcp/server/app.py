@@ -669,6 +669,78 @@ def _get_model_selector():
     from ..model_selector import get_model_selector
     return get_model_selector()
 
+
+def _build_ui_messages(messages_source: list, compact_expanded_total: int = 0) -> list:
+    """backend messages → UI 消息（唯一事实源，GET /sessions/{id} 与 /sessions/switch 共用）
+
+    模块级纯函数（可独立测试）。诚实渲染 + schema 归一化（P2 防历史数据漂移崩溃）：
+    - msg 非 dict（None/标量）→ 跳过，不崩（历史数据可能混入畸形项）
+    - system：保留原样（含压缩摘要卡 + expanded_total 元数据，供前端懒加载压缩前快照）
+    - tool：tool_call_id 兜底 ""；向前匹配 assistant.tool_calls 补 tool_name / checkpoint_hash
+    - assistant：content 非 str → str；reasoning_content 思考透传；tool_calls 非 list → 不附
+    - user：content 非 str → str；空 content 跳过
+    """
+    ui_messages = []
+    for msg in messages_source:
+        if not isinstance(msg, dict):
+            continue  # 畸形消息跳过，不中断渲染
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "system":
+            entry = {
+                "role": "system",
+                "content": content if isinstance(content, str) else str(content),
+            }
+            if isinstance(content, str) and content.startswith("[对话历史摘要") and compact_expanded_total > 0:
+                entry["expanded_total"] = compact_expanded_total
+            ui_messages.append(entry)
+        elif role == "tool":
+            tool_call_id = msg.get("tool_call_id", "") or ""
+            tool_content = content if isinstance(content, str) else str(content or "")
+            tool_name = ""
+            checkpoint_hash = msg.get("checkpoint_hash", "") or ""
+            try:
+                for prev in reversed(ui_messages):
+                    if prev.get("role") == "assistant" and isinstance(prev.get("tool_calls"), list):
+                        for tc in prev["tool_calls"]:
+                            tc_dict = tc if isinstance(tc, dict) else {}
+                            if tc_dict.get("id") == tool_call_id:
+                                fn = tc_dict.get("function")
+                                tool_name = fn.get("name", "") if isinstance(fn, dict) else ""
+                                if not checkpoint_hash:
+                                    checkpoint_hash = tc_dict.get("checkpoint_hash", "") or ""
+                                break
+                        break
+            except Exception:
+                pass
+            ui_messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "content": tool_content,
+                "checkpoint_hash": checkpoint_hash,
+            })
+        elif role == "assistant":
+            entry = {
+                "role": "assistant",
+                "content": content if isinstance(content, str) else str(content or ""),
+            }
+            # 思考过程与内容分开透传，前端在同一气泡内按「思考 → 内容 → 工具卡」渲染
+            if msg.get("reasoning_content"):
+                entry["reasoning_content"] = msg["reasoning_content"]
+            tcs = msg.get("tool_calls")
+            if isinstance(tcs, list):
+                entry["tool_calls"] = tcs
+            ui_messages.append(entry)
+        elif role == "user":
+            if content is not None and content != "":
+                ui_messages.append({
+                    "role": "user",
+                    "content": content if isinstance(content, str) else str(content),
+                })
+    return ui_messages
+
+
 def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                port: int = 6906) -> FastAPI:
     """创建 FastAPI 应用实例"""
@@ -7732,70 +7804,6 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         except Exception as _ce:
             logger.debug(f"[compact] expand 失败: {_ce}")
             return 0
-
-    def _build_ui_messages(messages_source: list, compact_expanded_total: int = 0) -> list:
-        """backend messages → UI 消息（唯一事实源，GET /sessions/{id} 与 /sessions/switch 共用）
-
-        诚实渲染规则（防漂移：所有会话视图入口必须走本函数，禁止另写手写简版）：
-        - system：保留原样返回（含压缩摘要卡 + expanded_total 元数据，供前端滚动懒加载压缩前快照）
-        - tool：向前匹配 assistant.tool_calls 补 tool_name / checkpoint_hash
-        - assistant：content + reasoning_content（思考透传）+ tool_calls
-        - user：content
-        """
-        ui_messages = []
-        for msg in messages_source:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "system":
-                entry = {
-                    "role": "system",
-                    "content": content if isinstance(content, str) else str(content),
-                }
-                if isinstance(content, str) and content.startswith("[对话历史摘要") and compact_expanded_total > 0:
-                    entry["expanded_total"] = compact_expanded_total
-                ui_messages.append(entry)
-            elif role == "tool":
-                tool_call_id = msg.get("tool_call_id", "")
-                tool_content = content if isinstance(content, str) else str(content)
-                tool_name = ""
-                checkpoint_hash = msg.get("checkpoint_hash", "")
-                try:
-                    for prev in reversed(ui_messages):
-                        if prev.get("role") == "assistant" and prev.get("tool_calls"):
-                            for tc in prev["tool_calls"]:
-                                tc_dict = tc if isinstance(tc, dict) else {}
-                                if tc_dict.get("id") == tool_call_id:
-                                    tool_name = tc_dict.get("function", {}).get("name", "")
-                                    if not checkpoint_hash:
-                                        checkpoint_hash = tc_dict.get("checkpoint_hash", "")
-                                    break
-                            break
-                except Exception:
-                    pass
-                ui_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "tool_name": tool_name,
-                    "content": tool_content,
-                    "checkpoint_hash": checkpoint_hash,
-                })
-            elif role == "assistant":
-                entry = {
-                    "role": "assistant",
-                    "content": content if isinstance(content, str) else str(content),
-                }
-                # 思考过程与内容分开透传，前端在同一气泡内按「思考 → 内容 → 工具卡」渲染
-                if msg.get("reasoning_content"):
-                    entry["reasoning_content"] = msg["reasoning_content"]
-                if msg.get("tool_calls"):
-                    entry["tool_calls"] = msg["tool_calls"]
-                ui_messages.append(entry)
-            elif role == "user" and content:
-                ui_messages.append({
-                    "role": "user",
-                    "content": content if isinstance(content, str) else str(content),
-                })
-        return ui_messages
 
     def _expand_compact_checkpoint(reloader, cp_id: str, snapshot_msgs: list) -> Optional[list]:
         """压缩视图展开（日志式）：回退到含摘要的检查点时，向上合并最近的完整基底快照，
