@@ -44,6 +44,20 @@
 20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,11,T2 注册 langdriven_engine_v1 workflow,done,,,,
 20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,12,T4 验证+提交+同步私有部署,done,,,,
 20260814_语言驱动引擎包装-skill-workflow-teammate,语言驱动引擎包装（skill+workflow+teammate）,open,2026-08-14 14:46:59,13,T3 注册 langdriven teammate,done,,,,
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,41,T2 chain callers/kw 查询 + cli 注册,done,45,1,TDD红：test_chain_query.py 4 用例 FAIL（chain_callers/chain_kw 不存在）✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,41,T2 chain callers/kw 查询 + cli 注册,done,47,2,实现：chain_callers(上游/下游)+chain_kw(def/use) + cli sub2 注册 + argparse ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,41,T2 chain callers/kw 查询 + cli 注册,done,50,2,验证：6 passed；基线 db 实测 chain callers/kw 有结果 ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,42,T1 calls+refs 双索引扫描持久化,done,49,1,TDD红：test_chain_index.py 2 用例 FAIL（collect_calls_refs 不存在）✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,42,T1 calls+refs 双索引扫描持久化,done,52,1,实现：collect_calls_refs 双索引 + write_db calls/refs 表 + runner 接入 ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,42,T1 calls+refs 双索引扫描持久化,done,51,1,验证：6 passed；macdev 实测 calls=2305 refs=16862，chain callers/kw 查询正常 ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,43,T3 增量编译（LuaTeX 式文件指纹缓存）,done,46,1,TDD红：test_incremental_scan.py 3 用例 FAIL（指纹函数不存在）✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,43,T3 增量编译（LuaTeX 式文件指纹缓存）,done,48,1,实现：file_fingerprint/save/load/changed_file_paths + read_db_calls_refs + runner 增量合并 + 指纹持久化 ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,43,T3 增量编译（LuaTeX 式文件指纹缓存）,done,53,2,验证：3 passed；实测 全量 0.371s vs 增量 0.057s（6.5x），指纹检测 1.5ms ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,44,T5 全量回归 + 基线对比,done,56,1,全量测试：30 passed + 3 预存路径假设失败（test_doc_skill×2/test_split_atoms，非本次回归，已记录 log#63）✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,44,T5 全量回归 + 基线对比,done,57,2,基线对比：defuse 36→39（新代码+3 正常）、calls 2305→4638/refs 16862→33907（代码量增长，增量合并无重复累积）——无回归 ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,45,T4 铁律16 audit优先纪律 + doc 自举,done,62,1,TDD红（形式性）：写入前 SKILL.md 无 audit 优先纪律 ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,45,T4 铁律16 audit优先纪律 + doc 自举,done,63,2,实现完成 ✓,done
+20260815_audit-双索引与增量编译,audit 双索引(calls/refs) + 增量编译 + 铁律16,open,2026-08-15 21:28:47,45,T4 铁律16 audit优先纪律 + doc 自举,done,64,3,TDD绿：SKILL.md 254行 audit 优先纪律 + AUDIT_DOC 76行 chain callers 已验证 ✓,done
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,36,T1 P1后端：switch 响应裁剪（窗口 + has_more）,done,35,1,TDD红：写 _test_switch_window.py（短会话全量无 has_more；长会话 has_more=True 且条数<=200）,done
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,36,T1 P1后端：switch 响应裁剪（窗口 + has_more）,done,36,2,TDD绿：app.py switch 端点实现窗口裁剪（_build_ui_messages 后取最近 N 条 + has_more/total），复用 _build_ui_messages 单一事实源,done
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,37,T2 P1前端：切换懒加载（has_more → 滚动/按钮加载 expand）,done,37,1,TDD红：写 _test_switch_lazy.js（切长会话：初始 DOM≈窗口、触发加载后条数增长、无 JS 错误）,done
@@ -54,3 +68,8 @@
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,39,T4 P2前端：渲染防御补全（pageerror 可见化 + 畸形兜底）,done,42,2,TDD绿：app.js 渲染防御补全（所有渲染路径 Array.isArray/?. 兜底 + pageerror 提示条）,done
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,40,T5 P3多标签页：会话协调（storage 同步 + 切换广播）,done,43,1,TDD红：写 _test_multi_tab.js（双页：A 切会话 → B storage 事件触发状态同步）,done
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,40,T5 P3多标签页：会话协调（storage 同步 + 切换广播）,done,44,2,TDD绿：app.js storage 事件监听 + 会话切换广播 + 轮询防抖（多标签页状态一致）,done
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,46,P0 感知层：插件信号适配（SensoryOrgan→Signal→PerceptionEvent）,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,47,P1 组织层：党组织架构（PartyMember/PartyGroup/上级组织/会议制度）,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,48,P2 治理层：八项权利/义务/批评机制/民主集中,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,49,P3 执行层：PartyMember 真实任务（BattleUnit 抽象 + 茧化）,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,50,P4 前端：three-arena 组织态势视图 + HITL 双通道,open,,,,

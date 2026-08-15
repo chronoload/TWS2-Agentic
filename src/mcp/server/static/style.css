@@ -4885,6 +4885,20 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   font-size: 9px;
   color: var(--fg-muted);
 }
+.status-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+.status-item-id {
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--fg-muted);
+}
 .status-item-stats {
   display: flex;
   align-items: center;

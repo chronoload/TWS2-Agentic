@@ -13435,12 +13435,17 @@ async function sendAgentMessage() {
   try {
     await sendAgentStream(text, attachments);
   } catch (e) {
-    // 流式失败，回退到普通请求
-    console.warn('Stream failed, falling back to sync:', e);
-    try {
-      await sendAgentSync(text, attachments);
-    } catch (e2) {
-      addAgentMessage('assistant', '抱歉，发生了错误: ' + e2.message);
+    // 用户已请求停止：绝不 sync 重发（防止停止后与后端旧任务竞争，停止被吞）
+    if (_agentStopRequested) {
+      console.warn('[Agent] 流式失败但用户已请求停止，不重发（交停止流程收敛）');
+    } else {
+      // 流式失败，回退到普通请求
+      console.warn('Stream failed, falling back to sync:', e);
+      try {
+        await sendAgentSync(text, attachments);
+      } catch (e2) {
+        addAgentMessage('assistant', '抱歉，发生了错误: ' + e2.message);
+      }
     }
   } finally {
     _setAgentStreaming(false, 'local');
@@ -13545,11 +13550,16 @@ async function _doSendMessage(text, attachments) {
   try {
     await sendAgentStream(text, attachments);
   } catch (e) {
-    console.warn('Stream failed, falling back to sync:', e);
-    try {
-      await sendAgentSync(text, attachments);
-    } catch (e2) {
-      addAgentMessage('assistant', '抱歉，发生了错误: ' + e2.message);
+    // 用户已请求停止：绝不 sync 重发（交停止流程收敛，防停止被吞）
+    if (_agentStopRequested) {
+      console.warn('[Agent] 队列消费流式失败但用户已请求停止，不重发');
+    } else {
+      console.warn('Stream failed, falling back to sync:', e);
+      try {
+        await sendAgentSync(text, attachments);
+      } catch (e2) {
+        addAgentMessage('assistant', '抱歉，发生了错误: ' + e2.message);
+      }
     }
   } finally {
     _setAgentStreaming(false, 'local');
@@ -14068,8 +14078,11 @@ async function sendAgentStream(text, attachments) {
         }
       }
       finalizeStreamingMessage();
-      try { if (isCurrentSession()) showToast('❌ 流式连接错误（网络异常或超时）', 'error'); } catch (e) {}
-      reject(new Error('Network error'));
+      // SSE 断开 ≠ 后端停止：后端 agent 在线程池继续执行（工具/压缩可能还在跑），
+      // 这里 resolve 不 reject → 不触发 _doSendMessage catch → 不 sync 重发（避免
+      // 与后端旧任务竞争导致发送/停止被吞）；最终结果交轮询/诚实重建恢复。
+      try { if (isCurrentSession()) showToast('⚠️ 连接中断，将自动恢复显示后端结果', 'warning'); } catch (e) {}
+      resolve();
     };
 
     xhr.onabort = function() {
@@ -14224,13 +14237,21 @@ async function _stopAgentChat() {
         input.focus();
       }
       // 3. 清空后端队列（消息已转移回输入框，避免残留/后续误消费）
-      await fetch(`${API_BASE}/api/agent/queue/clear`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sid || '' })
-      });
+      try {
+        await fetch(`${API_BASE}/api/agent/queue/clear`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sid || '' })
+        });
+      } catch (e) {
+        // 清空失败：消息已放回输入框但队列残留 → 必须提示（否则 badge 滞留/后续误消费）
+        showToast('⚠️ 排队消息已放回输入框，但清空队列失败，稍后刷新队列徽标', 'warning');
+      }
     }
-  } catch (e) {}
+  } catch (e) {
+    // 查询失败：不执行 clear（查询不到就不能清，防消息丢失——静默吞错会让消息永久滞留）
+    showToast('⚠️ 停止时读取排队消息失败，消息未放回（可能仍在队列）', 'warning');
+  }
   // 4. 前端内存队列同步清空（附件排队场景兜底）
   _pendingSendQueue = [];
   _renderPendingSendBadge(0);
@@ -15447,6 +15468,8 @@ function renderAgentStatusList(instances) {
     const statusClass = isStreaming ? 'status-active' : 'status-idle';
     const statusText = isStreaming ? '● 对话中' : '○ 空闲';
     const currentMark = isCurrent ? ' <span style="color:var(--cyan)">[当前]</span>' : '';
+    // 会话标题（后端复用 store 持久化 name），无标题兜底"新对话"
+    const instTitle = (inst.title && String(inst.title).trim()) ? String(inst.title) : '新对话';
     
     return `
       <div class="agent-status-item ${isCurrent ? 'current' : ''} ${isStreaming ? 'active' : ''}" 
@@ -15454,9 +15477,10 @@ function renderAgentStatusList(instances) {
            onclick="_switchToAgentInstance('${inst.session_id}')">
         <div class="status-item-header">
           <span class="status-indicator ${statusClass}">${statusText}</span>
-          <span class="status-session-id">${shortId}${currentMark}</span>
           <span class="status-last-active">${lastActiveText}</span>
         </div>
+        <div class="status-item-title" title="${escapeHtml(instTitle)}">${escapeHtml(instTitle)}</div>
+        <div class="status-item-id">${shortId}${currentMark}</div>
         <div class="status-item-stats">
           <span class="stat-badge stat-user">👤 ${userCount}</span>
           <span class="stat-badge stat-assistant">🤖 ${assistantCount}</span>

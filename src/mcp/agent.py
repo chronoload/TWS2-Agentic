@@ -1057,6 +1057,12 @@ class Agent:
         if not self.messages or len(self.messages) < 10:
             return
 
+        # 可取消：收到停止信号立即跳过压缩（避免长时命令后压缩吞掉 cancel，
+        # 导致对话阻塞——用户点停止后压缩仍同步跑完才响应）
+        if getattr(self, '_cancelled', False):
+            logger.info("上下文压缩已跳过（收到取消信号）")
+            return
+
         try:
             # 获取当前会话已读取的文件列表（参考 Crush FileTracker）
             read_files = self._get_read_files()
@@ -1107,6 +1113,11 @@ class Agent:
             # 步骤 3: 执行 auto_compact
             if HAS_MODERN_PROMPT:
                 from .prompt.context_window import auto_compact
+                # 压缩步骤间可取消：摘要/归档后若收到取消信号，跳过 auto_compact 重写
+                # （压缩是同步多步操作，cancel 在步骤间也能响应，不吞停止）
+                if getattr(self, '_cancelled', False):
+                    logger.info("上下文压缩中断（收到取消信号），跳过 auto_compact")
+                    return
                 # 日志式归档：压缩前保存完整原始消息（供检查点回退时展开找回历史，多次压缩可还原）
                 try:
                     if HAS_CACHE:
@@ -1631,10 +1642,11 @@ class Agent:
         输出: _StageResult —— action=NEXT_ROUND 进入下一轮，
               或 done=True + COMPLETE 结束。
         """
-        if HAS_MODERN_PROMPT:
+        if HAS_MODERN_PROMPT and not self._cancelled:
             est_tokens = self._estimate_message_tokens(self.messages)
             ctx_window = self.model_context_window
             # 工具结果可能携带大量文本：超 65% 即压缩，避免下一轮触硬限
+            # （收到取消信号则不压缩——压缩是同步多步操作，避免吞掉 cancel 造成阻塞）
             if est_tokens > ctx_window * 0.65:
                 logger.warning(
                     f"上下文已使用 {est_tokens}/{ctx_window} tokens "

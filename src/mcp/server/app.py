@@ -6781,7 +6781,25 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
         统一口径：_agent_state_of（is_streaming 为流式权威，is_active 兼容 _chat_active）；
         字段含 last_active_time，消除原三处同构代码的字段漂移（pool-status 端点曾有额外字段）。
+        title：复用 SessionStore 持久化会话名（store.get(sid) 按需取，池实例少不做全量 list）。
         """
+        # 会话标题复用：按需从 store 取持久化 name（锁外 I/O，避免持锁查询）
+        title_map = {}
+        try:
+            store = _get_session_store()
+            if store:
+                with _agent_pool_lock:
+                    _sids = list(_agent_pool.keys())
+                for sid in _sids:
+                    try:
+                        rec = store.get(sid)
+                        if rec is not None and getattr(rec, "name", None):
+                            title_map[sid] = rec.name
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         snapshot = []
         with _agent_pool_lock:
             for sid, agent in list(_agent_pool.items()):
@@ -6807,6 +6825,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
                 snapshot.append({
                     "session_id": sid,
+                    "title": title_map.get(sid, ""),
                     "status": _agent_status_name(agent),
                     "is_active": is_active,
                     "is_streaming": is_streaming,
