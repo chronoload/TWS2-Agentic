@@ -466,6 +466,10 @@ function __fallbackLink(el, urls) {
             <button class="conv-filter" data-filter="active" onclick="filterConvSessions('active')">活跃</button>
             <button class="conv-filter" data-filter="streaming" onclick="filterConvSessions('streaming')">流式中</button>
           </div>
+          <div class="agent-conv-search">
+            <input id="convSearch" type="text" placeholder="🔍 搜索会话（名称/内容）…" spellcheck="false"
+                   oninput="onConvSearchInput(this.value)" />
+          </div>
           <div class="agent-conv-list" id="agentConvList">
             <div class="agent-conv-loading">加载中...</div>
           </div>
@@ -675,6 +679,7 @@ function __fallbackLink(el, urls) {
           <div id="mediaPreviewBar" style="display:none;position:absolute;bottom:calc(100% + 4px);left:8px;right:8px;z-index:9999;flex-wrap:wrap;gap:4px;padding:4px 6px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;box-shadow:0 -4px 16px rgba(0,0,0,.25);max-height:120px;overflow-y:auto"></div>
           <input type="text" id="agentInput" placeholder="输入消息... (可粘贴/拖拽图片或视频，右键呼出方法菜单，输入 / 唤醒技能发现)" autocomplete="off">
           <button id="agentSend">发送</button>
+          <span id="agentPendingQueueBadge" style="display:none;position:absolute;bottom:calc(100% + 6px);left:8px;font-size:11px;color:var(--accent,#e8b64c);background:var(--bg-secondary);border:1px dashed var(--border);border-radius:4px;padding:2px 6px;pointer-events:none"></span>
         </div>
         <!-- Agent 发现面板（Skill/Tool/MCP/Workflow） -->
         <div id="agentDiscoverPanel" style="display:none;position:fixed;z-index:10000;background:var(--bg);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.4);width:460px;max-height:70vh;overflow:hidden;font-size:12px">

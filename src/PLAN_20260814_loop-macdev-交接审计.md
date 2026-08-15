@@ -50,4 +50,4 @@ LoopTask 有 session_id 时：_run_task 回合上下文 = 会话历史（普通�
 
 
 ---
-自动生成: 2026-08-14T21:30:28 由 `macdev plan export`（format=writing-plans）
+自动生成: 2026-08-14T21:53:00 由 `macdev plan export`（format=writing-plans）

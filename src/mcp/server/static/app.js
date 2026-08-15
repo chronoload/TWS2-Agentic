@@ -180,10 +180,13 @@ class TS2Client {
     return await this.api('/api/agent/chat', payload);
   }
 
-  async getAgentSessions() {
+  async getAgentSessions(search) {
     try {
       // cache: 'no-store' 强制每次获取最新会话数据，避免浏览器缓存导致"后端已追加、前端拿旧数据"
-      const res = await fetch(`${API_BASE}/api/agent/sessions`, { cache: 'no-store' });
+      // search: 关键词 → 后端 rg 加速全文搜索（会话名称+消息内容）
+      const q = (search || '').trim();
+      const url = q ? `${API_BASE}/api/agent/sessions?search=${encodeURIComponent(q)}` : `${API_BASE}/api/agent/sessions`;
+      const res = await fetch(url, { cache: 'no-store' });
       return await res.json();
     } catch (e) {
       return { code: -1, msg: e.message };
@@ -10176,6 +10179,28 @@ let _agentLoopPollTimer = null;
 let _seenLoopTasks = {};              // task_id → 已见消息数（同流去重）
 let _seenLoopTaskIds = {};            // task_id → true（提交卡片去重）
 
+// 应用会话级 loop 模式（切会话/恢复/新建时调用）：
+// 同步 _agentLoopMode + selector + placeholder + 轮询启停 + 清跨会话去重残留。
+// 避免 A 会话开 loop → 切到 B 会话仍被当 loop 任务提交（模式串台）。
+function _applyLoopMode(mode) {
+  const wantLoop = mode === true || mode === 'loop';
+  _agentLoopMode = wantLoop;
+  const sel = document.getElementById('agentLoopModeSelector');
+  if (sel) sel.value = _agentLoopMode ? 'loop' : 'normal';
+  const input = document.getElementById('agentInput');
+  if (input) input.placeholder = _agentLoopMode
+    ? '输入自主任务目标… 注入会话，agent 自主循环推进（可随时切回普通对话）'
+    : '输入消息... (可粘贴/拖拽图片或视频，右键呼出方法菜单，输入 / 唤醒技能发现)';
+  if (_agentLoopMode) {
+    _startLoopPolling();
+  } else {
+    _stopLoopPolling();
+  }
+  // 跨会话独立：清 loop 去重残留（新会话的轮询从零开始）
+  _seenLoopTasks = {};
+  _seenLoopTaskIds = {};
+}
+
 function _initAgentLoopMode() {
   const sel = document.getElementById('agentLoopModeSelector');
   const input = document.getElementById('agentInput');
@@ -10208,6 +10233,15 @@ window.setAgentLoopMode = function (value) {
     _stopLoopPolling();
     _seenLoopTasks = {};
     _seenLoopTaskIds = {};
+  }
+  // 持久化会话级模式（spec：会话级模式切换；切会话/刷新时据此恢复）
+  const sid = _getAgentSessionId();
+  if (sid) {
+    fetch(`${API_BASE}/api/agent/session/loop-mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid, loop_mode: _agentLoopMode }),
+    }).catch(function () { /* 静默：持久化失败不影响本次切换 */ });
   }
 };
 
@@ -10922,6 +10956,8 @@ async function _restoreLastSession() {
     
     // 同步 session_id（仅前端引用，不影响后端 Agent 状态）
     _setAgentSessionId(lastSession.id);
+    // 恢复会话级 loop 模式（metadata['loop_mode']，sessions 列表已返回）
+    _applyLoopMode(lastSession.loop_mode);
     _lastAgentStopTime = 0;  // 恢复完成，允许轮询刷新
     
     let restoredMessages = [];
@@ -11089,9 +11125,10 @@ function addAgentMessage(role, content, extra) {
 function _batchSetAgentMessages(msgs) {
   state.agentMessages = msgs.slice();
   _resetFlowNav();
-  for (let i = 0; i < msgs.length; i++) {
-    _addFlowNavBlock(msgs[i].role, msgs[i].content, i, msgs[i]);
-  }
+  // 批量构建导航块（一次全量 rebuild）——旧实现循环逐条 _addFlowNavBlock，
+  // 每条内部都 _rebuildFlowNav() 全量重建 → 超长对话（300+ 条）切换时 O(n²)
+  // 反复重建 DOM 导致切换加载缓慢。_rebuildFlowNavBlocksAll 一次构建 + 一次重建。
+  _rebuildFlowNavBlocksAll();
   renderAgentMessages();
 }
 
@@ -11929,6 +11966,13 @@ var _toolResultHandlers = {
     if (parsed && !parsed.error) {
       var d = parsed.data || {};
       var defs = d.definitions || d.items || d.names || [];
+      // 防御：defs 可能是字符串/对象（异常工具结果格式）→ 归一化为数组，
+      // 避免 defs.map 崩溃导致整个消息渲染中断（会话"假死/切换不了"元凶之一）
+      if (typeof defs === 'string') {
+        defs = defs.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+      } else if (!Array.isArray(defs)) {
+        defs = [];
+      }
       if (!defs || defs.length === 0) return '<div class="tc-friend tc-empty-result"><span class="tc-friend-icon">📋</span><span>无定义</span></div>';
       var rows = defs.map(function(def) {
         var name = typeof def === 'string' ? def : (def.name || def.symbol || String(def));
@@ -13390,21 +13434,35 @@ function _renderPendingSendBadge(n) {
   }
 }
 
-// 打断插入：发送当前打断消息（队首即本条），并同步后端剩余队列长度到徽标
-// 多标签/刷新时以后端持久化队列为准（spec id=7 决策D5=B）
-function _dequeueAndSendNext(sid, text, attachmentsPayload) {
+// 打断插入：从后端持久化队列 dequeue 队首（即打断消息）再发送，并同步剩余队列长度到徽标
+// 多标签/刷新时以后端持久化队列为准（spec id=7 决策D5=B）；dequeue 闭环防止队列只增不减泄漏
+function _dequeueAndSendNext(sid, fallbackText, attachmentsPayload) {
   // 先清前端内存队列（后端已接管持久化）
   _pendingSendQueue = [];
-  // 发送当前打断消息（打断插入语义：立即处理新消息）
-  _doSendMessage(text, attachmentsPayload || {});
-  // 查询后端剩余队列并更新徽标
-  fetch(`${API_BASE}/api/agent/queue?session_id=${encodeURIComponent(sid || '')}`, {
-    cache: 'no-store',
+  // 从后端弹队首（打断消息已由 interrupt 入队）→ 发送 + 徽标=剩余队列
+  fetch(`${API_BASE}/api/agent/queue/dequeue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sid || '' }),
   }).then(function (res) { return res.json(); })
     .then(function (data) {
+      const content = data && data.data && data.data.content;
       const q = data && data.data && data.data.queue_len || 0;
+      // 发送弹出的队首内容（dequeue 空队/失败时回退打断消息本身）
+      _doSendMessage(content || fallbackText, attachmentsPayload || {});
       _renderPendingSendBadge(q);
-    }).catch(function () {});
+    })
+    .catch(function () {
+      // dequeue 失败（后端不可用）：回退发送打断消息 + 查询队列徽标
+      _doSendMessage(fallbackText, attachmentsPayload || {});
+      fetch(`${API_BASE}/api/agent/queue?session_id=${encodeURIComponent(sid || '')}`, {
+        cache: 'no-store',
+      }).then(function (res) { return res.json(); })
+        .then(function (data) {
+          const q = data && data.data && data.data.queue_len || 0;
+          _renderPendingSendBadge(q);
+        }).catch(function () {});
+    });
 }
 
 // 实际发送消息（供流式结束后的队列消费）
@@ -13968,10 +14026,35 @@ async function sendAgentSync(text, attachments) {
 function _isLocalStreaming() {
   return !!(state.agentXHR && state.agentStreaming);
 }
+// 流式看门狗（防假死）：restore/ws 置 streaming=true 但本页无实际 XHR（流式在
+// 其他窗口/后台，或后端状态未及时复位）→ 15s 无本页数据自动复位为 idle，
+// 避免「切到活跃会话显示流式中但无输出」的假死观感。不打断后端活跃任务。
+let _streamWatchdogTimer = null;
+function _clearStreamWatchdog() {
+  if (_streamWatchdogTimer) { clearTimeout(_streamWatchdogTimer); _streamWatchdogTimer = null; }
+}
+function _armStreamWatchdog() {
+  _clearStreamWatchdog();
+  _streamWatchdogTimer = setTimeout(() => {
+    _streamWatchdogTimer = null;
+    if (state.agentStreaming && !_isLocalStreaming()) {
+      console.warn('[Agent] 流式看门狗：15s 无本页数据，复位为 idle');
+      _setAgentStreaming(false, 'watchdog');
+      showToast('会话流式状态已复位（流式可能在其他窗口/已结束）', 'info');
+    }
+  }, 15000);
+}
 function _setAgentStreaming(value, source) {
   const prev = state.agentStreaming;
   state.agentStreaming = value;
   if (prev === value) return;  // 值未变不触发重渲染
+  // 流式看门狗接线：本页真实流式（local）清除；restore/ws 置 true 时武装（防假死）
+  if (value) {
+    if (source === 'local') _clearStreamWatchdog();
+    else _armStreamWatchdog();
+  } else {
+    _clearStreamWatchdog();
+  }
   updateAgentSendButton();
   const typing = document.getElementById('agentTyping');
   if (typing) typing.classList.toggle('show', value);
@@ -14664,13 +14747,23 @@ document.addEventListener('click', (e) => {
 
 // ─── Agent 会话管理 ──────────────────────────────────
 
-async function showAgentSessions() {
-  const res = await client.getAgentSessions();
+let _sessionModalSearchTimer = null;
+// 历史会话模态框搜索输入 → 防抖 300ms → 重新加载（后端 rg 全文搜索）
+function onSessionModalSearch(value) {
+  if (_sessionModalSearchTimer) clearTimeout(_sessionModalSearchTimer);
+  _sessionModalSearchTimer = setTimeout(() => {
+    showAgentSessions((value || '').trim());
+  }, 300);
+}
+
+async function showAgentSessions(searchKw) {
+  const kw = (searchKw || '').trim();
+  const res = await client.getAgentSessions(kw);
   if (res.code !== 0 || !res.data) return;
   
   // 后端返回格式: { sessions: [...], total: N, ... }
   const sessions = res.data.sessions || res.data;
-  if (!sessions || !sessions.length) {
+  if ((!sessions || !sessions.length) && !kw) {
     showToast('暂无历史会话');
     return;
   }
@@ -14684,7 +14777,10 @@ async function showAgentSessions() {
     document.body.appendChild(modal);
   }
   
-  const items = sessions.map(s => {
+  const emptyHtml = !sessions || !sessions.length
+    ? '<div class="session-empty">无匹配会话</div>'
+    : '';
+  const items = (sessions || []).map(s => {
     const ts = s.timestamp;
     const time = ts > 1e12 ? new Date(ts) : new Date(ts * 1000);
     const timeStr = `${time.getMonth()+1}/${time.getDate()} ${time.getHours()}:${String(time.getMinutes()).padStart(2,'0')}`;
@@ -14695,6 +14791,7 @@ async function showAgentSessions() {
         <span class="session-meta">${timeStr} · ${s.message_count}条消息</span>
       </div>
       <div class="session-item-actions">
+        <button class="session-rename-btn" data-id="${s.id}" data-name="${escapeHtml(preview)}">重命名</button>
         <button class="session-load-btn" data-id="${s.id}">载入</button>
         <button class="session-del-btn" data-id="${s.id}">✕</button>
       </div>
@@ -14706,7 +14803,11 @@ async function showAgentSessions() {
       <h3>历史会话</h3>
       <button class="modal-close" onclick="closeSessionModal()">✕</button>
     </div>
-    <div class="session-list">${items}</div>
+    <div class="session-modal-search">
+      <input id="sessionModalSearch" type="text" placeholder="🔍 搜索会话（名称/内容，rg 加速）…" spellcheck="false"
+             value="${escapeHtml(kw)}" oninput="onSessionModalSearch(this.value)">
+    </div>
+    <div class="session-list">${emptyHtml || items}</div>
   </div>`;
   modal.classList.add('show');
   
@@ -14725,6 +14826,14 @@ async function showAgentSessions() {
       btn.closest('.session-item').remove();
     });
   });
+  modal.querySelectorAll('.session-rename-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      renameAgentSession(btn.dataset.id, btn.getAttribute('data-name') || '');
+    });
+  });
+  // 搜索框聚焦（重开时便于直接输入）
+  const sInput = document.getElementById('sessionModalSearch');
+  if (sInput && !kw) setTimeout(() => { try { sInput.focus(); } catch (e) {} }, 80);
 }
 
 function closeSessionModal() {
@@ -14745,6 +14854,8 @@ async function createNewSession() {
     } else {
       _resetAgentSessionId();
     }
+    // 新会话默认普通对话（loop 模式不继承自旧会话）
+    _applyLoopMode(false);
     // 清空聊天显示
     state.agentMessages = [];
     state.agentXHR = null;
@@ -14778,6 +14889,8 @@ async function switchToSession(sessionId) {
   }
   
   _setAgentSessionId(sessionId);
+  // 会话级 loop 模式恢复（后端返回 metadata['loop_mode']），防止 A 会话 loop 串台到 B
+  _applyLoopMode(res.data.loop_mode);
   state.agentMessages = [];
   _resetFlowNav();
   _lastAgentStopTime = 0;  // 已主动切换，允许轮询刷新
@@ -14789,44 +14902,13 @@ async function switchToSession(sessionId) {
   // 标记会话状态（单写者：restore 来源）
   _setAgentStreaming(isStreaming || source === 'agent_live', 'restore');
   
-  // 渲染消息（与 _restoreLastSession 相同的逻辑）
+  // 渲染消息（统一复用 _expandBackendMessages：处理压缩摘要卡 isCompactSummary、
+  // tool 归档、assistant tool_calls 展开，与 _restoreLastSession/_renderBackendHonestly 对齐。
+  // 旧手写简版只保留 role+content 且丢弃 system 压缩摘要卡 → 切换会话后压缩前快照
+  // 无法显示、滚动加载无法触发——本修复根治该「两处逻辑漂移」bug）
   if (restoredMessages.length > 0) {
-    const toolResults = {};
-    const toolCpHashes = {};
-    for (const msg of restoredMessages) {
-      if (msg.role === 'tool') {
-        const tcId = msg.tool_call_id || '';
-        if (tcId) {
-          toolResults[tcId] = msg.content || '';
-          if (msg.checkpoint_hash) toolCpHashes[tcId] = msg.checkpoint_hash;
-        }
-      }
-    }
-    
-    // 先收集到 uiMsgs 数组，最后统一 _batchSetAgentMessages 一次性渲染，
-    // 避免超长对话逐条 addAgentMessage 反复全量重算窗口导致显示停留在错误切片
-    const uiMsgs = [];
-    for (const msg of restoredMessages) {
-      if (msg.role === 'tool') continue;
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length) {
-        if (msg.content) uiMsgs.push({ role: 'assistant', content: msg.content });
-        for (const tc of msg.tool_calls) {
-          const tcDict = typeof tc === 'object' ? tc : {};
-          const func = tcDict.function || {};
-          let args = {};
-          try { args = typeof func.arguments === 'string' ? JSON.parse(func.arguments) : (func.arguments || {}); } catch {}
-          const tcId = tcDict.id || tcDict.tool_call_id || '';
-          const tcResult = tcId && toolResults[tcId] !== undefined ? toolResults[tcId] : '';
-          const tcStatus = tcResult ? 'done' : 'completed';
-          const cpHash = (tcId && toolCpHashes[tcId]) || tcDict.checkpoint_hash || '';
-          uiMsgs.push({ role: 'tool_call', content: '', name: func.name || '', args, result: tcResult, status: tcStatus, toolCallId: tcId, checkpointHash: cpHash });
-        }
-      } else if (msg.role === 'assistant') {
-        uiMsgs.push({ role: 'assistant', content: msg.content });
-      } else if (msg.role === 'user') {
-        uiMsgs.push({ role: 'user', content: msg.content });
-      }
-    }
+    const uiMsgs = _expandBackendMessages(restoredMessages);
+    // 一次性渲染（避免超长对话逐条 addAgentMessage 反复全量重算窗口）
     _batchSetAgentMessages(uiMsgs);
     
     updateSessionInfo(`${restoredMessages.length}条消息`);
@@ -14849,6 +14931,17 @@ function updateSessionInfo(text) {
 
 // ─── 会话管理侧边栏 ──────────────────────────────────────────
 let _convFilter = 'all';  // 当前过滤器
+let _convSearchKw = '';   // 搜索关键词（后端 rg 全文搜索：名称+消息内容）
+let _convSearchTimer = null;
+
+// 搜索框输入 → 防抖 300ms 后按关键词刷新（后端 rg 加速全文搜索）
+function onConvSearchInput(value) {
+  if (_convSearchTimer) clearTimeout(_convSearchTimer);
+  _convSearchTimer = setTimeout(() => {
+    _convSearchKw = (value || '').trim();
+    refreshConvSidebar();
+  }, 300);
+}
 
 function toggleConvSidebar() {
   const sidebar = document.getElementById('agentConvSidebar');
@@ -14880,13 +14973,13 @@ async function refreshConvSidebar() {
   if (!list) return;
   list.innerHTML = '<div class="agent-conv-loading">加载中...</div>';
   try {
-    const res = await client.getAgentSessions();
+    const res = await client.getAgentSessions(_convSearchKw);
     if (res.code !== 0 || !res.data) {
       throw new Error(res.msg || '加载失败');
     }
     let sessions = res.data.sessions || [];
     
-    // 根据过滤器筛选
+    // 根据过滤器筛选（与搜索叠加：搜索由后端 rg 完成，过滤在前端）
     if (_convFilter === 'active') {
       sessions = sessions.filter(s => s.is_active || s.is_streaming);
     } else if (_convFilter === 'streaming') {
@@ -14959,17 +15052,29 @@ function renderConvSidebar(sessions, data) {
           ${statusBadge}
         </div>
       </div>
-      <button class="conv-item-del" data-id="${escapeHtml(s.id)}" title="删除">✕</button>
+      <div class="conv-item-actions">
+        <button class="conv-item-rename" data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(preview)}" title="重命名">✏️</button>
+        <button class="conv-item-del" data-id="${escapeHtml(s.id)}" title="删除">✕</button>
+      </div>
     </div>`;
   }).join('');
 
   list.querySelectorAll('.agent-conv-item').forEach(item => {
     item.addEventListener('click', async (e) => {
       if (e.target.closest('.conv-item-del')) return;
+      if (e.target.closest('.conv-item-rename')) return;
       const id = item.dataset.id;
       if (id === _getAgentSessionId()) { _closeConvSidebar(); return; }
       await switchToSession(id);
       _closeConvSidebar();
+    });
+  });
+  
+  // 重命名按钮：✏️ → modalPrompt 输入新名（留空恢复自动命名）→ 后端 rename → 刷新
+  list.querySelectorAll('.conv-item-rename').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      renameAgentSession(btn.dataset.id, btn.getAttribute('data-name') || '');
     });
   });
   
@@ -14993,6 +15098,33 @@ function renderConvSidebar(sessions, data) {
       }
     });
   });
+}
+
+// 自定义命名会话：✏️ → modalPrompt 输入新名（留空=恢复自动命名）→ 后端 rename → 刷新
+async function renameAgentSession(sessionId, currentName) {
+  const name = await modalPrompt('输入会话名称（留空恢复自动命名）', currentName || '');
+  if (name === null) return;  // 取消
+  const trimmed = (name || '').trim();
+  try {
+    const res = await fetch(`${API_BASE}/api/agent/session/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, name: trimmed }),
+    });
+    const json = await res.json();
+    if (json && json.code === 0 && json.data && json.data.renamed) {
+      showToast('已重命名', 'success');
+      // 当前会话同步顶部标题（手动命名优先，自动命名用后端返回值）
+      if (sessionId === _getAgentSessionId()) {
+        updateSessionInfo(json.data.name || trimmed || '新对话');
+      }
+      refreshConvSidebar();
+    } else {
+      showToast('重命名失败: ' + ((json && json.msg) || '未知错误'), 'error');
+    }
+  } catch (e) {
+    showToast('重命名失败: ' + e.message, 'error');
+  }
 }
 
 // ─── Agent 实例状态面板 ──────────────────────────────────────

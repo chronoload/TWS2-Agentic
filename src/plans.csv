@@ -21,6 +21,18 @@
 20260814_loop-会话级模式切换,loop 会话级模式切换,open,2026-08-14 21:11:11,25,T3 前端：模式开关 + 同流渲染,open,,,,
 20260814_loop-会话级模式切换,loop 会话级模式切换,open,2026-08-14 21:11:11,26,T1 数据层：session_id + turn 事件,open,,,,
 20260814_loop-会话级模式切换,loop 会话级模式切换,open,2026-08-14 21:11:11,27,T2 API 层：submit 带 session + 按会话查询,open,,,,
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,32,T2 loop API + 前端：入队端点 + 队列显示,done,26,1,写失败测试：loop_task_message 返回 queue_len/pending_inputs + PAUSED 不再 409,open
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,32,T2 loop API + 前端：入队端点 + 队列显示,done,27,2,实现：loop_api.py 入队端点（enqueue_input）+ loop-panel.js 队列徽标与列表渲染,open
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,32,T2 loop API + 前端：入队端点 + 队列显示,done,28,3,回归：API 测试转绿；浏览器验证队列徽标显示（Playwright）,open
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,33,T1 loop 数据层：pending_inputs FIFO 队列,done,23,1,写失败测试：enqueue 两条不覆盖 + FIFO pop(0) 顺序消费 + PAUSED 允许入队,done
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,33,T1 loop 数据层：pending_inputs FIFO 队列,done,24,2,实现：LoopTask.pending_inputs:List[str] + enqueue_input() append + _run_task pop(0) 消费 + snapshot 暴露,done
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,33,T1 loop 数据层：pending_inputs FIFO 队列,done,25,3,回归：队列相关测试转绿，既有测试保持绿,done
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,34,T4 普通模式前端：打断插入 + 队列同步 + 徽标,done,32,1,写失败测试：前端逻辑——流式中发送转 interrupt（fetch mock 断言 interrupt 调用 + 队列同步）,done
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,34,T4 普通模式前端：打断插入 + 队列同步 + 徽标,done,33,2,实现：app.js 解锁流式入口（Enter/发送→interrupt）+ 队列双向同步 + 徽标提示,done
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,34,T4 普通模式前端：打断插入 + 队列同步 + 徽标,done,34,3,回归：前端测试转绿 + 浏览器验证打断插入/徽标（Playwright）,done
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,35,T3 普通模式数据层 + API：持久化队列 + interrupt 端点,done,29,1,写失败测试：test_agent_queue.py——enqueue/dequeue 持久化 + interrupt 端点打断 + 队列消费顺序,done
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,35,T3 普通模式数据层 + API：持久化队列 + interrupt 端点,done,30,2,实现：session_store.py pending_queue 方法（enqueue/dequeue/peek/clear/len）+ app.py 队列端点与 interrupt 端点（agent.cancel + 入队）,done
+20260814_msg-queue-fifo,FIFO 消息队列 + 运行时插入（loop 自主 + 普通模式）,open,2026-08-14 22:42:54,35,T3 普通模式数据层 + API：持久化队列 + interrupt 端点,done,31,3,回归：test_agent_queue.py 转绿 + 既有 agent API 测试保持绿,done
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,5,T3 PLAN.md 更新,done,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,6,T2 skills/ 14 个子技能文档,done,,,,
 20260814_superpowers-全整合进-macdev-形态C-混合,superpowers 全整合进 macdev（形态C 混合）,open,2026-08-14 13:52:19,7,T1 SKILL.md 流程编排重写,done,,,,

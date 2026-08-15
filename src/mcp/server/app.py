@@ -312,6 +312,30 @@ class AgentLoopGoalRequest(BaseModel):
     session_id: str = ""
 
 
+class AgentQueueRequest(BaseModel):
+    """普通模式待发送队列请求（spec id=7）：入队一条 user 消息"""
+    session_id: str = ""
+    content: str
+
+
+class AgentQueueDequeueRequest(BaseModel):
+    """待发送队列弹出请求（只读队首消费，无需 content）"""
+    session_id: str = ""
+
+
+class AgentLoopModeRequest(BaseModel):
+    """会话级 loop 模式持久化请求（spec：会话级模式切换）"""
+    session_id: str = ""
+    loop_mode: bool = False
+
+
+class AgentInterruptRequest(BaseModel):
+    """普通模式打断插入请求（spec id=7，决策D4=B）：
+    流式生成中发新消息 → agent.cancel() 打断当前 SSE + content 入队"""
+    session_id: str = ""
+    content: str
+
+
 # ─── 工具函数 ────────────────────────────────────────────────
 
 def get_local_ip() -> str:
@@ -5680,6 +5704,28 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             logger.error(f"session rename error: {e}")
             return err(msg=f"重命名失败: {e}")
 
+    @app.post("/api/agent/session/loop-mode")
+    async def agent_session_loop_mode(req: AgentLoopModeRequest):
+        """会话级 loop 模式持久化（metadata['loop_mode']）：
+
+        前端切换「对话模式」时调用；切换会话/刷新时由 switch/sessions 接口返回，
+        避免 loop 模式全局串台（A 会话开 loop → 切到 B 会话仍被当 loop 任务提交）。
+        """
+        try:
+            store = _get_session_store()
+            if store is None or not req.session_id:
+                return err(msg="会话存储不可用")
+            record = store.get(req.session_id)
+            if record is None:
+                return err(msg=f"会话不存在: {req.session_id}")
+            metadata = dict(record.metadata or {})
+            metadata["loop_mode"] = bool(req.loop_mode)
+            store.update(req.session_id, metadata=metadata)
+            return ok(data={"session_id": req.session_id, "loop_mode": bool(req.loop_mode)})
+        except Exception as e:
+            logger.error(f"session loop-mode error: {e}")
+            return err(msg=f"设置 loop 模式失败: {e}")
+
     class AgentPluginActivateRequest(BaseModel):
         """插件激活请求：真正加载插件并注册其工具到 agent"""
         plugin_name: str
@@ -6142,6 +6188,73 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             agent.cancel()
             return ok(data={"cancelled": True})
         return ok(data={"cancelled": False})
+
+    # ─── 普通模式待发送队列（spec id=7）：SessionStore.metadata 持久化，刷新/多标签共享 ───
+
+    @app.post("/api/agent/queue/enqueue")
+    async def agent_queue_enqueue(req: AgentQueueRequest):
+        """入队一条 user 消息（流式中排队，FIFO 消费）"""
+        store = _get_session_store()
+        qlen = store.enqueue_pending(req.session_id, req.content)
+        return ok(data={"ok": True, "queue_len": qlen})
+
+    @app.get("/api/agent/queue")
+    async def agent_queue_query(session_id: str = ""):
+        """查询会话待发送队列（含全部待发送消息 + 长度）"""
+        store = _get_session_store()
+        items = []
+        # 遍历队列（peek 循环不弹队：用临时读取；直接读 metadata）
+        record = store.get(session_id) if session_id else None
+        if record is not None:
+            from mcp.harness.session_store import SessionRecord
+            q = (record.metadata or {}).get("pending_queue")
+            items = list(q) if isinstance(q, list) else []
+        return ok(data={"items": items, "queue_len": len(items)})
+
+    @app.post("/api/agent/queue/clear")
+    async def agent_queue_clear(req: AgentQueueRequest):
+        """清空队列"""
+        store = _get_session_store()
+        n = store.clear_pending_queue(req.session_id)
+        return ok(data={"cleared": n})
+
+    @app.post("/api/agent/queue/dequeue")
+    async def agent_queue_dequeue(req: AgentQueueDequeueRequest):
+        """弹出队首（FIFO 消费）：返回被弹出的 content + 剩余队列长度。
+
+        打断插入链路闭环：前端 interrupt 入队 → 消费时 dequeue 队首再发送，
+        保证持久化队列只保留真正待发送的消息（此前只入队不弹队导致泄漏）。
+        """
+        store = _get_session_store()
+        content = store.pending_queue_dequeue(req.session_id)
+        qlen = store.pending_queue_len(req.session_id)
+        return ok(data={
+            "content": content,
+            "queue_len": qlen,
+        })
+
+    @app.post("/api/agent/chat/interrupt")
+    async def agent_chat_interrupt(req: AgentInterruptRequest):
+        """打断插入（spec id=7，决策D4=B）：agent.cancel() 终止当前 SSE + content 入队。
+
+        前端流式中发新消息 → 调用本端点 → 当前生成被终止（已生成内容保留为历史），
+        新消息入队；前端随后消费队首立即发送（打断插入语义）。
+        """
+        agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
+        cancelled = False
+        if agent and hasattr(agent, 'cancel'):
+            try:
+                agent.cancel()
+                cancelled = True
+            except Exception:
+                cancelled = False
+        store = _get_session_store()
+        qlen = store.enqueue_pending(req.session_id, req.content)
+        return ok(data={
+            "ok": True,
+            "cancelled": cancelled,
+            "queue_len": qlen,
+        })
 
     @app.post("/api/agent/reset")
     async def agent_reset(req: Request):
@@ -6629,11 +6742,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         return snapshot
 
     @app.get("/api/agent/sessions")
-    async def agent_sessions(include_checkpoint: bool = False):
+    async def agent_sessions(include_checkpoint: bool = False, search: str = ""):
         """列出所有会话 — 统一状态容器，每个ID只出现一次
-        
+
         Args:
             include_checkpoint: 是否包含检查点会话（默认 False）
+            search: 关键词搜索（rg 加速全文搜索会话名称+消息内容，空=不过滤）
         """
         # 使用字典按 session_id 存储，确保唯一性
         session_map = {}
@@ -6667,6 +6781,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                         "source": "session_store",
                         "is_active": False,
                         "is_streaming": False,
+                        "loop_mode": bool((r.metadata or {}).get("loop_mode", False)),
                     }
             except Exception as e:
                 logger.warning(f"SessionStore list error: {e}")
@@ -6730,7 +6845,19 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                             "is_streaming": is_streaming,
                         }
 
-        # 3. 转换为列表并排序
+        # 3. 关键词搜索过滤（rg 加速全文搜索会话名称+消息内容，失败/无关键词跳过）
+        kw = (search or "").strip()
+        if kw:
+            try:
+                from .session_search import search_session_ids
+                store_search = _get_session_store()
+                matched = search_session_ids(str(store_search.store_dir), kw) if store_search else None
+                if matched is not None:
+                    session_map = {sid: v for sid, v in session_map.items() if sid in matched}
+            except Exception as e:
+                logger.warning(f"session search failed: {e}")
+
+        # 4. 转换为列表并排序
         sessions = list(session_map.values())
         sessions.sort(key=lambda s: s.get("last_accessed") or s.get("timestamp", 0), reverse=True)
         
@@ -7087,12 +7214,34 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 
                 logger.info(f"[switch] Session '{req.session_id[:12]}' activated: {len(messages_source)} msgs (source={source_type})")
                 
-                # 构造 UI 消息列表
+                # 【压缩视图】计算展开历史总数（对齐 GET /sessions/{id}）：
+                # 压缩摘要 system 消息附带 expanded_total，前端据此生成摘要卡并分页懒加载压缩前快照
+                compact_expanded_total = 0
+                try:
+                    if _has_compact_summary(messages_source):
+                        from ..cache.context_reloader import get_context_reloader
+                        _rel = get_context_reloader()
+                        _cex = _expand_for_snapshot(_rel, messages_source)
+                        compact_expanded_total = len(_cex) if _cex else 0
+                except Exception as _ce:
+                    logger.debug(f"[switch] compact expand 失败: {_ce}")
+                
+                # 构造 UI 消息列表（诚实渲染：system 消息保留——与 GET /sessions/{id} 一致，
+                # 压缩摘要卡供前端滚动懒加载压缩前快照。旧逻辑 continue 剔除 system，
+                # 导致切换会话后压缩历史不可见/不可加载）
                 ui_messages = []
                 for msg in messages_source:
                     role = msg.get("role", "")
                     content = msg.get("content", "")
                     if role == "system":
+                        entry = {
+                            "role": "system",
+                            "content": content if isinstance(content, str) else str(content),
+                        }
+                        # 压缩摘要：附带可找回总数（内容由 expand 端点分页懒加载）
+                        if isinstance(content, str) and content.startswith("[对话历史摘要") and compact_expanded_total > 0:
+                            entry["expanded_total"] = compact_expanded_total
+                        ui_messages.append(entry)
                         continue
                     if role == "tool":
                         tool_call_id = msg.get("tool_call_id", "")
@@ -7144,6 +7293,14 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             
             ui_messages = await asyncio.get_event_loop().run_in_executor(None, _switch_session)
             if ui_messages is not None:
+                # 会话级 loop 模式（metadata['loop_mode']）：切会话时前端据此恢复输入模式
+                loop_mode = False
+                try:
+                    target_rec = store.get(req.session_id) if store else None
+                    if target_rec is not None:
+                        loop_mode = bool((target_rec.metadata or {}).get("loop_mode", False))
+                except Exception:
+                    loop_mode = False
                 return ok(data={
                     "switched": True,
                     "session_id": req.session_id,
@@ -7151,6 +7308,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     "is_streaming": session_is_streaming,
                     "is_active": session_is_active,
                     "source": "agent_live" if (session_is_streaming or session_is_active) else "session_store",
+                    "loop_mode": loop_mode,
                 })
             else:
                 return ok(data={"switched": False, "error": "会话不存在"})

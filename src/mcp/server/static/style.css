@@ -4542,6 +4542,27 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   color: #fff;
   border-color: var(--accent);
 }
+.agent-conv-search {
+  padding: 8px 12px 2px;
+  flex-shrink: 0;
+}
+.agent-conv-search input,
+.session-modal-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  color: var(--fg);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.agent-conv-search input:focus,
+.session-modal-search input:focus {
+  border-color: var(--accent);
+}
 .agent-conv-list {
   flex: 1;
   overflow-y: auto;
@@ -4651,6 +4672,12 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   background: rgba(74, 222, 128, 0.15);
   color: #4ade80;
 }
+.agent-conv-item .conv-item-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.agent-conv-item .conv-item-rename,
 .agent-conv-item .conv-item-del {
   background: none;
   border: none;
@@ -4663,8 +4690,14 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   transition: opacity 0.15s, background 0.15s, color 0.15s;
   flex-shrink: 0;
 }
+.agent-conv-item:hover .conv-item-rename,
 .agent-conv-item:hover .conv-item-del {
   opacity: 0.6;
+}
+.agent-conv-item .conv-item-rename:hover {
+  opacity: 1;
+  background: var(--bg-tertiary);
+  color: var(--accent);
 }
 .agent-conv-item .conv-item-del:hover {
   opacity: 1;
@@ -5289,6 +5322,11 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
 }
+/* 触底反弹：下方空间不足时向上展开（top:auto 避免 top+bottom 同时定位导致拉伸） */
+.harness-panel.up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
 .harness-row {
   display: flex;
   align-items: center;
@@ -5404,6 +5442,29 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
 .session-del-btn:hover {
   color: #ef4444;
   border-color: #ef4444;
+}
+.session-rename-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.session-rename-btn:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--accent);
+}
+.session-modal-search {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.session-empty {
+  text-align: center;
+  padding: 32px 12px;
+  color: var(--fg-muted);
+  font-size: 12px;
 }
 
 .agent-typing {
@@ -8327,6 +8388,10 @@ pre.rmd-chunk::first-line {
 .lp-tool-card pre { margin: 3px 0 0; padding: 3px 6px; background: rgba(0,0,0,.25); border-radius: 3px; font-size: 9px; overflow-x: auto; }
 .lp-intervene { display: flex; gap: 6px; margin-top: 8px; }
 .lp-intervene-input { flex: 1; padding: 4px 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--fg); font-size: 11px; outline: none; }
+.lp-queue { margin-top: 8px; padding: 6px 8px; background: var(--bg-tertiary); border: 1px dashed var(--border); border-radius: 4px; }
+.lp-queue-badge { display: inline-block; font-size: 10px; color: var(--accent, #e8b64c); margin-bottom: 4px; }
+.lp-queue-list { margin: 0; padding-left: 16px; font-size: 10px; color: var(--fg-secondary); }
+.lp-queue-item { margin: 2px 0; word-break: break-all; }
 .lp-intervene-send { padding: 4px 10px; background: var(--accent); color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
 .lp-loading, .lp-empty { color: var(--fg-muted); font-size: 11px; padding: 6px 2px; }
 .lp-badge { padding: 1px 6px; border-radius: 8px; font-size: 10px; }

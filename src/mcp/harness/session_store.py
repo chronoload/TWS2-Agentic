@@ -139,6 +139,77 @@ class SessionStore:
         self._save(record)
         self._dirty = True
 
+    # ── 普通模式待发送队列（spec id=7）：metadata['pending_queue'] 持久化，刷新/多标签共享 ──
+
+    def _pending_queue(self, record: SessionRecord) -> list:
+        """读取会话待发送队列（缺省空列表，容错非 list 值）"""
+        q = (record.metadata or {}).get("pending_queue")
+        return list(q) if isinstance(q, list) else []
+
+    def enqueue_pending(self, session_id: str, content: str) -> int:
+        """追加一条待发送消息到队列（FIFO），返回队列长度"""
+        record = self.get(session_id)
+        if record is None:
+            return 0
+        metadata = dict(record.metadata or {})
+        q = self._pending_queue(record)
+        q.append(content)
+        metadata["pending_queue"] = q
+        record.metadata = metadata
+        record.updated_at = time.time()
+        self._save(record)
+        self._dirty = True
+        return len(q)
+
+    def pending_queue_dequeue(self, session_id: str) -> Optional[str]:
+        """弹出队首（FIFO），空队列返回 None"""
+        record = self.get(session_id)
+        if record is None:
+            return None
+        q = self._pending_queue(record)
+        if not q:
+            return None
+        item = q.pop(0)
+        metadata = dict(record.metadata or {})
+        metadata["pending_queue"] = q
+        record.metadata = metadata
+        record.updated_at = time.time()
+        self._save(record)
+        self._dirty = True
+        return item
+
+    def pending_queue_peek(self, session_id: str) -> Optional[str]:
+        """查看队首（不弹出），空队列返回 None"""
+        record = self.get(session_id)
+        if record is None:
+            return None
+        q = self._pending_queue(record)
+        return q[0] if q else None
+
+    def pending_queue_len(self, session_id: str) -> int:
+        """队列长度（会话不存在返回 0，不报错）"""
+        record = self.get(session_id)
+        if record is None:
+            return 0
+        return len(self._pending_queue(record))
+
+    def clear_pending_queue(self, session_id: str) -> int:
+        """清空队列，返回清空条数"""
+        record = self.get(session_id)
+        if record is None:
+            return 0
+        q = self._pending_queue(record)
+        n = len(q)
+        if n == 0:
+            return 0
+        metadata = dict(record.metadata or {})
+        metadata["pending_queue"] = []
+        record.metadata = metadata
+        record.updated_at = time.time()
+        self._save(record)
+        self._dirty = True
+        return n
+
     def merge_sessions(self, source_id: str, target_id: str) -> bool:
         """合并会话 - 将 source 的消息合并到 target，然后删除 source"""
         source = self.get(source_id)

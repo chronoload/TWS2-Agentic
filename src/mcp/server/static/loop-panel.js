@@ -144,6 +144,18 @@
       var controls = '<span class="lp-ctrl" data-ctrl="pause">⏸ 暂停</span>'
         + '<span class="lp-ctrl" data-ctrl="resume">▶ 继续</span>'
         + '<span class="lp-ctrl" data-ctrl="stop">⏹ 停止</span>';
+      // 待消费队列（spec id=6）：snapshot 暴露 pending_inputs/queue_len
+      var qlen = task.queue_len || 0;
+      var queueHtml = '';
+      if (qlen > 0) {
+        var items = (task.pending_inputs || []).map(function (m, i) {
+          return '<li class="lp-queue-item">' + (i + 1) + '. ' + esc(m) + '</li>';
+        }).join('');
+        queueHtml = '<div class="lp-queue">'
+          + '<span class="lp-queue-badge">📥 待消费 ' + qlen + ' 条</span>'
+          + '<ul class="lp-queue-list">' + items + '</ul>'
+          + '</div>';
+      }
       return '<div class="lp-detail-head">'
         + statusBadge(task.status)
         + ' <span class="lp-goal">' + esc(task.goal) + '</span>'
@@ -152,6 +164,7 @@
         + '</div>'
         + '<div class="lp-controls">' + controls + '</div>'
         + '<div class="lp-thread">' + renderLoopThread(task.messages || []) + '</div>'
+        + queueHtml
         + (canIntervene
             ? '<div class="lp-intervene">'
               + '<input class="lp-intervene-input" type="text" placeholder="向 loop 追加指令（审核介入）…" />'
