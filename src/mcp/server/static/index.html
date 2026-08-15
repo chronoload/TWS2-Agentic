@@ -14,6 +14,28 @@
 })();
 </script>
 <script>
+// ─── 主题初始化兜底（不依赖 app.js 完整执行）───
+// app.js 是巨型同步脚本（28k 行），若其前部任意一行抛错 → 尾部 initOnLoad IIFE 不执行
+// → 保存的主题/下拉/开关在初始化时不生效（表现为"必须点设置 nav 才加载"——设置 nav 有兜底 handler）。
+// 此处注册 DOMContentLoaded 兜底：app.js 已加载但注册表为空 → 补初始化（幂等，可重入）。
+function __themeInitFallback() {
+  try {
+    if (typeof window.initThemeRegistry !== 'function') return;  // app.js 未加载（函数不存在）
+    var reg = window.__TS2_THEME_REGISTRY;
+    if (reg && Object.keys(reg).length > 0) return;  // 已初始化（initOnLoad 已跑）→ 跳过
+    if (window.__TS2_THEME_MANIFEST) {
+      window.initThemeRegistry(window.__TS2_THEME_MANIFEST);      // 同步注册表 + 填充下拉
+    }
+    if (typeof window.initThemeToggle === 'function') window.initThemeToggle();  // 应用保存主题 + 同步开关
+    if (typeof window.loadThemeRegistry === 'function') window.loadThemeRegistry();  // 异步刷新主题目录
+  } catch (e) { console.warn('[theme] 兜底初始化异常:', e); }
+}
+document.addEventListener('DOMContentLoaded', function() {
+  // 延迟到所有脚本执行后（含 app.js）；若 initOnLoad 正常执行则注册表非空、兜底跳过
+  setTimeout(__themeInitFallback, 100);
+});
+</script>
+<script>
 // ─── 第三方依赖 CDN fallback（HTML 层第一道防线）───
 // 本地 script 加载失败 → 按 URL 列表依次回退到 CDN（unpkg → jsdelivr → cdnjs）
 function __fallbackScript(el, urls) {

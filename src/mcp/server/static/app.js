@@ -20338,7 +20338,9 @@ function initThemeRegistry(manifest) {
 // 按保存的主题重新应用（注册表就绪后调用，修正首帧状态/下拉选中）
 function reapplySavedTheme() {
   var saved = localStorage.getItem('ts2_static_theme');
-  if (!saved || saved === 'gradient') return;
+  // gradient 是特殊主题（渐变配色由 ts2_gradient_on 独立恢复）：此处兜底为基础主题，不吞掉应用
+  if (!saved) return;
+  if (saved === 'gradient') saved = 'dark';
   if (saved === 'light' || saved === 'dark' || getThemeMeta(saved)) {
     applyBaseTheme(saved);
     highlightThemeMenu(saved);
@@ -22187,14 +22189,15 @@ function initTunnel() {
   // 不自动刷新，用户手动点"刷新状态"按钮时才查询
 }
 
-// 页面加载时初始化主题 & 护眼
+// 页面加载时初始化主题 & 护眼（各步独立 try/catch：单步失败不阻断后续，防"被阻塞"）
 (function initOnLoad() {
-  // 先同步注册表（manifest.js 已注入），保证主题恢复/下拉联动立即生效
-  if (window.__TS2_THEME_MANIFEST) initThemeRegistry(window.__TS2_THEME_MANIFEST);
-  initThemeToggle();
-  initEyeRest();
-  // 异步刷新 theme 目录，新增主题无需重启即可生效
-  loadThemeRegistry();
+  try {
+    // 先同步注册表（manifest.js 已注入），保证主题恢复/下拉联动立即生效
+    if (window.__TS2_THEME_MANIFEST) initThemeRegistry(window.__TS2_THEME_MANIFEST);
+  } catch (e) { console.warn('[theme] initThemeRegistry:', e); }
+  try { initThemeToggle(); } catch (e) { console.warn('[theme] initThemeToggle:', e); }
+  try { initEyeRest(); } catch (e) { console.warn('[theme] initEyeRest:', e); }
+  try { loadThemeRegistry(); } catch (e) { console.warn('[theme] loadThemeRegistry:', e); }
 })();
 
 // 在切换到设置面板时初始化
