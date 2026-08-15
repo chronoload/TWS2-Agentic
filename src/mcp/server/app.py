@@ -6,6 +6,7 @@ TS2 FastAPI 服务端应用
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -5510,7 +5511,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 "3. 目标达成时明确声明『🎯 目标已达成』并总结产出；\n"
                 "4. 遇到无法推进的卡点时，明确说明卡点与建议。"
             )
-            with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+            with getattr(agent, "_messages_lock", contextlib.nullcontext()):
                 if getattr(agent, "messages", None) is None:
                     agent.messages = []
                 agent.messages.append({"role": "user", "content": inject_msg})
@@ -5550,7 +5551,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     agent = _get_agent_for_session(app.state.workspace_dir, sid)
                     if agent is None:
                         return
-                    with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+                    with getattr(agent, "_messages_lock", contextlib.nullcontext()):
                         for m in (msgs or []):
                             if m.get("role") == "assistant":
                                 agent.messages.append(m)
@@ -5587,7 +5588,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 return err(msg="Agent 未初始化，无法注入")
             try:
                 inject_msg = req.direct_text.strip()
-                with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+                with getattr(agent, "_messages_lock", contextlib.nullcontext()):
                     if getattr(agent, "messages", None) is None:
                         agent.messages = []
                     agent.messages.append({"role": "user", "content": inject_msg})
@@ -5652,7 +5653,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 f"[系统注入技能指令] 用户启用了技能「{skill_name}」，以下为技能完整定义，"
                 f"请遵守其触发条件与执行步骤（如需可调用其依赖工具）：\n\n{content}"
             )
-            with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+            with getattr(agent, "_messages_lock", contextlib.nullcontext()):
                 if hasattr(agent, "messages"):
                     if getattr(agent, "messages", None) is None:
                         agent.messages = []
@@ -5818,7 +5819,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             agent = _get_agent_for_session(app.state.workspace_dir, req.session_id)
             if agent is None:
                 return err(msg="Agent 未初始化，无法注入")
-            with getattr(agent, "_messages_lock", __import__("contextlib").nullcontext()):
+            with getattr(agent, "_messages_lock", contextlib.nullcontext()):
                 if getattr(agent, "messages", None) is None:
                     agent.messages = []
                 agent.messages.append({"role": "user", "content": text})
