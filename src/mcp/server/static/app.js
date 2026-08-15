@@ -10432,10 +10432,22 @@ function _initMultiTabSync() {
       // 【竞态修复】跨标签页强制刷新带 force=true，跳过仲裁和降级检查
       _refreshCurrentSession(true);
     }
+    // T5 P3：其他标签页切换会话（_setAgentSessionId 写 agent_current_session）→ 本标签跟随。
+    // 防抖 300ms 避免快速连续切换的竞态；与 WS 广播互补（WS 是 is_streaming 权威，storage 是切换信号）。
+    if (e.key === 'agent_current_session' && e.newValue && e.newValue !== _getAgentSessionId()) {
+      if (_multiTabSwitchTimer) clearTimeout(_multiTabSwitchTimer);
+      _multiTabSwitchTimer = setTimeout(function() {
+        console.log('[Agent] 检测到其他标签页切换会话 →', e.newValue);
+        switchToSession(e.newValue).catch(function(err) {
+          console.warn('[Agent] 跨标签跟随失败:', err);
+        });
+      }, 300);
+    }
   });
   
   console.log('[Agent] 多标签页同步已初始化');
 }
+let _multiTabSwitchTimer = null;  // 跨标签会话跟随防抖定时器（T5）
 
 // 定期同步会话状态
 let _periodicSyncTimer = null;
