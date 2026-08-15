@@ -314,9 +314,9 @@ class AgentLoopGoalRequest(BaseModel):
 
 
 class AgentQueueRequest(BaseModel):
-    """普通模式待发送队列请求（spec id=7）：入队一条 user 消息"""
+    """普通模式待发送队列请求（spec id=7）：入队一条 user 消息；clear 等无需 content 的操作可省略"""
     session_id: str = ""
-    content: str
+    content: str = ""
 
 
 class AgentQueueDequeueRequest(BaseModel):

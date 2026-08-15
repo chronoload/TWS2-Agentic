@@ -13349,28 +13349,24 @@ async function sendAgentMessage() {
   }
   if (!text) return;
 
-  // 流式中发送（spec id=7 决策D4=B）：打断插入——POST interrupt（cancel 当前流 + 入队）+ 本地显示
+  // 流式中发送（spec id=7 决策D4=C）：入队排队——新消息入队 FIFO，当前流式结束后自动发送（不打断）
   if (state.agentStreaming) {
     const sid = _getAgentSessionId();
     const attachmentsPayload = _buildAttachmentsPayload();
     _clearMediaAttachments();
     input.value = '';
-    // 本地立即显示用户消息 + 打断提示
-    addAgentMessage('user', text);
-    showToast('⚡ 已打断当前生成，正在处理新消息…', 'info');
-    renderAgentMessages();
-    // 后端 interrupt：cancel 当前 SSE + content 入队（持久化，刷新/多标签共享）
-    fetch(`${API_BASE}/api/agent/chat/interrupt`, {
+    const hasAttach = attachmentsPayload && Object.keys(attachmentsPayload).length > 0;
+    // 后端 enqueue：纯文本入队（持久化，刷新/多标签共享）；消费时由 _doSendMessage 显示 user 气泡
+    showToast('📥 已加入发送队列，当前生成结束后自动发送', 'info');
+    fetch(`${API_BASE}/api/agent/queue/enqueue`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sid || '', content: text }),
     }).then(function (res) { return res.json(); })
       .then(function (data) {
-        // 打断成功后：abort 本地 XHR + 立即消费队首（打断插入语义）
-        if (state.agentXHR) { try { state.agentXHR.abort(); } catch (e) {} }
-        cancelAgentChat();
         _renderPendingSendBadge(data && data.queue_len || 0);
-        _dequeueAndSendNext(sid, text, attachmentsPayload);
+        // 附件消息不能简单入队（enqueue 只存文本）→ 立即消费队首（保持附件语义，附件不排队）
+        if (hasAttach) { _dequeueAndSendNext(sid, text, attachmentsPayload); }
       })
       .catch(function () {
         // 后端不可用：退回前端内存队列（兼容）
@@ -13453,12 +13449,31 @@ async function sendAgentMessage() {
     _updateAgentLastMessageCount(_getLocalValidMessageCount());
     // 自主重命名：根据对话内容更新会话名称
     _autoRenameSession();
-    // 流式结束：消费排队消息（不打断当前流，结束后自动发下一条）
-    if (_pendingSendQueue.length > 0) {
-      const next = _pendingSendQueue.shift();
-      setTimeout(() => {
-        _doSendMessage(next.text, next.attachments);
-      }, 100);
+    // 流式结束：消费后端持久化队列（FIFO dequeue，刷新/多标签共享；不打断当前流，结束后自动发下一条）
+    if (_agentStopRequested) {
+      // 停止请求已置位：不再消费队列（消息已由停止流程原样放回输入框）
+      _agentStopRequested = false;
+    } else {
+      fetch(`${API_BASE}/api/agent/queue/dequeue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: currentSessionId || '' }),
+      }).then(function (res) { return res.json(); })
+        .then(function (data) {
+          const content = data && data.data && data.data.content;
+          const q = data && data.data && data.data.queue_len || 0;
+          _renderPendingSendBadge(q);
+          if (content) {
+            setTimeout(function () { _doSendMessage(content, {}); }, 100);
+          }
+        })
+        .catch(function () {
+          // 后端不可用：退回前端内存队列兜底消费
+          if (_pendingSendQueue.length > 0) {
+            const next = _pendingSendQueue.shift();
+            setTimeout(function () { _doSendMessage(next.text, next.attachments); }, 100);
+          }
+        });
     }
   }
 }
@@ -13508,6 +13523,8 @@ function _dequeueAndSendNext(sid, fallbackText, attachmentsPayload) {
 
 // 实际发送消息（供流式结束后的队列消费）
 async function _doSendMessage(text, attachments) {
+  // 消费队列时显示 user 气泡（入队时不显示——避免停止后「输入框 + 对话框」双份）
+  if (String(text || '').trim()) addAgentMessage('user', text);
   state.agentLastMessageSignature = _getMessageSignature(state.agentMessages);
   _updateAgentLastMessageCount(_getLocalValidMessageCount());
   _setAgentStreaming(true, 'local');
@@ -14146,10 +14163,59 @@ async function cancelAgentChat() {
   _lastAgentStopTime = Date.now();
 }
 
+// 停止标志：置位后 _doSendMessage finally 不再消费队列（防止停止瞬间 finally 竞态继续发送）
+let _agentStopRequested = false;
+
+// 真停止（流式时点「停止」按钮）：中止当前生成 + 队列里未发送的消息原样追加回输入框
+// （不清空丢弃，用户输入全部保留，可继续编辑/手动重发），随后清空队列 → 不再消费发送
+async function _stopAgentChat() {
+  _agentStopRequested = true;
+  const sid = _getAgentSessionId();
+  // 1. 停止当前生成
+  if (state.agentXHR) {
+    try { state.agentXHR.abort(); } catch (e) {}
+    state.agentXHR = null;
+  }
+  try {
+    await fetch(`${API_BASE}/api/agent/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid || '' })
+    });
+  } catch (e) {}
+  // 2. 队列里排队未发的消息原样追加回输入框（按 FIFO 顺序，可编辑/重发）
+  try {
+    const qres = await fetch(`${API_BASE}/api/agent/queue?session_id=${encodeURIComponent(sid || '')}`, { cache: 'no-store' });
+    const qdata = await qres.json();
+    const items = (qdata && qdata.data && qdata.data.items) || [];
+    if (items.length) {
+      const input = document.getElementById('agentInput');
+      const pendingText = items.filter(function (t) { return String(t || '').trim(); }).join('\n');
+      if (pendingText) {
+        input.value = input.value ? input.value + '\n' + pendingText : pendingText;
+        input.focus();
+      }
+      // 3. 清空后端队列（消息已转移回输入框，避免残留/后续误消费）
+      await fetch(`${API_BASE}/api/agent/queue/clear`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid || '' })
+      });
+    }
+  } catch (e) {}
+  // 4. 前端内存队列同步清空（附件排队场景兜底）
+  _pendingSendQueue = [];
+  _renderPendingSendBadge(0);
+  _setAgentStreaming(false, 'local');
+  state.streamingToolCalls = [];
+  _lastAgentStopTime = Date.now();
+  showToast('⏹️ 已停止生成，排队消息已原样放回输入框', 'info');
+}
+
 document.getElementById('agentSend').addEventListener('click', () => {
   if (state.agentStreaming) {
-    // 流式中发送（spec id=7 决策D4=B）：打断插入——cancel 当前流 + 新消息入队 + 立即消费队首
-    sendAgentMessage();
+    // 流式时按钮显示「停止」→ 真停止：中止当前生成 + 队列消息原样放回输入框（不打断插入）
+    _stopAgentChat();
   } else {
     sendAgentMessage();
   }
@@ -14157,7 +14223,7 @@ document.getElementById('agentSend').addEventListener('click', () => {
 document.getElementById('agentInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    // 流式中 Enter 不再丢弃/return：走 sendAgentMessage 内部打断插入分支
+    // 流式中 Enter：新消息入队（FIFO），当前流式结束后自动发送——不打断（spec id=7 决策D4=C）
     sendAgentMessage();
     return;
   }
