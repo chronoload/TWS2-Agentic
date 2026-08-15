@@ -160,11 +160,10 @@ def _sanitize_messages(messages: list[dict], model_info: 'ModelInfo | None' = No
     sanitized = []
     for msg in messages:
         msg_copy = dict(msg)
-        # 剥离 reasoning_content（思考过程）：仅前端展示用，不应回灌给模型——
-        # 1) 非 OpenAI 标准字段，回灌浪费 token 且部分 provider 序列化异常；
-        # 2) 思考文本可能含 emoji 等非 gbk 字符，回灌后本地 DEBUG print / 日志
-        #    gbk 编码会崩（UnicodeEncodeError → 所有提供商不可用）。
-        msg_copy.pop("reasoning_content", None)
+        # 注意：reasoning_content 保留回传（思考过程是产品功能，需回灌给支持思考的模型）。
+        # 它不参与 DEBUG print（print 只打 content），且 JSON 序列化 ensure_ascii 默认 True，
+        # 不会触发 gbk 崩溃；gbk 崩溃的真正出口是 print 打 content（tool 结果/回复含 emoji），
+        # 由 chat() 的 stdout reconfigure(errors='replace') + try/except 兜底。
         content = msg_copy.get("content")
         # 跳过 system-reminder 伪消息：role=user 但内容是 <system-reminder>...</system-reminder>
         # 包装（如 <current_date>），避免把环境元信息当作真实用户消息发给 LLM
