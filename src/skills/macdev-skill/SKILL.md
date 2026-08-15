@@ -178,96 +178,59 @@ python -m macdev project list                        # 列出已初始化的产�
 
 以下规则由用户明确要求固化进 skill 本体，任何会话/上下文（含压缩恢复后）都必须无条件遵守：
 
-1. **危险 git 命令必须先问**：自演化/开发流程中，绝不允许在未向用户提问确认前直接执行任何危险 git 命令
-   （`checkout` / `reset` / `clean` / `push` / `force-push` / `merge` / `revert` / `branch -D` / `rm` 等）。
-   只读命令（`status` / `branch` / `log` / `diff` / `show`）可随时直接执行。
-2. **绝不假设未追踪（untracked）文件不重要（违反即停）**：`git status` 中的 `??` 项在删除/覆盖/忽略前必须逐项向用户确认，
-   不得擅自忽略或清理。**`??` 项可能是用户的成果/调试线索（如本会话 `_verify_*` 脚本、`music/` 目录）——默认视为重要，先问后动**。
-3. **任何会话开始第一步查 git 状态（与铁律 10 查 log/plan 并列，用户强制）**：**任何新对话/会话（即使看似全新）开始、或上下文压缩恢复后，第一时间执行**
-   `git branch -a` + `git status --short` + `git log --oneline -15`，看清分支/提交/工作区现状再动手。
-   **同步做产物收敛扫描（铁律 5 的检查信号）**：`git status --short` 里出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*`/`_diag_*` 等调试文件 = 产物散落违规，**立即归位 `<name>-project/verify/` 后再继续**。
-   git 查询与铁律 10 的 macdev log/plan 查询**地位并列、同为会话启动必查项**：先 git（看仓库现状）→
-   再 log/plan（看开发历史与既定事实），双查齐备后才允许继续操作。
-4. **动手前必须查阅 macdev log 与 plan（未查即动手 = 违规，用户强制）**：用 `log list/query` 与 `plan list` 了解开发历史与进行中的计划，
-   避免重复劳动或遗漏未完成事项；**任何会话启动后/上下文恢复后，在动手（含澄清/探索/读文件）前未完成 git 状态（铁律 3）+ log/plan（本铁律）双查即属违规**。
-5. **🔴🔴 产物收敛铁律（用户强制 · 违反即停 · 本次违规教训固化）**：
-   **一切 macdev 产物——audit 输出 / plan / log / requirement / 调试脚本 / 验证脚本 / 一次性工具 / 日志——必须收敛到 `<name>-project/`**（如 `ts2-project/verify/`、`ts2-project/audit/`、`ts2-project/plans.db`），
-   **绝对禁止散落开发环境**（`src/` 根目录、项目根、工作区任意位置都算散落）。
-   - **双轨产物**：机器可读（db/csv/json）+ 人类可读（md）双轨缺一不可；重跑覆写、不另建新目录；
-   - **调试/验证/一次性脚本**：第一时间写入 `<name>-project/verify/`，收尾统一归位，**不得先在别处创建再移**；
-   - **违规检查信号**：`git status` 出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*` 等调试文件 = 已违规，立即归位；
-   - **违反后果**：污染开发环境、产物不可追踪、与提交基线混杂、污染 untracked 列表（本次 `_verify_*.py`/`_boot_verify.py` 散落 `src/` 根即为此教训，用户指正后归位 `ts2-project/verify/`）。
-6. **自演化优先**：新教训/规则优先固化进本 SKILL.md（§8 或新章节）+ 随包 log（scope=pkg），
-   让能力随使用进化，而非仅停留在项目级 log。
-7. **跨目录覆盖/部署/批量删除文件先问**：向私有部署或其他目录复制/覆盖文件（`copy`/`cp` 覆盖部署、
-   跨目录同步）、批量删除文件（`del`/`rm` 通配）、覆盖写入配置文件等破坏性文件操作，执行前先向用户
-   确认目标目录与文件范围（多候选时用提问确认，如多个同名部署目录）；`dir`/`ls`/`git status` 等只读
-   查看可随时直接执行。覆盖后必须做一致性验证（哈希/语法检查）。
-8. **任务必须先判定类型再动手（superpowers 触发纪律）**：任何任务（含澄清/探索/查文件之前）第一步
-   按 §1-0 判定类型（Bounded/Architectural/Spike/Bug）并走对应纪律分支；"只是简单问题/先看下代码/
-   先查下文件"都是反模式——技能检查先于一切动作；判定后若发现更复杂，停下升级分支（单向棘轮）。
-9. **完整阅读 DOC 与子技能后才算加载完成（用户强制）**：首次使用 macdev（或文档更新）必须按 §0
-   读完全部使用文档 + 子技能，禁止跳读/凭记忆使用；不确定命令细节时回查对应 DOC，不靠猜。
-10. **任何会话开始第一步查 log 与 plan（用户强制）**：**任何新对话/会话（即使看似全新、无上下文**
-    **残缺感）开始，第一步就查阅随包 log**（`log list --scope pkg` / `log query --keyword <词>`）
-    **与随项目 log/plan**（`log list --scope project`、`plan list`），找回既定事实与历史轨迹——
-    不是等出现残缺/不确定才查；对话中途若发现信息断层、记忆缺失、或对"当前做了什么/部署在哪/
-    某能力现状"不确定，同样**立即**补查；**禁止凭猜测回答或继续操作**；私有部署等外部环境信息
-    同样先查 log/plan/会话缓存确认，再动手。
-11. **进程调试优先构建新实例 + 全栈自验证（用户强制）**：需要操作/调试/重启/替换
-    正在运行的进程（服务端、长任务、训练等）时，**优先构建不打断现状的新实例**（换端口启动、
-    复制副本到临时目录、后台独立调试），**禁止随意 kill/restart/干扰其他进程**；只读检查
-    （`netstat`/`wmic`/`tasklist`/status）可随时执行，但**任何终止/重启/替换现有进程必须先向用户
-    说明意图并获得明确许可才能执行**——"只是说明意图"不够，用户未点头一律不动。
-    **执行细则（2026-08-16 强化，勿反复请求许可）**：
-    - **调试/验证默认自行起新端口实例**（生产 6906 不动，调试端口递增如 6908/6909）：启动脚本收敛到
-      `<name>-project/verify/`（如 `_boot_new_instance.py`）→ `Start-Process python ...` 后台启动 →
-      **自行全栈验证**：curl 端点断言 / verify 脚本（红→绿）/ node --check / pytest / 浏览器验收
-      （保留运行实例供用户查看，不打断任何现状）。
-    - **验证通过前不需要征求用户许可，也不需要用户手动检查**——新实例不打断任何进程，全栈自验证是
-      **默认动作**（如同 TDD 红→绿是默认动作）；最终交付时用户查看结果即可。
-    - 只有「替换/终止**现有生产实例**」才必须征求许可；调试实例（新端口）的起/停是自助行为。
-12. **spec 写完必须先停等用户审核（HARD-GATE，用户强制）**：requirement spec（--kind spec）写完后
-    必须停下来，导出 REQUIREMENTS.md **并用编辑器打开（open_in_editor）呈用户审核**——**用户明确批准前禁止进入 plan/写实现**——"设计
-    完成即自行实现"是严重违规（曾致 spec 全 open 但代码已提交）。plan 必须对齐 writing-plans 颗粒度：
-    每 task 带 Create/Modify 涉及文件，每 step 带动作+期望结果+TDD 红→绿（`--action test --expected FAIL`
-    → 实现 → 转绿）；**禁止 task 无文件、step 用"待补充"占位**——潦草 plan 等于没写，执行者仍需自行设计。
-17. **凡是 macdev 人类轨产物都必须用编辑器打开呈用户（用户强制，2026-08-16 固化）**：**一切人类轨产物**——spec（requirement export → REQUIREMENTS.md）、plan（plan export → .md）、audit（INTERFACE_CHAIN.md，见铁律 20）、log 导出（LOGS.md）等 .md 文件——产出后**必须用编辑器打开（open_in_editor）**让用户直接查看/审阅——用户可能找不到产物文件位置，编辑器打开是审阅的默认呈现方式。与铁律 12 同：spec/plan 未获用户批准前不进入实现；audit 人类轨未打开呈现前不视为完成。
-18. **架构设计必须按 langdriven 细化 + 最小可运行核心（用户强制，2026-08-16 固化）**：任何 Architectural 设计（spec 细化/新子系统），必须：①按 langdriven 六段式输出（语言建模/匹配范式/方案设计/测试与验证/失效边界/最小可运行核心）；②**必须画出亲属追踪风格依赖链**（层间调用图）+ **数据池模型设计**（具名资源池 ADT：每个池的载体/生命周期/消费方）；③**必须搭建最小可运行核心**：核心数据模型（dataclass）+ 事件总线（发布/订阅）+ 关键层逻辑（状态机/纯函数聚合），每层 30-80 行 + TDD 测试骨架，先跑绿再扩；④TS/前端项目 audit 用 subprocess 扫描插件（见 audit.frontend）；⑤**沉淀必须自动做**——写完 spec/plan/设计/解决 Bug/收获经验后，**立即** `log add`（scope=project 或 pkg）沉淀，不待用户提醒（"自动沉淀"是默认动作，如同 git commit）。
-19. **全栈全场景机器驱动开发 + 自演化插件审核机制（用户强制，2026-08-16 固化）**：macdev 是**面向全栈全场景**的机器驱动开发体系——audit 不只扫 .py：①**全栈覆盖**：通过插件机制覆盖 TS/JS/Vue 前端（`audit.frontend.ts_subprocess`，subprocess 调 rg）、后端、配置文件、任意语言/框架；②**机制驱动自演化**：遇到**新场景/新环境/新问题**（如 Python 扫不到 TS → 写前端插件；GBK 编码崩溃 → 加 encoding；权限拒绝 → os.walk 容错；WindowsApps 占位符 → 用绝对路径解释器）→ **主动生成 patch 插件纳入 macdev**，不等用户要求——自演化是机制不是选项；③**插件自审门禁**：新插件必须验证 ①Registry 注册成功 ②实扫通过（单目录 + 全量）③产物落位 `<name>-project/audit/`，三者齐备才算纳入；④**沉淀自动**：每次自演化 patch 后立即 `log add`（scope=pkg 机制沉淀），如本次前端扫描插件四连修（TS 覆盖→UTF-8→rg 排除→os.walk 容错）即活例。
-13. **worktree 仅用于子代理/多线并行隔离（用户强制，并发冲突教训）**：主开发流保持**单线**
-    （master 直接改，避免并发冲突）——本次教训：主工作区与 worktree 并发改同一文件（loop.py），
-    两边改动需逐处手动合并，成本极高。**只有以下场景才建 worktree**：
-    - 子代理（sub_agent）并行开发——各自独立工作树互不干扰，完成后合回；
-    - 多分支并行实验（如 A/B 方案、调研分支），需保留主工作区可发布；
-    - 高风险实验隔离（不污染主工作区）。
-    单主体单线最简；多主体（子代理）才 worktree。只读查询（`git worktree list`/`git branch -a`）随时可执行；
-    worktree add/remove 会改仓库状态，remove 前按铁律 1 先向用户确认。
-14. **旧扫描产物（audit/INTERFACE_CHAIN/CSV）作参考前必须做亲属追逐同步核实（自演化教训）**：
-    引用旧 audit 产物前，先用 `grep 'def <符号>'` 逐项核实行号与语义是否过期——
-    ① **行号漂移**：任何重构（P0 提取/loop 重构/合并）后行号必然过期（实测 loop.py `_parse_ts` 378→607、
-       app.py P0 后 `_sync_agent_from_store` 5354→5238、`agent_loop_goal` 5479→5490），以 grep 实际定位为准；
-    ② **语义变化**：docstring/新增逻辑（如 loop._run_task 会话上下文合并 spec 4/5）旧扫描完全不含，
-       必须读当前实现确认；
-    ③ **unknown/broken 真伪**：`__import__("contextlib")` 动态导入是合法误报（非真断裂）、
-       索引不全（`_build_handoff`/`_emit` 旧扫描标 unknown 但定义存在）都需实测验证，不可凭标注下结论；
-    ④ **跨模块反射目标**：middleware 方法（run_before_agent/run_turn/run_after_agent）不在 base.py
-       定义，在 HarnessRunner/具体实现——按实际定义文件定位。
-    旧扫描的**结构价值**（谁调谁）保留，**行号/标注/语义**一律以当前代码为准；不确定就重跑 audit。
-15. **高风险重构必须 worktree 隔离开发 + 保留实例验收 + 用户确认后合并（用户强制，本次 P1-P3 教训）**：
-    会话子系统/状态机/渲染链路等**高风险重构**（影响面大、易回归、改核心数据流）一律在 worktree 分支开发——
-    建 `<name>-worktree` 分支 → 开发调试（TDD 红→绿）→ **保留运行实例供用户验收**（验收清单列明）
-    → **用户明确确认后才合并回 master**。禁止高风险重构直接改 master（本次 P1-P3 直接改 master 违背
-    用户预期：虽 plan verify 全通过，但无隔离、无法回退粒度验收，风险不可控）。区分：
-    - **Bounded**（小改动/新 flag/单文件修复）→ 可单线 master 直接改；
-    - **Architectural / 高风险重构** → 必须 worktree + 验收门禁（保留实例 → 用户验收 → 确认后 merge）。
-    worktree 验收完成后：`git merge`（用户确认）→ `git worktree remove`（用户确认，铁律 1/13）。
-16. **audit 优先纪律（用户强制，debug/架构追溯第一入口）**：任何 Bug 定位/架构追溯/新功能探索任务，**第一步先跑 audit 建立全量上下文**（亲属追逐依赖链 + calls/refs 索引 + 缺陷全景），禁止直接用 grep/read 零散查询起步（局部视野易语义漂移/漏考虑）。
-    - **快速入口**：`dev audit --target <根> --project <名> [--timeout N]`（自动编排默认 task，无需手写 task.json）；定制 `audit-task.json` 建一次反复用，按需求动态修改。
-    - **交互追链**：`audit chain callers --func <X>`（上游谁调 X / 下游 X 调谁）、`audit chain kw --keyword <K>`（引用位置 def/use 标注）——替代 grep 定位。
-    - **完成所有修改后**：重跑 audit 一次（增量编译秒级）→ 对比 before/after（drifts/issues/calls 变化）→ 确认无新断裂/语义漂移再收尾。
-    - **产物收敛**：audit 产物落 `<name>-project/audit/` 或 `dev/<目标>/`（重跑覆写），旧产物作参考前按铁律 14 核实行号/标注/语义。
-20. **audit 扫完必查产物 + 打开人类轨（用户强制，2026-08-16 固化）**：audit 命令执行后——**无论工具返回成功/超时/报错**——都必须走产物验证门禁：①**必查产物**：`dir <name>-project/audit/`（或 `dev/<目标>/`）确认 INTERFACE_CHAIN.md + interface_chain.db + 全维度 CSV 均已落位，且 mtime 为本轮扫描（对比调用前时间戳）；②**超时≠失败**：工具超时/报错不代表扫描未完成——后台可能仍在跑完、产物可能已生成，必须先验证产物再下结论，禁止拿旧产物当新结果或重复盲目重扫；③**产物缺失/陈旧**（文件缺失或 mtime 早于本轮调用）→ 补跑或修复后重扫，拿到新产物为止；④**打开人类轨**：产物确认后**必须用 open_in_editor 打开 INTERFACE_CHAIN.md 呈用户**（亲属追逐依赖链 + 缺陷清单供评审，铁律 17），audit 人类轨未打开呈现前不视为完成。
+1. **危险 git 命令必须先问**：自演化/开发流程中，绝不允许在未向用户提问确认前直接执行任何危险 git 命令（`checkout` / `reset` / `clean` / `push` / `force-push` / `merge` / `revert` / `branch -D` / `rm` 等）。只读命令（`status` / `branch` / `log` / `diff` / `show`）可随时直接执行。
+2. **绝不假设未追踪（untracked）文件不重要（违反即停）**：`git status` 中的 `??` 项在删除/覆盖/忽略前必须逐项向用户确认，不得擅自忽略或清理。`??` 项可能是用户的成果/调试线索（如 `_verify_*` 脚本、`music/` 目录）——默认视为重要，先问后动。
+3. **会话启动/动手前双查（git + macdev log/plan，用户强制）**：任何新对话/会话（即使看似全新）开始、或上下文压缩恢复后，第一时间执行 `git branch -a` + `git status --short` + `git log --oneline -15`，看清分支/提交/工作区现状再动手；同时查阅随包 log（`log list --scope pkg` / `log query --keyword <词>`）与随项目 log/plan（`log list --scope project`、`plan list`），找回既定事实与历史轨迹。先 git（看仓库现状）→ 再 log/plan（看开发历史与既定事实），双查齐备后才允许继续操作；动手（含澄清/探索/读文件）前未完成 git 状态 + log/plan 双查即属违规。对话中途若发现信息断层、记忆缺失、或对"当前做了什么/部署在哪/某能力现状"不确定，同样立即补查；禁止凭猜测回答或继续操作；私有部署等外部环境信息同样先查 log/plan/会话缓存确认，再动手。同步做产物收敛扫描：`git status --short` 里出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*`/`_diag_*` 等调试文件 = 产物散落违规（引用新 4 产物收敛铁律），立即归位 `<name>-project/verify/` 后再继续。
+4. **🔴🔴 产物收敛铁律（用户强制 · 违反即停 · 本次违规教训固化）**：一切 macdev 产物——audit 输出 / plan / log / requirement / 调试脚本 / 验证脚本 / 一次性工具 / 日志——必须收敛到 `<name>-project/`（如 `ts2-project/verify/`、`ts2-project/audit/`、`ts2-project/plans.db`），绝对禁止散落开发环境（`src/` 根目录、项目根、工作区任意位置都算散落）。
+   - 双轨产物：机器可读（db/csv/json）+ 人类可读（md）双轨缺一不可；重跑覆写、不另建新目录；
+   - 调试/验证/一次性脚本：第一时间写入 `<name>-project/verify/`，收尾统一归位，不得先在别处创建再移；
+   - 违规检查信号：`git status` 出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*` 等调试文件 = 已违规，立即归位；
+   - 违反后果：污染开发环境、产物不可追踪、与提交基线混杂、污染 untracked 列表（本次 `_verify_*.py`/`_boot_verify.py` 散落 `src/` 根即为此教训，用户指正后归位 `ts2-project/verify/`）。
+5. **自演化优先 + 自动沉淀**：新教训/规则优先固化进本 SKILL.md（§8 或新章节）+ 随包 log（scope=pkg），让能力随使用进化，而非仅停留在项目级 log；写完 spec/plan/设计/解决 Bug/收获经验后，立即 `log add`（scope=project 或 pkg）沉淀，不待用户提醒（"自动沉淀"是默认动作，如同 git commit）。
+6. **跨目录覆盖/部署/批量删除文件先问**：向私有部署或其他目录复制/覆盖文件（`copy`/`cp` 覆盖部署、跨目录同步）、批量删除文件（`del`/`rm` 通配）、覆盖写入配置文件等破坏性文件操作，执行前先向用户确认目标目录与文件范围（多候选时用提问确认，如多个同名部署目录）；`dir`/`ls`/`git status` 等只读查看可随时直接执行。覆盖后必须做一致性验证（哈希/语法检查）。
+7. **任务必须先判定类型再动手（superpowers 触发纪律）**：任何任务（含澄清/探索/查文件之前）第一步按 §1-0 判定类型（Bounded/Architectural/Spike/Bug）并走对应纪律分支；"只是简单问题/先看下代码/先查下文件"都是反模式——技能检查先于一切动作；判定后若发现更复杂，停下升级分支（单向棘轮）。
+8. **完整阅读 DOC 与子技能后才算加载完成（用户强制）**：首次使用 macdev（或文档更新）必须按 §0 读完全部使用文档 + 子技能，禁止跳读/凭记忆使用；不确定命令细节时回查对应 DOC，不靠猜。
+
+9. **进程调试优先构建新实例 + 全栈自验证（用户强制）**：需要操作/调试/重启/替换正在运行的进程（服务端、长任务、训练等）时，优先构建不打断现状的新实例（换端口启动、复制副本到临时目录、后台独立调试），禁止随意 kill/restart/干扰其他进程；只读检查（`netstat`/`wmic`/`tasklist`/status）可随时执行，但任何终止/重启/替换现有进程必须先向用户说明意图并获得明确许可才能执行——"只是说明意图"不够，用户未点头一律不动。
+   执行细则（2026-08-16 强化，勿反复请求许可）：
+   - 调试/验证默认自行起新端口实例（生产 6906 不动，调试端口递增如 6908/6909）：启动脚本收敛到 `<name>-project/verify/`（如 `_boot_new_instance.py`）→ `Start-Process python ...` 后台启动 → 自行全栈验证：curl 端点断言 / verify 脚本（红→绿）/ node --check / pytest / 浏览器验收（保留运行实例供用户查看，不打断任何现状）；
+   - 验证通过前不需要征求用户许可，也不需要用户手动检查——新实例不打断任何进程，全栈自验证是默认动作（如同 TDD 红→绿是默认动作）；最终交付时用户查看结果即可；
+   - 只有「替换/终止现有生产实例」才必须征求许可；调试实例（新端口）的起/停是自助行为。
+10. **凡是 macdev 人类轨产物都必须用编辑器打开呈用户 + spec/plan HARD-GATE（用户强制，2026-08-16 固化）**：一切人类轨产物——spec（requirement export → REQUIREMENTS.md）、plan（plan export → .md）、audit（INTERFACE_CHAIN.md，引用新 13）、log 导出（LOGS.md）等 .md 文件——产出后必须用编辑器打开（open_in_editor）呈用户直接查看/审阅（用户可能找不到产物文件位置，编辑器打开是审阅的默认呈现方式）。
+    执行细则：
+    - requirement spec（--kind spec）写完后必须停等用户审核（HARD-GATE）：导出 REQUIREMENTS.md 并用编辑器打开呈用户审核——用户明确批准前禁止进入 plan/写实现——"设计完成即自行实现"是严重违规（曾致 spec 全 open 但代码已提交）；
+    - plan 必须对齐 writing-plans 颗粒度：每 task 带 Create/Modify 涉及文件，每 step 带动作+期望结果+TDD 红→绿（`--action test --expected FAIL` → 实现 → 转绿）；禁止 task 无文件、step 用"待补充"占位——潦草 plan 等于没写，执行者仍需自行设计；
+    - audit 人类轨未打开呈现前不视为完成（引用新 13 audit 产物门禁）。
+11. **worktree 纪律（隔离场景 + 高风险重构验收门禁，用户强制，含并发冲突教训与 P1-P3 教训）**：主开发流保持单线（master 直接改，避免并发冲突）——本次教训：主工作区与 worktree 并发改同一文件（loop.py），两边改动需逐处手动合并，成本极高。
+    执行细则：
+    - worktree 仅用于以下场景：①子代理（sub_agent）并行开发——各自独立工作树互不干扰，完成后合回；②多分支并行实验（如 A/B 方案、调研分支），需保留主工作区可发布；③高风险实验隔离（不污染主工作区）；
+    - 单主体单线最简；多主体（子代理）才 worktree。只读查询（`git worktree list`/`git branch -a`）随时可执行；worktree add/remove 会改仓库状态，remove 前按新 1（危险 git 先问）先向用户确认；
+    - 高风险重构（会话子系统/状态机/渲染链路等影响面大、易回归、改核心数据流）一律在 worktree 分支开发：建 `<name>-worktree` 分支 → 开发调试（TDD 红→绿）→ 保留运行实例供用户验收（验收清单列明）→ 用户明确确认后才合并回 master；禁止高风险重构直接改 master（本次 P1-P3 直接改 master 违背用户预期：虽 plan verify 全通过，但无隔离、无法回退粒度验收，风险不可控）；
+    - 区分：Bounded（小改动/新 flag/单文件修复）→ 可单线 master 直接改；Architectural / 高风险重构 → 必须 worktree + 验收门禁（保留实例 → 用户验收 → 确认后 merge）；
+    - worktree 验收完成后：`git merge`（用户确认）→ `git worktree remove`（用户确认，新 1）。
+
+12. **旧扫描产物（audit/INTERFACE_CHAIN/CSV）作参考前必须做亲属追逐同步核实（自演化教训）**：引用旧 audit 产物前，先用 `grep 'def <符号>'` 逐项核实行号与语义是否过期——
+    ① 行号漂移：任何重构（P0 提取/loop 重构/合并）后行号必然过期（实测 loop.py `_parse_ts` 378→607、app.py P0 后 `_sync_agent_from_store` 5354→5238、`agent_loop_goal` 5479→5490），以 grep 实际定位为准；
+    ② 语义变化：docstring/新增逻辑（如 loop._run_task 会话上下文合并 spec 4/5）旧扫描完全不含，必须读当前实现确认；
+    ③ unknown/broken 真伪：`__import__("contextlib")` 动态导入是合法误报（非真断裂）、索引不全（`_build_handoff`/`_emit` 旧扫描标 unknown 但定义存在）都需实测验证，不可凭标注下结论；
+    ④ 跨模块反射目标：middleware 方法（run_before_agent/run_turn/run_after_agent）不在 base.py 定义，在 HarnessRunner/具体实现——按实际定义文件定位。
+    旧扫描的结构价值（谁调谁）保留，行号/标注/语义一律以当前代码为准；不确定就重跑 audit。
+13. **audit 优先纪律 + 扫完必查产物门禁（用户强制，debug/架构追溯第一入口，2026-08-16 固化）**：任何 Bug 定位/架构追溯/新功能探索任务，第一步先跑 audit 建立全量上下文（亲属追逐依赖链 + calls/refs 索引 + 缺陷全景），禁止直接用 grep/read 零散查询起步（局部视野易语义漂移/漏考虑）——
+    ① 快速入口：`dev audit --target <根> --project <名> [--timeout N]`（自动编排默认 task，无需手写 task.json）；定制 `audit-task.json` 建一次反复用，按需求动态修改；
+    ② 交互追链：`audit chain callers --func <X>`（上游谁调 X / 下游 X 调谁）、`audit chain kw --keyword <K>`（引用位置 def/use 标注）——替代 grep 定位；
+    ③ 扫完产物验证门禁：audit 命令执行后——无论工具返回成功/超时/报错——都必须走产物验证门禁：
+       a. 必查产物：`dir <name>-project/audit/`（或 `dev/<目标>/`）确认 INTERFACE_CHAIN.md + interface_chain.db + 全维度 CSV 均已落位，且 mtime 为本轮扫描（对比调用前时间戳）；
+       b. 超时≠失败：工具超时/报错不代表扫描未完成——后台可能仍在跑完、产物可能已生成，必须先验证产物再下结论，禁止拿旧产物当新结果或重复盲目重扫；
+       c. 产物缺失/陈旧（文件缺失或 mtime 早于本轮调用）→ 补跑或修复后重扫，拿到新产物为止；
+       d. 打开人类轨：产物确认后必须用 open_in_editor 打开 INTERFACE_CHAIN.md 呈用户（亲属追逐依赖链 + 缺陷清单供评审，引用新 10），audit 人类轨未打开呈现前不视为完成；
+    ④ 完成所有修改后：重跑 audit 一次（增量编译秒级）→ 对比 before/after（drifts/issues/calls 变化）→ 确认无新断裂/语义漂移再收尾；
+    ⑤ 产物收敛：audit 产物落 `<name>-project/audit/` 或 `dev/<目标>/`（重跑覆写），旧产物作参考前按新 12 核实行号/标注/语义。
+14. **架构设计必须按 langdriven 细化 + 最小可运行核心（用户强制，2026-08-16 固化）**：任何 Architectural 设计（spec 细化/新子系统），必须——
+    ① 按 langdriven 六段式输出（语言建模/匹配范式/方案设计/测试与验证/失效边界/最小可运行核心）；
+    ② 必须画出亲属追踪风格依赖链（层间调用图）+ 数据池模型设计（具名资源池 ADT：每个池的载体/生命周期/消费方）；
+    ③ 必须搭建最小可运行核心：核心数据模型（dataclass）+ 事件总线（发布/订阅）+ 关键层逻辑（状态机/纯函数聚合），每层 30-80 行 + TDD 测试骨架，先跑绿再扩；
+    ④ TS/前端项目 audit 用 subprocess 扫描插件（见 audit.frontend）。
+15. **全栈全场景机器驱动开发 + 自演化插件审核机制（用户强制，2026-08-16 固化）**：macdev 是面向全栈全场景的机器驱动开发体系——audit 不只扫 .py：①全栈覆盖：通过插件机制覆盖 TS/JS/Vue 前端（`audit.frontend.ts_subprocess`，subprocess 调 rg）、后端、配置文件、任意语言/框架；②机制驱动自演化：遇到新场景/新环境/新问题（如 Python 扫不到 TS → 写前端插件；GBK 编码崩溃 → 加 encoding；权限拒绝 → os.walk 容错；WindowsApps 占位符 → 用绝对路径解释器）→ 主动生成 patch 插件纳入 macdev，不等用户要求——自演化是机制不是选项；③插件自审门禁：新插件必须验证 ①Registry 注册成功 ②实扫通过（单目录 + 全量）③产物落位 `<name>-project/audit/`，三者齐备才算纳入；④沉淀自动：每次自演化 patch 后立即 `log add`（scope=pkg 机制沉淀），如本次前端扫描插件四连修（TS 覆盖→UTF-8→rg 排除→os.walk 容错）即活例。
 
 > 本节优先级高于 skill 内其他「经验只写 log 不写 SKILL.md」的约定——用户指令 > skill 内部约定。
 
