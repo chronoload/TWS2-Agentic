@@ -15,6 +15,7 @@ IMPORTANT: on_token signature is Callable[[str], Any] (single param) everywhere.
 
 import json
 import logging
+import sys
 import time
 import uuid
 import asyncio
@@ -911,18 +912,30 @@ class LLM(BaseLLMProvider):
         safe_messages = _sanitize_messages(messages, self.config.model_info)
 
         # === DEBUG: 打印即将发送的消息 ===
-        print("\n" + "=" * 70, flush=True)
-        print(f"[LLM.chat] >>> 发送给 {self.config.model} ({self.config.provider.value})", flush=True)
-        print(f"[LLM.chat] >>> 消息数: {len(safe_messages)}", flush=True)
-        for i, msg in enumerate(safe_messages):
-            role = msg.get("role", "?")
-            content_preview = str(msg.get("content", ""))[:120]
-            has_tc = "tool_calls" in msg
-            tc_id = msg.get("tool_call_id", "")
-            print(f"  [{i}] role={role} content={content_preview!r} tc={has_tc} tcid={tc_id!r}", flush=True)
-        if tools:
-            print(f"[LLM.chat] >>> tools: {len(tools)} 个工具定义", flush=True)
-        print("=" * 70 + "\n", flush=True)
+        # Windows 控制台默认 gbk(cp936) 编码：消息内容可能含 emoji（✅ 等），
+        # 直接 print 会抛 UnicodeEncodeError —— 且本块在 try 之外，打印崩溃会
+        # 炸掉整个 provider 调用（所有提供商不可用）。双保险：
+        #   1) stdout reconfigure(errors='replace')：无法编码的字符替换为 ? 而非崩溃；
+        #   2) 打印块整体 try/except：即使 stdout 不可 reconfigure 也不影响 LLM 调用。
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except Exception:
+            pass
+        try:
+            print("\n" + "=" * 70, flush=True)
+            print(f"[LLM.chat] >>> 发送给 {self.config.model} ({self.config.provider.value})", flush=True)
+            print(f"[LLM.chat] >>> 消息数: {len(safe_messages)}", flush=True)
+            for i, msg in enumerate(safe_messages):
+                role = msg.get("role", "?")
+                content_preview = str(msg.get("content", ""))[:120]
+                has_tc = "tool_calls" in msg
+                tc_id = msg.get("tool_call_id", "")
+                print(f"  [{i}] role={role} content={content_preview!r} tc={has_tc} tcid={tc_id!r}", flush=True)
+            if tools:
+                print(f"[LLM.chat] >>> tools: {len(tools)} 个工具定义", flush=True)
+            print("=" * 70 + "\n", flush=True)
+        except Exception:
+            pass
         # === END DEBUG ===
 
         params: dict = {
