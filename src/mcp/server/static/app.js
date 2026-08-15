@@ -14916,6 +14916,14 @@ async function switchToSession(sessionId) {
     updateSessionInfo(isStreaming ? '流式中...' : '会话管理');
   }
   
+  // P1 窗口懒加载：后端返回 has_more（窗口外还有更早历史）→ 消息区顶部加"加载更早历史"入口，
+  // 点击经 expand 端点分页补载窗口外历史并插入现有消息之前（保持顺序）。失败静默降级。
+  if (res.data.has_more) {
+    _ensureLoadEarlierButton(sessionId, res.data.total || restoredMessages.length);
+  } else {
+    _removeLoadEarlierButton();
+  }
+  
   // 更新状态：单写者收敛（本页流式 local 权威，ws/restore 不打回）
   const localStreaming = _isLocalStreaming();
   state.agentXHR = null;
@@ -14927,6 +14935,69 @@ async function switchToSession(sessionId) {
 function updateSessionInfo(text) {
   const info = document.getElementById('agentSessionInfo');
   if (info) info.textContent = text;
+}
+
+// ─── P1 窗口懒加载：加载更早历史入口 ────────────────────────
+function _msgSigKey(m) {
+  // 去重签名：tool 按 tool_call_id，其余按 role+content 前 120
+  if (!m) return '';
+  if (m.role === 'tool') return 'tool:' + (m.tool_call_id || '');
+  return (m.role || '') + ':' + String(m.content || '').slice(0, 120);
+}
+
+function _removeLoadEarlierButton() {
+  document.querySelectorAll('[data-load-earlier], .load-earlier').forEach(function(el) { el.remove(); });
+}
+
+function _ensureLoadEarlierButton(sessionId, total) {
+  _removeLoadEarlierButton();
+  // 按钮挂到消息区父级（agentChatMain）顶部：agentMessages 会被轮询/流式 innerHTML 重绘，
+  // 若按钮在容器内会被清掉（实测 600ms 内消失）；父级不随消息重绘 → 按钮常驻。
+  const holder = document.getElementById('agentChatMain') || document.querySelector('.agent-chat-main');
+  if (!holder) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'load-earlier';
+  btn.dataset.loadEarlier = '1';
+  btn.textContent = '⬆ 加载更早历史（共 ' + (total || '') + ' 条）';
+  btn.style.cssText = 'display:block;margin:8px auto;padding:6px 16px;cursor:pointer;'
+    + 'background:#f0f4ff;border:1px solid #c9d8f5;border-radius:6px;font-size:12px;color:#3a5a9f;';
+  holder.prepend(btn);
+  let loading = false;
+  btn.addEventListener('click', function() {
+    if (loading) return;
+    loading = true;
+    btn.disabled = true;
+    btn.textContent = '加载中...';
+    // 窗口外更早历史：expand 分页取第一页（offset=0 最早历史），去重后插入头部
+    _fetchCompactPage(sessionId, 0, 500).then(function(res) {
+      const expanded = (res && res.expanded) || [];
+      if (!expanded.length) {
+        // 无更多可加载（无压缩归档/已到头）→ 静默移除
+        _removeLoadEarlierButton();
+        return;
+      }
+      const ui = _expandBackendMessages(expanded).filter(function(m) { return !(m && m.isCompactSummary); });
+      const existing = new Set(state.agentMessages.map(_msgSigKey));
+      const fresh = ui.filter(function(m) { return !existing.has(_msgSigKey(m)); });
+      if (fresh.length) {
+        state.agentMessages = fresh.concat(state.agentMessages);
+        _batchSetAgentMessages(state.agentMessages);
+        updateSessionInfo(state.agentMessages.length + '条消息');
+      }
+      // 若 expand 显示还有更早（res.has_more）可继续点；否则移除
+      if (res.has_more) {
+        btn.textContent = '⬆ 继续加载更早历史';
+        btn.disabled = false;
+        loading = false;
+      } else {
+        _removeLoadEarlierButton();
+      }
+    }).catch(function(e) {
+      console.warn('[Agent] 加载更早历史失败:', e);
+      _removeLoadEarlierButton();
+    });
+  });
 }
 
 // ─── 会话管理侧边栏 ──────────────────────────────────────────
