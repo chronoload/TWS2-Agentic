@@ -12905,6 +12905,15 @@ function _ensureMsgUid(m) {
   if (!m._uid) m._uid = 'm' + Date.now().toString(36) + '_' + (++_msgUidSeq);
   return m._uid;
 }
+// 按稳定 _uid 在消息数组中定位下标（根治压缩分页/轮询重建 splice 中间插入导致的下标漂移；
+// 找不到返回 -1——消息已被重建替换/移除，调用方应容错跳过，交由最终诚实重建合并正确）。
+function _findMsgIndexByUid(list, uid) {
+  if (!uid || !list || !list.length) return -1;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] && list[i]._uid === uid) return i;
+  }
+  return -1;
+}
 
 // ── 流式 Markdown 渲染（适当激进 + 无感 + 计算量小）──
 // 结构未完成（代码围栏/行内公式未闭合）→ 保守纯文本，避免不完整块反复重排闪烁；
@@ -13580,7 +13589,7 @@ async function sendAgentStream(text, attachments) {
     messages: [],  // 该会话的消息快照
     fullContent: '',
     toolCallHappened: false,
-    toolMsgMap: {},  // tool name → message index
+    toolMsgMap: {},  // tool name → [message indexes]（FIFO 数组，同名工具排队不覆盖）
     lastCpHash: '',  // 本轮流式最近一次 tool_result 的检查点 hash（写入 assistant 用）
     retryCount: 0,
     maxRetries: 2,
@@ -13635,6 +13644,7 @@ async function sendAgentStream(text, attachments) {
     // 辅助函数：添加消息到流状态
     function addStreamMessage(role, content, extra) {
       const msg = { role, content, ...(extra || {}) };
+      _ensureMsgUid(msg);  // 稳定 ID：供 updateStreamMessage 按 uid 定位（免疫压缩分页/轮询重建下标漂移）
       streamState.messages.push(msg);
       const msgIndex = streamState.messages.length - 1;
       if (isCurrentSession()) {
@@ -13667,11 +13677,17 @@ async function sendAgentStream(text, attachments) {
       if (streamState.messages[idx]) {
         Object.assign(streamState.messages[idx], updates);
       }
-      if (isCurrentSession() && state.agentMessages[idx]) {
-        Object.assign(state.agentMessages[idx], updates);
+      if (isCurrentSession()) {
+        // 稳定定位：按 _uid 在 state.agentMessages 查找（根治压缩分页/轮询重建 splice
+        // 中间插入导致的下标漂移——tool_result 晚到时卡片可能已移动/替换，纯下标会写错位置）。
+        // 找不到（消息已被重建移除/替换）→ 容错跳过，交由最终诚实重建合并正确（延迟防御）。
+        const uid = streamState.messages[idx] && streamState.messages[idx]._uid;
+        const ui = _findMsgIndexByUid(state.agentMessages, uid);
+        if (ui < 0) return;
+        Object.assign(state.agentMessages[ui], updates);
         // 更新对话流导航块的状态
         if (updates.status) {
-          _updateFlowNavBlockStatus(idx, updates.status, updates.result);
+          _updateFlowNavBlockStatus(ui, updates.status, updates.result);
         }
       }
     }
@@ -13743,15 +13759,23 @@ async function sendAgentStream(text, attachments) {
                 renderAgentMessages();
               }
             }
-            // 标记未返回结果的工具
+            // 标记未返回结果的工具（FIFO 数组：遍历所有排队索引）
             for (var tName in streamState.toolMsgMap) {
-              var tidx = streamState.toolMsgMap[tName];
-              if (streamState.messages[tidx] && streamState.messages[tidx].role === 'tool_call') {
-                streamState.messages[tidx].content = '⚠️ 工具未返回结果';
-                streamState.messages[tidx].status = 'done';
-                if (isCurrentSession() && state.agentMessages[tidx]) {
-                  state.agentMessages[tidx].content = '⚠️ 工具未返回结果';
-                  state.agentMessages[tidx].status = 'done';
+              var _tids = streamState.toolMsgMap[tName] || [];
+              for (var _ti = 0; _ti < _tids.length; _ti++) {
+                var tidx = _tids[_ti];
+                if (streamState.messages[tidx] && streamState.messages[tidx].role === 'tool_call') {
+                  streamState.messages[tidx].content = '⚠️ 工具未返回结果';
+                  streamState.messages[tidx].status = 'done';
+                  if (isCurrentSession()) {
+                    // 稳定定位（uid）：state.agentMessages 可能因压缩分页/轮询重建下标漂移
+                    const _u2 = streamState.messages[tidx] && streamState.messages[tidx]._uid;
+                    const _i2 = _findMsgIndexByUid(state.agentMessages, _u2);
+                    if (_i2 >= 0 && state.agentMessages[_i2]) {
+                      state.agentMessages[_i2].content = '⚠️ 工具未返回结果';
+                      state.agentMessages[_i2].status = 'done';
+                    }
+                  }
                 }
               }
             }
@@ -13801,7 +13825,9 @@ async function sendAgentStream(text, attachments) {
                   if (_argsPreview && _argsPreview !== '{}') _tcNavLabel += ' ' + _argsPreview.replace(/\s+/g, ' ').substring(0, 30);
                 } catch(e) {}
                 streamState.currentIndex = addStreamMessage('tool_call', _tcNavLabel, { name: msg.name, args: msg.args, result: '', status: 'running' });
-                streamState.toolMsgMap[msg.name] = streamState.currentIndex;
+                // FIFO 队列（同名工具多次调用排队不覆盖——根治 toolMsgMap 以 name 为 key 互相覆盖
+                // 导致 tool_result 追加错位；agent 顺序执行工具，result 到达 shift 队首严格匹配）
+                (streamState.toolMsgMap[msg.name] = streamState.toolMsgMap[msg.name] || []).push(streamState.currentIndex);
                 if (isCurrentSession()) {
                   document.getElementById('agentTyping').classList.add('show');
                   // 立即渲染：让最新 running 工具卡片实时出现并展开（否则要等 tool_result
@@ -13819,7 +13845,9 @@ async function sendAgentStream(text, attachments) {
                 break;
               case 'sub_agent':
                 // 子代理执行进度：实时更新 sub_agent 工具卡片（工具请求 + 进程）
-                var subIdx = streamState.toolMsgMap['sub_agent'];
+                var subIdx = undefined;
+                var _subArr = streamState.toolMsgMap['sub_agent'];
+                if (_subArr && _subArr.length) subIdx = _subArr[_subArr.length - 1];  // 最新 sub_agent 卡片
                 if (subIdx !== undefined) {
                   var ev = msg.event || '';
                   var agentName = msg.agent || 'sub_agent';
@@ -13845,8 +13873,9 @@ async function sendAgentStream(text, attachments) {
                   window.__lastCpHash = msg.checkpoint_hash;
                   streamState.lastCpHash = msg.checkpoint_hash;  // 本轮 hash，供 assistant 气泡携带
                 }
-                // 更新独立的 tool 消息
-                var toolIdx = streamState.toolMsgMap[msg.name];
+                // 更新独立的 tool 消息（FIFO：同名工具排队，shift 队首匹配最早未完成卡片）
+                var _toolArr = streamState.toolMsgMap[msg.name];
+                var toolIdx = (_toolArr && _toolArr.length) ? _toolArr.shift() : undefined;
                 if (toolIdx !== undefined) {
                   var truncated = (msg.result || '').length > 5000 ? (msg.result || '').substring(0, 5000) + '...' : (msg.result || '');
                   updateStreamMessage(toolIdx, { 
@@ -13858,7 +13887,7 @@ async function sendAgentStream(text, attachments) {
                   if (isCurrentSession()) {
                     renderAgentMessages();
                   }
-                  delete streamState.toolMsgMap[msg.name];
+                  if (!_toolArr || !_toolArr.length) delete streamState.toolMsgMap[msg.name];
                 }
                 break;
               case 'done':
@@ -13909,15 +13938,18 @@ async function sendAgentStream(text, attachments) {
                     renderAgentMessages();
                   }
                 }
-                // 标记未返回结果的工具
+                // 标记未返回结果的工具（FIFO 数组：遍历所有排队索引；updateStreamMessage 已按 uid 稳定定位）
                 for (var tName in streamState.toolMsgMap) {
-                  var tidx = streamState.toolMsgMap[tName];
-                  if (streamState.messages[tidx] && streamState.messages[tidx].role === 'tool_call') {
-                    updateStreamMessage(tidx, {
-                      content: '⚠️ 工具未返回结果（可能被打断）',
-                      status: 'running',
-                      interrupted: true
-                    });
+                  var _tids2 = streamState.toolMsgMap[tName] || [];
+                  for (var _ti2 = 0; _ti2 < _tids2.length; _ti2++) {
+                    var tidx = _tids2[_ti2];
+                    if (streamState.messages[tidx] && streamState.messages[tidx].role === 'tool_call') {
+                      updateStreamMessage(tidx, {
+                        content: '⚠️ 工具未返回结果（可能被打断）',
+                        status: 'running',
+                        interrupted: true
+                      });
+                    }
                   }
                 }
                 streamState.fullContent = '';
@@ -13985,14 +14017,17 @@ async function sendAgentStream(text, attachments) {
           renderAgentMessages();
         }
       }
-      // 标记未返回结果的工具
+      // 标记未返回结果的工具（FIFO 数组：遍历所有排队索引；updateStreamMessage 已按 uid 稳定定位）
       for (var tName in streamState.toolMsgMap) {
-        var tidx = streamState.toolMsgMap[tName];
-        if (streamState.messages[tidx] && streamState.messages[tidx].role === 'tool_call') {
-          updateStreamMessage(tidx, {
-            content: '⚠️ 工具未返回结果',
-            status: 'done'
-          });
+        var _tids3 = streamState.toolMsgMap[tName] || [];
+        for (var _ti3 = 0; _ti3 < _tids3.length; _ti3++) {
+          var tidx = _tids3[_ti3];
+          if (streamState.messages[tidx] && streamState.messages[tidx].role === 'tool_call') {
+            updateStreamMessage(tidx, {
+              content: '⚠️ 工具未返回结果',
+              status: 'done'
+            });
+          }
         }
       }
       streamState.fullContent = '';
@@ -17464,6 +17499,10 @@ function _handleAgentPoolStatus(payload) {
   // 本页流式进行中由本地渲染驱动（local 权威），ws 推送不打回
   if (_isLocalStreaming()) return;
   const sid = _getAgentSessionId();
+  // 【会话隔离修复】仅响应本会话触发的状态变化：其他会话（标签页/loop 实例）的
+  // 状态变化不再覆盖本页流式状态（防止"他页 loop done → 本页判断完成被打断"，用户报告偶发）。
+  // 语义不漂移：changed_session 缺省（旧广播/手动 push）→ 保持旧行为（按当前会话 find 同步）。
+  if (payload.changed_session && payload.changed_session !== sid) return;
   const entry = payload.instances.find(i => i.session_id === sid);
   if (!entry) return;  // 池中无当前会话条目（新/空会话），不覆盖状态
   // 流式权威统一用 is_streaming（与轮询/其余端点同源 _agent_state_of），is_active 仅作旧 payload 兼容
