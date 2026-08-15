@@ -226,6 +226,25 @@ python -m macdev project list                        # 列出已初始化的产�
     - 高风险实验隔离（不污染主工作区）。
     单主体单线最简；多主体（子代理）才 worktree。只读查询（`git worktree list`/`git branch -a`）随时可执行；
     worktree add/remove 会改仓库状态，remove 前按铁律 1 先向用户确认。
+14. **旧扫描产物（audit/INTERFACE_CHAIN/CSV）作参考前必须做亲属追逐同步核实（自演化教训）**：
+    引用旧 audit 产物前，先用 `grep 'def <符号>'` 逐项核实行号与语义是否过期——
+    ① **行号漂移**：任何重构（P0 提取/loop 重构/合并）后行号必然过期（实测 loop.py `_parse_ts` 378→607、
+       app.py P0 后 `_sync_agent_from_store` 5354→5238、`agent_loop_goal` 5479→5490），以 grep 实际定位为准；
+    ② **语义变化**：docstring/新增逻辑（如 loop._run_task 会话上下文合并 spec 4/5）旧扫描完全不含，
+       必须读当前实现确认；
+    ③ **unknown/broken 真伪**：`__import__("contextlib")` 动态导入是合法误报（非真断裂）、
+       索引不全（`_build_handoff`/`_emit` 旧扫描标 unknown 但定义存在）都需实测验证，不可凭标注下结论；
+    ④ **跨模块反射目标**：middleware 方法（run_before_agent/run_turn/run_after_agent）不在 base.py
+       定义，在 HarnessRunner/具体实现——按实际定义文件定位。
+    旧扫描的**结构价值**（谁调谁）保留，**行号/标注/语义**一律以当前代码为准；不确定就重跑 audit。
+15. **高风险重构必须 worktree 隔离开发 + 保留实例验收 + 用户确认后合并（用户强制，本次 P1-P3 教训）**：
+    会话子系统/状态机/渲染链路等**高风险重构**（影响面大、易回归、改核心数据流）一律在 worktree 分支开发——
+    建 `<name>-worktree` 分支 → 开发调试（TDD 红→绿）→ **保留运行实例供用户验收**（验收清单列明）
+    → **用户明确确认后才合并回 master**。禁止高风险重构直接改 master（本次 P1-P3 直接改 master 违背
+    用户预期：虽 plan verify 全通过，但无隔离、无法回退粒度验收，风险不可控）。区分：
+    - **Bounded**（小改动/新 flag/单文件修复）→ 可单线 master 直接改；
+    - **Architectural / 高风险重构** → 必须 worktree + 验收门禁（保留实例 → 用户验收 → 确认后 merge）。
+    worktree 验收完成后：`git merge`（用户确认）→ `git worktree remove`（用户确认，铁律 1/13）。
 
 > 本节优先级高于 skill 内其他「经验只写 log 不写 SKILL.md」的约定——用户指令 > skill 内部约定。
 
