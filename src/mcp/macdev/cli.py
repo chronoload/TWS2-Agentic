@@ -98,7 +98,9 @@ def cmd_audit_chain(args) -> int:
           "endpoints": chain_query.chain_endpoints,
           "models": chain_query.chain_models,
           "drifts": chain_query.chain_drifts,
-          "tables": chain_query.chain_tables}[args.sub2]
+          "tables": chain_query.chain_tables,
+          "callers": chain_query.chain_callers,
+          "kw": chain_query.chain_kw}[args.sub2]
     if args.sub2 == "stats":
         lines = fn(args.db)
     elif args.sub2 == "issues":
@@ -111,6 +113,10 @@ def cmd_audit_chain(args) -> int:
                    no_model=getattr(args, "no_model", False))
     elif args.sub2 == "models":
         lines = fn(args.db, dup=getattr(args, "dup", False), name=getattr(args, "name", ""))
+    elif args.sub2 == "callers":
+        lines = fn(args.db, func=getattr(args, "func", ""))
+    elif args.sub2 == "kw":
+        lines = fn(args.db, keyword=getattr(args, "keyword", ""))
     else:
         lines = fn(args.db)
     return _print_lines(0 if not lines or "库不存在" not in lines[0] else 1, lines)
@@ -921,6 +927,10 @@ def build_parser() -> argparse.ArgumentParser:
                    ("--name", {"default": "", "help": "models: 模型名过滤"})])
     _chain_parser("drifts", "语义漂移")
     _chain_parser("tables", "表结构")
+    _chain_parser("callers", "按符号追调用链（--func：上游谁调 X + 下游 X 调谁）",
+                  [("--func", {"default": "", "help": "callers: 函数名"})])
+    _chain_parser("kw", "关键字微扫描（--keyword：refs 引用位置 def/use 标注）",
+                  [("--keyword", {"default": "", "help": "kw: 关键字"})])
     acq.set_defaults(fn=cmd_audit_chain)
 
     # plan

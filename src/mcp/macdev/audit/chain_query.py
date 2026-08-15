@@ -115,6 +115,68 @@ def chain_drifts(db: Path | str | None = None) -> list:
         conn.close()
 
 
+def chain_callers(db: Path | str | None = None, func: str = "") -> list:
+    """按符号追调用链：上游(谁调 X) + 下游(X 调谁)，file:line 定位。"""
+    conn = chain_connect(db)
+    if conn is None:
+        return ["[chain] 库不存在（先运行 python -m macdev audit）"]
+    try:
+        has = conn.execute("SELECT name FROM sqlite_master "
+                           "WHERE type='table' AND name='calls'").fetchone()
+        if not has:
+            return ["[chain] 当前 db 无 calls 表（旧产物）——先运行 audit 刷新生成 calls/refs 索引"]
+        if not func:
+            return ["[chain] 用法: audit chain callers --func <函数名>"]
+        up = conn.execute(
+            "SELECT caller, file, line FROM calls WHERE callee LIKE ? ORDER BY file, line",
+            (f"%{func}%",)).fetchall()
+        down = conn.execute(
+            "SELECT callee, file, line FROM calls WHERE caller LIKE ? ORDER BY file, line",
+            (f"%{func}%",)).fetchall()
+        out = [f"⬆ 上游（谁调用了 {func}）: {len(up)} 处"]
+        if up:
+            for caller, f, ln in up:
+                out.append(f"    {caller}()  ← {f}:{ln}")
+        else:
+            out.append("    （无）")
+        out.append(f"⬇ 下游（{func} 调用了谁）: {len(down)} 处")
+        if down:
+            for callee, f, ln in down:
+                out.append(f"    {callee}()  → {f}:{ln}")
+        else:
+            out.append("    （无）")
+        return out
+    finally:
+        conn.close()
+
+
+def chain_kw(db: Path | str | None = None, keyword: str = "") -> list:
+    """关键字微扫描：refs 索引中引用位置列表（def/use 标注）。"""
+    conn = chain_connect(db)
+    if conn is None:
+        return ["[chain] 库不存在（先运行 python -m macdev audit）"]
+    try:
+        has = conn.execute("SELECT name FROM sqlite_master "
+                           "WHERE type='table' AND name='refs'").fetchone()
+        if not has:
+            return ["[chain] 当前 db 无 refs 表（旧产物）——先运行 audit 刷新生成 calls/refs 索引"]
+        if not keyword:
+            return ["[chain] 用法: audit chain kw --keyword <关键字>"]
+        rows = conn.execute(
+            "SELECT symbol, file, line, kind FROM refs WHERE symbol LIKE ? "
+            "ORDER BY file, line LIMIT 200",
+            (f"%{keyword}%",)).fetchall()
+        if not rows:
+            return [f"[chain] 无匹配「{keyword}」的引用"]
+        out = [f"[chain] 关键字「{keyword}」引用 {len(rows)} 处"]
+        for sym, f, ln, kind in rows:
+            mark = "▸" if kind == "def" else "·"
+            out.append(f"  {mark} {sym}  [{kind}]  {f}:{ln}")
+        return out
+    finally:
+        conn.close()
+
+
 def chain_issues(db: Path | str | None = None, count: bool = False,
                  kind: str = "", file: str = "", attr: str = "") -> list:
     conn = chain_connect(db)

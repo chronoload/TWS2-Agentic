@@ -291,9 +291,24 @@ def write_csvs(out_dir: Path, endpoints, models, drifts, defuse,
                 for i in scan_items["static_resources"]])
 
 
+def read_db_calls_refs(db_path) -> tuple:
+    """从旧 db 读回 calls/refs（供增量合并；旧库无表 → ([], [])）"""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        try:
+            calls = conn.execute("SELECT caller, callee, file, line FROM calls").fetchall()
+            refs = conn.execute("SELECT symbol, file, line, kind FROM refs").fetchall()
+        except sqlite3.OperationalError:
+            return [], []
+        return calls, refs
+    finally:
+        conn.close()
+
+
 def write_db(db_path: Path, endpoints, models, drifts=None, defuse=None,
-             behavior=None, flag=None, merge=None, id_source=None, scan_items=None) -> None:
-    """写 SQLite 全维度表：endpoints/models/drifts/defuse/behavior/flag/merge/id_source/扫描/stats。"""
+             behavior=None, flag=None, merge=None, id_source=None, scan_items=None,
+             calls=None, refs=None) -> None:
+    """写 SQLite 全维度表：endpoints/models/drifts/defuse/behavior/flag/merge/id_source/扫描/calls/refs/stats。"""
     conn = sqlite3.connect(str(db_path))
     try:
         c = conn.cursor()
@@ -385,6 +400,18 @@ def write_db(db_path: Path, endpoints, models, drifts=None, defuse=None,
             if rows:
                 c.executemany(f"INSERT INTO {tbl} VALUES ({','.join('?' * len(cols.split(',')))})", rows)
 
+        # 双索引：calls(调用图) + refs(引用索引)，供 chain callers/kw 查询
+        c.execute("DROP TABLE IF EXISTS calls")
+        c.execute("""CREATE TABLE calls(
+            caller TEXT, callee TEXT, file TEXT, line INT)""")
+        if calls:
+            c.executemany("INSERT INTO calls VALUES (?,?,?,?)", calls)
+        c.execute("DROP TABLE IF EXISTS refs")
+        c.execute("""CREATE TABLE refs(
+            symbol TEXT, file TEXT, line INT, kind TEXT)""")
+        if refs:
+            c.executemany("INSERT INTO refs VALUES (?,?,?,?)", refs)
+
         c.execute("DROP TABLE IF EXISTS stats")
         c.execute("CREATE TABLE stats(key TEXT, value TEXT)")
         stats = {"endpoints": len(endpoints), "models": len(models),
@@ -397,7 +424,9 @@ def write_db(db_path: Path, endpoints, models, drifts=None, defuse=None,
                  "hardcoded": len(scan_items.get("hardcoded", [])) if scan_items else 0,
                  "env_vars": len(scan_items.get("env_vars", [])) if scan_items else 0,
                  "data_pools": len(scan_items.get("data_pools", [])) if scan_items else 0,
-                 "static_resources": len(scan_items.get("static_resources", [])) if scan_items else 0}
+                 "static_resources": len(scan_items.get("static_resources", [])) if scan_items else 0,
+                 "calls": len(calls) if calls else 0,
+                 "refs": len(refs) if refs else 0}
         c.executemany("INSERT INTO stats VALUES (?,?)",
                       [(k, str(v)) for k, v in stats.items()])
         conn.commit()

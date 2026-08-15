@@ -31,18 +31,6 @@ python -m macdev plan ledger --plan 1   # 进度台账（resume 用）
 
 `macdev audit chain` — 定向查询 interface_chain.db
 
-- `--db` — interface_chain.db 路径
-- `--count` — issues: 类型计数分布
-- `--kind` — issues: 缺陷类型过滤（逗号分隔）
-- `--file` — issues: 文件过滤
-- `--attr` — issues: 属性过滤
-- `--by-file` — endpoints: 按文件分组
-- `--path` — endpoints: 路径过滤
-- `--func` — endpoints: 函数过滤
-- `--no-model` — endpoints: 无请求模型的端点
-- `--dup` — models: 跨文件重复定义
-- `--name` — models: 模型名过滤
-
 `macdev audit chain stats` — 统计
 
 - `--db` — interface_chain.db 路径
@@ -50,14 +38,24 @@ python -m macdev plan ledger --plan 1   # 进度台账（resume 用）
 `macdev audit chain issues` — 缺陷（--count 分布 / --kind/--file/--attr 过滤）
 
 - `--db` — interface_chain.db 路径
+- `--count` — issues: 类型计数分布
+- `--kind` — issues: 缺陷类型过滤（逗号分隔）
+- `--file` — issues: 文件过滤
+- `--attr` — issues: 属性过滤
 
 `macdev audit chain endpoints` — 端点（--by-file/--path/--func/--no-model）
 
 - `--db` — interface_chain.db 路径
+- `--by-file` — endpoints: 按文件分组
+- `--path` — endpoints: 路径过滤
+- `--func` — endpoints: 函数过滤
+- `--no-model` — endpoints: 无请求模型的端点
 
 `macdev audit chain models` — 模型（--dup 重复定义 / --name 过滤）
 
 - `--db` — interface_chain.db 路径
+- `--dup` — models: 跨文件重复定义
+- `--name` — models: 模型名过滤
 
 `macdev audit chain drifts` — 语义漂移
 
@@ -66,6 +64,16 @@ python -m macdev plan ledger --plan 1   # 进度台账（resume 用）
 `macdev audit chain tables` — 表结构
 
 - `--db` — interface_chain.db 路径
+
+`macdev audit chain callers` — 按符号追调用链（--func：上游谁调 X + 下游 X 调谁）
+
+- `--db` — interface_chain.db 路径
+- `--func` — callers: 函数名
+
+`macdev audit chain kw` — 关键字微扫描（--keyword：refs 引用位置 def/use 标注）
+
+- `--db` — interface_chain.db 路径
+- `--keyword` — kw: 关键字
 
 `macdev plan` — 开发流程机器化
 
@@ -431,7 +439,7 @@ python -m macdev plan ledger --plan 1   # 进度台账（resume 用）
 
 | 命名空间 | 已注册项 |
 |----------|----------|
-| `audit.strategy` | base, ts2 |
+| `audit.strategy` | base, dsh, ts2 |
 | `patch.generator` | insert_defuse_comment, insert_entry_comment, insert_env_todo, insert_guard_comment, insert_merge_comment, insert_reset_comment, insert_set_after_clear, insert_todo_comment |
 | `plan.runner` | default |
 

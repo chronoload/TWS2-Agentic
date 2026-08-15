@@ -77,19 +77,24 @@ registry.register("audit.strategy", "my", MyStrategy)
 - L95 `extract_imports` `(path: 'Path') -> 'dict'` — 提取模块内所有 import（含函数内），返回 {名称: 模块路径}
 - L175 `extract_python_models` `(path: 'Path', models: 'list')` — 
 
-**audit/chain.py**（12 个顶层函数/类）
-- L139 `_iter_py_files` `(root: 'Path', exclude: 'tuple') -> 'list'` — 遍历项目内 *.py，跳过排除目录；逐目录容错（断链目录只跳过该目录，
+**audit/chain.py**（17 个顶层函数/类）
+- L235 `_iter_py_files` `(root: 'Path', exclude: 'tuple') -> 'list'` — 遍历项目内 *.py，跳过排除目录；逐目录容错（断链目录只跳过该目录，
 - L118 `_method_calls_of` `(module_path: 'Path', cls_name: 'str', method_name: 'str') -> 'list'` — 提取类方法内部的调用目标（1 层）
 - L41 `_walk_own` `(node)` — 遍历节点自身 body，跳过嵌套函数/类定义（避免闭包内部调用混入父函数）
-- L354 `build_dep_sections` `(endpoints: 'list', root: 'Path', chains_cfg: 'dict' = None, strategy: 'ChainStrategy' = None, exclude: 'tuple' = (), budget=None) -> 'str'` — 关键端点依赖链（亲属追逐 → 跨模块/存储）。
-- L160 `build_global_symbol_index` `(root: 'Path', exclude: 'tuple' = (), budget=None) -> 'dict'` — 全局符号索引（亲属反射表）：{符号名: [(相对文件, 行号, 种类)]}
-- L323 `chain_mermaid` `(node: 'ChainNode', parent_id: 'str' = '') -> 'list'` — 调用链 → mermaid graph 语句（broken 节点标红，cross_file 显示定义位置）
-- L308 `chain_text` `(node: 'ChainNode', indent: 'int' = 0) -> 'list'` — 调用链 → 文本树（broken 断裂节点标红 🔴，cross_file 显示定义位置）
-- L343 `collect_broken_refs` `(node: 'ChainNode', out: 'list') -> 'list'` — 递归收集链路中的断裂引用（broken 节点），返回 [(目标, 调用行)]
+- L450 `build_dep_sections` `(endpoints: 'list', root: 'Path', chains_cfg: 'dict' = None, strategy: 'ChainStrategy' = None, exclude: 'tuple' = (), budget=None) -> 'str'` — 关键端点依赖链（亲属追逐 → 跨模块/存储）。
+- L256 `build_global_symbol_index` `(root: 'Path', exclude: 'tuple' = (), budget=None) -> 'dict'` — 全局符号索引（亲属反射表）：{符号名: [(相对文件, 行号, 种类)]}
+- L419 `chain_mermaid` `(node: 'ChainNode', parent_id: 'str' = '') -> 'list'` — 调用链 → mermaid graph 语句（broken 节点标红，cross_file 显示定义位置）
+- L404 `chain_text` `(node: 'ChainNode', indent: 'int' = 0) -> 'list'` — 调用链 → 文本树（broken 断裂节点标红 🔴，cross_file 显示定义位置）
+- L221 `changed_file_paths` `(files, db_path) -> 'tuple'` — 对比指纹返回 (changed, removed, fps)。
+- L439 `collect_broken_refs` `(node: 'ChainNode', out: 'list') -> 'list'` — 递归收集链路中的断裂引用（broken 节点），返回 [(目标, 调用行)]
 - L71 `collect_call_targets` `(func) -> 'list'` — 收集函数体（不含嵌套定义）内的直接调用目标，过滤装饰器与噪声
+- L137 `collect_calls_refs` `(files) -> 'tuple'` — 同一遍历产出 calls(调用图) + refs(引用索引)，供 chain callers/kw 查询持久化。
 - L50 `extract_var_bindings` `(func) -> 'dict'` — 提取函数体内变量 → 类型名/来源（Assign/AnnAssign 直接赋值）
-- L198 `trace_chain` `(start_name: 'str', func_map: 'dict', import_map: 'dict', path: 'Path', depth: 'int' = 0, seen=None, max_depth: 'int' = 3, global_index: 'dict' = None, strategy: 'ChainStrategy' = None) -> 'ChainNode'` — 从函数名开始递归展开调用链（亲属追逐 → 亲属反射）
-- L458 `write_db` `(db_path: 'Path', endpoints: 'list', models: 'list') -> 'None'` — 写 SQLite：endpoints / models / stats 三表（机器可读轨，最小闭环）。
+- L183 `file_fingerprint` `(path: 'Path') -> 'str'` — 文件指纹：size + mtime_ns（够快，不读内容；同大小内容变更靠 mtime 检出）
+- L206 `load_fingerprints` `(db_path) -> 'dict'` — 读回指纹 {path: fp}；旧 db 无表/不存在 → {}
+- L192 `save_fingerprints` `(db_path, fps: 'dict') -> 'None'` — 持久化指纹到 scan_fingerprints 表（清表重建）
+- L294 `trace_chain` `(start_name: 'str', func_map: 'dict', import_map: 'dict', path: 'Path', depth: 'int' = 0, seen=None, max_depth: 'int' = 3, global_index: 'dict' = None, strategy: 'ChainStrategy' = None) -> 'ChainNode'` — 从函数名开始递归展开调用链（亲属追逐 → 亲属反射）
+- L554 `write_db` `(db_path: 'Path', endpoints: 'list', models: 'list') -> 'None'` — 写 SQLite：endpoints / models / stats 三表（机器可读轨，最小闭环）。
 
 **audit/analyze.py**（27 个顶层函数/类）
 - L640 `_call_fn_name` `(call) -> 'str'` — 
@@ -135,20 +140,23 @@ registry.register("audit.strategy", "my", MyStrategy)
 - L145 `scan_hardcoded` `(root: 'Path', files: 'list', exclude: 'tuple' = ('test', 'tests', 'migrations', 'node_modules', '.git', '.venv', 'venv', 'build', 'dist', 'site-packages', '__pycache__', 'docs', 'examples', 'assets', 'static_arch', 'static-branch', 'web', 'android', 'archs', 'draft', 'static-capacitor'), budget=None) -> 'list'` — 
 - L451 `scan_static_resources` `(root: 'Path', files: 'list', exclude: 'tuple' = ('test', 'tests', 'migrations', 'node_modules', '.git', '.venv', 'venv', 'build', 'dist', 'site-packages', '__pycache__', 'docs', 'examples', 'assets', 'static_arch', 'static-branch', 'web', 'android', 'archs', 'draft', 'static-capacitor'), budget=None) -> 'list'` — 
 
-**audit/report.py**（4 个顶层函数/类）
+**audit/report.py**（5 个顶层函数/类）
 - L234 `_write_csv` `(path: 'Path', headers: 'list', rows: 'list') -> 'None'` — 写 CSV（utf-8-sig 便于 Excel 直接打开）
 - L12 `gen_markdown` `(endpoints, models, dep_sections: 'str' = '', defuse=None, behavior=None, flag=None, merge=None, id_source=None, hardcoded=None, env_vars=None, data_pools=None, static_resources=None) -> 'str'` — 通用审计报告：端点/模型/语义偏移 + 依赖链（§8）+ 6 维分析 + 4 维扫描。
+- L294 `read_db_calls_refs` `(db_path) -> 'tuple'` — 从旧 db 读回 calls/refs（供增量合并；旧库无表 → ([], [])）
 - L243 `write_csvs` `(out_dir: 'Path', endpoints, models, drifts, defuse, behavior, flag, merge, id_source, scan_items) -> 'None'` — 四类 CSV 明细产物。
-- L294 `write_db` `(db_path: 'Path', endpoints, models, drifts=None, defuse=None, behavior=None, flag=None, merge=None, id_source=None, scan_items=None) -> 'None'` — 写 SQLite 全维度表：endpoints/models/drifts/defuse/behavior/flag/merge/id_so
+- L308 `write_db` `(db_path: 'Path', endpoints, models, drifts=None, defuse=None, behavior=None, flag=None, merge=None, id_source=None, scan_items=None, calls=None, refs=None) -> 'None'` — 写 SQLite 全维度表：endpoints/models/drifts/defuse/behavior/flag/merge/id_so
 
-**audit/chain_query.py**（7 个顶层函数/类）
+**audit/chain_query.py**（9 个顶层函数/类）
+- L118 `chain_callers` `(db: 'Path | str | None' = None, func: 'str' = '') -> 'list'` — 按符号追调用链：上游(谁调 X) + 下游(X 调谁)，file:line 定位。
 - L9 `chain_connect` `(db: 'Path | str | None' = None) -> 'sqlite3.Connection | None'` — 
 - L99 `chain_drifts` `(db: 'Path | str | None' = None) -> 'list'` — 
 - L31 `chain_endpoints` `(db: 'Path | str | None' = None, by_file: 'bool' = False, path: 'str' = '', func: 'str' = '', no_model: 'bool' = False) -> 'list'` — 
-- L118 `chain_issues` `(db: 'Path | str | None' = None, count: 'bool' = False, kind: 'str' = '', file: 'str' = '', attr: 'str' = '') -> 'list'` — 
+- L180 `chain_issues` `(db: 'Path | str | None' = None, count: 'bool' = False, kind: 'str' = '', file: 'str' = '', attr: 'str' = '') -> 'list'` — 
+- L153 `chain_kw` `(db: 'Path | str | None' = None, keyword: 'str' = '') -> 'list'` — 关键字微扫描：refs 索引中引用位置列表（def/use 标注）。
 - L69 `chain_models` `(db: 'Path | str | None' = None, dup: 'bool' = False, name: 'str' = '') -> 'list'` — 
 - L18 `chain_stats` `(db: 'Path | str | None' = None) -> 'list'` — 
-- L181 `chain_tables` `(db: 'Path | str | None' = None) -> 'list'` — 
+- L243 `chain_tables` `(db: 'Path | str | None' = None) -> 'list'` — 
 
 ### plan 开发流程
 

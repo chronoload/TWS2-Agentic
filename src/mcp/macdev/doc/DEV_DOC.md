@@ -49,7 +49,7 @@ python -m macdev dev audit --target <dir> [--strategy base] [--project <name>]
 
 | 命名空间 | 已注册项 |
 |----------|----------|
-| `audit.strategy` | base, ts2 |
+| `audit.strategy` | base, dsh, ts2 |
 | `patch.generator` | insert_defuse_comment, insert_entry_comment, insert_env_todo, insert_guard_comment, insert_merge_comment, insert_reset_comment, insert_set_after_clear, insert_todo_comment |
 | `plan.runner` | default |
 

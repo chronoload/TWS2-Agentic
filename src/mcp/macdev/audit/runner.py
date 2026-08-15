@@ -56,6 +56,20 @@ def run_audit(engine, task: AuditTask, out_dir: Path) -> Result:
     if budget and budget.truncated:
         engine.bus.emit("audit.truncated", budget.summary())
 
+    # 双索引：calls(调用图) + refs(引用索引)——增量编译（LuaTeX 式指纹缓存，改 1 文件只重扫）
+    db = out_dir / "interface_chain.db"
+    _changed, _removed, _fps = chain.changed_file_paths(files, db)
+    if db.exists() and not (_changed or _removed):
+        calls, refs = report.read_db_calls_refs(db)      # 无变更：直接复用旧索引
+    elif _changed or _removed:
+        old_calls, old_refs = report.read_db_calls_refs(db)
+        _dirty = {str(p) for p in _changed} | set(_removed)
+        _new_calls, _new_refs = chain.collect_calls_refs(_changed)
+        calls = [c for c in old_calls if c[2] not in _dirty] + _new_calls
+        refs = [r for r in old_refs if r[1] not in _dirty] + _new_refs
+    else:
+        calls, refs = chain.collect_calls_refs(files)
+
     # 语义偏移：前端 client 方法（task.files.client 指向 JS，可选）
     drifts = []
     client_js = (task.files or {}).get("client")
@@ -84,7 +98,8 @@ def run_audit(engine, task: AuditTask, out_dir: Path) -> Result:
     db = out_dir / "interface_chain.db"
     report.write_db(db, endpoints, models, drifts, analysis["defuse"],
                     analysis["behavior"], analysis["flag"], analysis["merge"],
-                    analysis["id_source"], scan_items)
+                    analysis["id_source"], scan_items, calls=calls, refs=refs)
+    chain.save_fingerprints(db, _fps)
 
     engine.bus.emit("audit.phase.done", {"phase": "report", "artifacts": [str(db)]})
     data = {"endpoints": len(endpoints), "files": len(files),

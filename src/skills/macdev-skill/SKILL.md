@@ -251,6 +251,11 @@ python -m macdev project list                        # 列出已初始化的产�
     - **Bounded**（小改动/新 flag/单文件修复）→ 可单线 master 直接改；
     - **Architectural / 高风险重构** → 必须 worktree + 验收门禁（保留实例 → 用户验收 → 确认后 merge）。
     worktree 验收完成后：`git merge`（用户确认）→ `git worktree remove`（用户确认，铁律 1/13）。
+16. **audit 优先纪律（用户强制，debug/架构追溯第一入口）**：任何 Bug 定位/架构追溯/新功能探索任务，**第一步先跑 audit 建立全量上下文**（亲属追逐依赖链 + calls/refs 索引 + 缺陷全景），禁止直接用 grep/read 零散查询起步（局部视野易语义漂移/漏考虑）。
+    - **快速入口**：`dev audit --target <根> --project <名> [--timeout N]`（自动编排默认 task，无需手写 task.json）；定制 `audit-task.json` 建一次反复用，按需求动态修改。
+    - **交互追链**：`audit chain callers --func <X>`（上游谁调 X / 下游 X 调谁）、`audit chain kw --keyword <K>`（引用位置 def/use 标注）——替代 grep 定位。
+    - **完成所有修改后**：重跑 audit 一次（增量编译秒级）→ 对比 before/after（drifts/issues/calls 变化）→ 确认无新断裂/语义漂移再收尾。
+    - **产物收敛**：audit 产物落 `<name>-project/audit/` 或 `dev/<目标>/`（重跑覆写），旧产物作参考前按铁律 14 核实行号/标注/语义。
 
 > 本节优先级高于 skill 内其他「经验只写 log 不写 SKILL.md」的约定——用户指令 > skill 内部约定。
 

@@ -134,6 +134,102 @@ def _method_calls_of(module_path: Path, cls_name: str, method_name: str) -> list
     return out
 
 
+def collect_calls_refs(files) -> tuple:
+    """同一遍历产出 calls(调用图) + refs(引用索引)，供 chain callers/kw 查询持久化。
+
+    calls: [(caller, callee, file, line)] — caller 为函数全名（类方法含 Class.method 前缀），
+            callee 为 collect_call_targets 提取的调用目标（函数名或 obj.method）
+    refs:  [(symbol, file, line, kind)] — kind=def(函数/类/赋值目标) | use(Name/Attribute 引用)
+    """
+    calls: list = []
+    refs: list = []
+    for path in files:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, OSError, UnicodeDecodeError):
+            continue
+        rel = str(path).replace("\\", "/")
+        # refs: 定义（函数/类/赋值目标）
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                refs.append((node.name, rel, node.lineno, "def"))
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        refs.append((t.id, rel, node.lineno, "def"))
+            elif isinstance(node, ast.Attribute):
+                refs.append((node.attr, rel, node.lineno, "use"))
+        # refs: 使用（Name 引用）
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                refs.append((node.id, rel, node.lineno, "use"))
+        # calls: 函数/类方法 → 调用目标（递归类方法，类名作前缀）
+        def _walk_defs(node, prefix=""):
+            for sub in getattr(node, "body", []):
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fname = f"{prefix}{sub.name}"
+                    for target, _kind, ln in collect_call_targets(sub):
+                        calls.append((fname, target, rel, ln))
+                    _walk_defs(sub, prefix + sub.name + ".")
+                elif isinstance(sub, ast.ClassDef):
+                    _walk_defs(sub, prefix + sub.name + ".")
+
+        _walk_defs(tree)
+    return calls, refs
+
+
+# ---------- 增量编译（LuaTeX 式：文件指纹缓存，改 1 文件只重扫该文件） ----------
+
+def file_fingerprint(path: Path) -> str:
+    """文件指纹：size + mtime_ns（够快，不读内容；同大小内容变更靠 mtime 检出）"""
+    try:
+        st = path.stat()
+        return f"{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return "0:0"
+
+
+def save_fingerprints(db_path, fps: dict) -> None:
+    """持久化指纹到 scan_fingerprints 表（清表重建）"""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        c = conn.cursor()
+        c.execute("DROP TABLE IF EXISTS scan_fingerprints")
+        c.execute("CREATE TABLE scan_fingerprints(path TEXT PRIMARY KEY, fp TEXT)")
+        c.executemany("INSERT OR REPLACE INTO scan_fingerprints VALUES (?,?)",
+                      list(fps.items()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_fingerprints(db_path) -> dict:
+    """读回指纹 {path: fp}；旧 db 无表/不存在 → {}"""
+    if not Path(db_path).exists():
+        return {}
+    conn = sqlite3.connect(str(db_path))
+    try:
+        try:
+            rows = conn.execute("SELECT path, fp FROM scan_fingerprints").fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        return {p: fp for p, fp in rows}
+    finally:
+        conn.close()
+
+
+def changed_file_paths(files, db_path) -> tuple:
+    """对比指纹返回 (changed, removed, fps)。
+    changed: 新增/修改的文件（需重扫）；removed: db 有但 files 无（已删除）；fps: 全量新指纹。
+    """
+    new_fps = {str(p): file_fingerprint(p) for p in files}
+    old_fps = load_fingerprints(db_path)
+    changed = [p for p in files
+               if str(p) not in old_fps or old_fps[str(p)] != new_fps[str(p)]]
+    removed = [p for p in old_fps if p not in new_fps]
+    return changed, removed, new_fps
+
+
 # ---------- 亲属追逐核心原子 ----------
 
 def _iter_py_files(root: Path, exclude: tuple) -> list:
