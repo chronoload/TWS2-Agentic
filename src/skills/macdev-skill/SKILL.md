@@ -232,8 +232,9 @@ python -m macdev project list                        # 列出已初始化的产�
     完成即自行实现"是严重违规（曾致 spec 全 open 但代码已提交）。plan 必须对齐 writing-plans 颗粒度：
     每 task 带 Create/Modify 涉及文件，每 step 带动作+期望结果+TDD 红→绿（`--action test --expected FAIL`
     → 实现 → 转绿）；**禁止 task 无文件、step 用"待补充"占位**——潦草 plan 等于没写，执行者仍需自行设计。
-17. **spec/plan 写完必须用编辑器打开呈用户（用户强制，2026-08-16 固化）**：spec（requirement export → REQUIREMENTS.md）与 plan（plan export → .md）写完后，**必须用编辑器打开（open_in_editor）**让用户直接查看/审阅——用户可能找不到产物文件位置，编辑器打开是审阅的默认呈现方式。与铁律 12 同：spec/plan 未获用户批准前不进入实现。
+17. **凡是 macdev 人类轨产物都必须用编辑器打开呈用户（用户强制，2026-08-16 固化）**：**一切人类轨产物**——spec（requirement export → REQUIREMENTS.md）、plan（plan export → .md）、audit（INTERFACE_CHAIN.md，见铁律 20）、log 导出（LOGS.md）等 .md 文件——产出后**必须用编辑器打开（open_in_editor）**让用户直接查看/审阅——用户可能找不到产物文件位置，编辑器打开是审阅的默认呈现方式。与铁律 12 同：spec/plan 未获用户批准前不进入实现；audit 人类轨未打开呈现前不视为完成。
 18. **架构设计必须按 langdriven 细化 + 最小可运行核心（用户强制，2026-08-16 固化）**：任何 Architectural 设计（spec 细化/新子系统），必须：①按 langdriven 六段式输出（语言建模/匹配范式/方案设计/测试与验证/失效边界/最小可运行核心）；②**必须画出亲属追踪风格依赖链**（层间调用图）+ **数据池模型设计**（具名资源池 ADT：每个池的载体/生命周期/消费方）；③**必须搭建最小可运行核心**：核心数据模型（dataclass）+ 事件总线（发布/订阅）+ 关键层逻辑（状态机/纯函数聚合），每层 30-80 行 + TDD 测试骨架，先跑绿再扩；④TS/前端项目 audit 用 subprocess 扫描插件（见 audit.frontend）；⑤**沉淀必须自动做**——写完 spec/plan/设计/解决 Bug/收获经验后，**立即** `log add`（scope=project 或 pkg）沉淀，不待用户提醒（"自动沉淀"是默认动作，如同 git commit）。
+19. **全栈全场景机器驱动开发 + 自演化插件审核机制（用户强制，2026-08-16 固化）**：macdev 是**面向全栈全场景**的机器驱动开发体系——audit 不只扫 .py：①**全栈覆盖**：通过插件机制覆盖 TS/JS/Vue 前端（`audit.frontend.ts_subprocess`，subprocess 调 rg）、后端、配置文件、任意语言/框架；②**机制驱动自演化**：遇到**新场景/新环境/新问题**（如 Python 扫不到 TS → 写前端插件；GBK 编码崩溃 → 加 encoding；权限拒绝 → os.walk 容错；WindowsApps 占位符 → 用绝对路径解释器）→ **主动生成 patch 插件纳入 macdev**，不等用户要求——自演化是机制不是选项；③**插件自审门禁**：新插件必须验证 ①Registry 注册成功 ②实扫通过（单目录 + 全量）③产物落位 `<name>-project/audit/`，三者齐备才算纳入；④**沉淀自动**：每次自演化 patch 后立即 `log add`（scope=pkg 机制沉淀），如本次前端扫描插件四连修（TS 覆盖→UTF-8→rg 排除→os.walk 容错）即活例。
 13. **worktree 仅用于子代理/多线并行隔离（用户强制，并发冲突教训）**：主开发流保持**单线**
     （master 直接改，避免并发冲突）——本次教训：主工作区与 worktree 并发改同一文件（loop.py），
     两边改动需逐处手动合并，成本极高。**只有以下场景才建 worktree**：
@@ -266,6 +267,7 @@ python -m macdev project list                        # 列出已初始化的产�
     - **交互追链**：`audit chain callers --func <X>`（上游谁调 X / 下游 X 调谁）、`audit chain kw --keyword <K>`（引用位置 def/use 标注）——替代 grep 定位。
     - **完成所有修改后**：重跑 audit 一次（增量编译秒级）→ 对比 before/after（drifts/issues/calls 变化）→ 确认无新断裂/语义漂移再收尾。
     - **产物收敛**：audit 产物落 `<name>-project/audit/` 或 `dev/<目标>/`（重跑覆写），旧产物作参考前按铁律 14 核实行号/标注/语义。
+20. **audit 扫完必查产物 + 打开人类轨（用户强制，2026-08-16 固化）**：audit 命令执行后——**无论工具返回成功/超时/报错**——都必须走产物验证门禁：①**必查产物**：`dir <name>-project/audit/`（或 `dev/<目标>/`）确认 INTERFACE_CHAIN.md + interface_chain.db + 全维度 CSV 均已落位，且 mtime 为本轮扫描（对比调用前时间戳）；②**超时≠失败**：工具超时/报错不代表扫描未完成——后台可能仍在跑完、产物可能已生成，必须先验证产物再下结论，禁止拿旧产物当新结果或重复盲目重扫；③**产物缺失/陈旧**（文件缺失或 mtime 早于本轮调用）→ 补跑或修复后重扫，拿到新产物为止；④**打开人类轨**：产物确认后**必须用 open_in_editor 打开 INTERFACE_CHAIN.md 呈用户**（亲属追逐依赖链 + 缺陷清单供评审，铁律 17），audit 人类轨未打开呈现前不视为完成。
 
 > 本节优先级高于 skill 内其他「经验只写 log 不写 SKILL.md」的约定——用户指令 > skill 内部约定。
 
