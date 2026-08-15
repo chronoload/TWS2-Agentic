@@ -10549,6 +10549,33 @@ function _startPeriodicSessionSync() {
 // 不做 assistant 合并、不做 hash 去重、不做计数仲裁、不做前缀判断、
 // 不剔除 system 消息——后端返回什么，前端就渲染什么。
 // 唯一保护：本页流式进行中本地实时渲染才是权威（后端此时是节流中间态），跳过。
+// ─── 渲染崩溃可见化（P2）：全局 error/unhandledrejection → UI 提示条 ───
+// 历史数据格式漂移会导致渲染中途 JS 异常（如 defs.map），若无兜底前端整体"假死"
+// （用户感知为"会话死了"）。此处捕获所有未处理异常并注入可见提示条，便于定位+不静默。
+(function() {
+  function _showAgentErrorBar(msg) {
+    try {
+      let bar = document.getElementById('agentErrorBar');
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'agentErrorBar';
+        bar.style.cssText = 'position:fixed;bottom:12px;right:12px;z-index:99999;max-width:420px;padding:10px 14px;'
+          + 'background:#fff3f3;border:1px solid #f0c0c0;border-radius:8px;font-size:12px;color:#c0392b;'
+          + 'box-shadow:0 2px 12px rgba(0,0,0,.15);white-space:pre-wrap;word-break:break-all;';
+        document.body.appendChild(bar);
+      }
+      bar.textContent = '⚠ 前端异常: ' + String(msg).slice(0, 300);
+      bar.style.display = 'block';
+      setTimeout(function() { if (bar && bar.parentNode) bar.style.display = 'none'; }, 8000);
+    } catch (e) { /* 提示条本身异常忽略 */ }
+  }
+  window.addEventListener('error', function(e) { _showAgentErrorBar((e && e.message) || (e && e.error) || '渲染错误'); });
+  window.addEventListener('unhandledrejection', function(e) {
+    var r = e && e.reason;
+    _showAgentErrorBar((r && (r.message || r)) || 'Promise 异常');
+  });
+})();
+
 function _expandBackendMessages(backendMessages) {
   /** 把后端紧凑结构（assistant 折叠 tool_calls + 独立 tool）展开为前端 UI 结构 */
   const ui = [];
@@ -10556,6 +10583,7 @@ function _expandBackendMessages(backendMessages) {
   const toolCpHashes = {};
   // 预扫描：将所有 tool 消息的结果和 checkpoint_hash 按 tool_call_id 归档
   for (const msg of backendMessages) {
+    if (!msg || typeof msg !== 'object') continue;  // 畸形消息（null/标量）跳过
     if (msg.role === 'tool') {
       const tcId = msg.tool_call_id || '';
       if (tcId) {
@@ -10566,6 +10594,7 @@ function _expandBackendMessages(backendMessages) {
   }
   // 按原始顺序展开：system / user / assistant(含 tool_calls) / tool_call 卡片
   for (const msg of backendMessages) {
+    if (!msg || typeof msg !== 'object') continue;  // 畸形消息（null/标量）跳过，不中断渲染
     if (msg.role === 'tool') continue;
     if (msg.role === 'system') {
       // 压缩摘要 system 消息：
