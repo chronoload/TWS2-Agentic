@@ -30,7 +30,8 @@ class SubagentConfig:
     description: str = ""
     system_prompt: str = ""
     model: str = "inherit"
-    max_turns: int = 20
+    # max_turns: 0/负数 = 无限轮次（由 timeout_seconds 兜底）；>0 = 轮次上限
+    max_turns: int = 0
     timeout_seconds: int = 1800
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
@@ -54,7 +55,10 @@ class AgentSpec:
     # 风格的团队协作流程，对应 Cline 中 teammate 与 subagent 的区分。
     kind: str = "subagent"
     model: str = ""
-    max_turns: int = 20
+    # max_turns: 0/负数 = 无限轮次（由 timeout_seconds 兜底）；>0 = 轮次上限（向后兼容）
+    max_turns: int = 0
+    # max_retries: 连续异常（LLM 调用/无响应）恢复上限——loop 防异常打断，超过才失败
+    max_retries: int = 3
     timeout_seconds: int = 1800
     allowed_tools: Optional[List[str]] = None
     denied_tools: Optional[List[str]] = None

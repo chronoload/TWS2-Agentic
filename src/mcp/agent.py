@@ -632,22 +632,18 @@ class Agent:
                     self._coordinator.register_agent(AgentSpec(
                         role=AgentRole.CODER, name="coder",
                         system_prompt="你是一个专业的编程助手。根据用户需求编写、修改、调试代码。",
-                        max_turns=15,
                     ))
                     self._coordinator.register_agent(AgentSpec(
                         role=AgentRole.TASK, name="task",
                         system_prompt="你是一个任务执行助手。按照指令完成特定任务。",
-                        max_turns=10,
                     ))
                     self._coordinator.register_agent(AgentSpec(
                         role=AgentRole.RESEARCH, name="research",
                         system_prompt="你是一个研究助手。搜索、分析、总结信息。",
-                        max_turns=8,
                     ))
                     self._coordinator.register_agent(AgentSpec(
                         role=AgentRole.REVIEW, name="review",
                         system_prompt="你是一个代码审查助手。审查代码质量和安全性。",
-                        max_turns=5,
                     ))
                     logger.info("子Agent系统已初始化 (使用默认配置)")
             except Exception as e:

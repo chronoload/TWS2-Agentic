@@ -93,12 +93,18 @@ class Coordinator:
             for agent in self._agents.values():
                 agent.cancel()
 
-    def run(self, agent_name: str, prompt: str, context=None, on_event: Optional[Callable] = None) -> SubAgentResult:
+    def run(self, agent_name: str, prompt: str, context=None, on_event: Optional[Callable] = None,
+            max_turns: Optional[int] = None) -> SubAgentResult:
         spec = self._specs.get(agent_name)
         if spec is None:
             result = SubAgentResult(agent_name=agent_name)
             result.mark_failed(error=f"Agent '{agent_name}' not found")
             return result
+
+        # 工具轨：per-call max_turns 覆盖角色默认（副本替换，不改注册 spec；None = 用 spec 值）
+        if max_turns is not None:
+            import dataclasses
+            spec = dataclasses.replace(spec, max_turns=max_turns)
 
         cancel_event = threading.Event()
         self._cancel_events[agent_name] = cancel_event
@@ -141,14 +147,15 @@ class Coordinator:
             self._agents.pop(agent_name, None)
             self._cancel_events.pop(agent_name, None)
 
-    def run_async(self, agent_name: str, prompt: str, context=None, on_event: Optional[Callable] = None) -> str:
+    def run_async(self, agent_name: str, prompt: str, context=None, on_event: Optional[Callable] = None,
+                  max_turns: Optional[int] = None) -> str:
         task_id = uuid.uuid4().hex[:12]
         holder = _SubagentResultHolder(task_id)
         self._pending_tasks[task_id] = holder
 
         def _worker():
             try:
-                result = self.run(agent_name, prompt, context, on_event=on_event)
+                result = self.run(agent_name, prompt, context, on_event=on_event, max_turns=max_turns)
                 holder.result = result
             except Exception as e:
                 holder.result = SubAgentResult(agent_name=agent_name)
@@ -190,6 +197,7 @@ class Coordinator:
                 agent_name=task["agent"],
                 prompt=task["prompt"],
                 context=task.get("context"),
+                max_turns=task.get("max_turns"),
             )
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -390,7 +398,6 @@ def create_default_coordinator(llm=None, tool_registry=None) -> Coordinator:
             "- 如果 prompt 中包含 [前置 Agent 结果]，请仔细阅读并在此基础上工作\n"
             "- 如果发现前置 Agent 的结果有问题，请明确指出并给出修正方案"
         ),
-        max_turns=50,
         timeout_seconds=3600,
     ))
 
@@ -411,7 +418,6 @@ def create_default_coordinator(llm=None, tool_registry=None) -> Coordinator:
             "- 如果 prompt 中包含 [前置 Agent 结果]，请基于其输出继续\n"
             "- 如果前置任务未完成，请评估是否可以继续推进"
         ),
-        max_turns=40,
         timeout_seconds=3600,
     ))
 
@@ -432,7 +438,6 @@ def create_default_coordinator(llm=None, tool_registry=None) -> Coordinator:
             "- 如果 prompt 中包含 [前置 Agent 结果]，请在其基础上深入分析\n"
             "- 研究结果应结构化呈现，方便后续 Agent 引用"
         ),
-        max_turns=30,
         timeout_seconds=2400,
         allowed_tools=["web_search", "web_fetch", "read_file", "list_directory"],
     ))
@@ -456,7 +461,6 @@ def create_default_coordinator(llm=None, tool_registry=None) -> Coordinator:
             "- 审查结果应按严重程度分级（严重/建议/优化）\n"
             "- 给出具体的修改建议，而非模糊的描述"
         ),
-        max_turns=20,
         timeout_seconds=1800,
         allowed_tools=["read_file", "list_directory", "grep"],
     ))
@@ -480,7 +484,6 @@ def create_default_coordinator(llm=None, tool_registry=None) -> Coordinator:
             "- 生成 1~2 个 create_tasks 类动作\n"
             "- 机会成本需隐含在选项中"
         ),
-        max_turns=5,
         timeout_seconds=600,
         allowed_tools=[],
     ))
