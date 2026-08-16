@@ -68,8 +68,22 @@
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,39,T4 P2前端：渲染防御补全（pageerror 可见化 + 畸形兜底）,done,42,2,TDD绿：app.js 渲染防御补全（所有渲染路径 Array.isArray/?. 兜底 + pageerror 提示条）,done
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,40,T5 P3多标签页：会话协调（storage 同步 + 切换广播）,done,43,1,TDD红：写 _test_multi_tab.js（双页：A 切会话 → B storage 事件触发状态同步）,done
 20260815_会话子系统性能与健壮性推进-P1-P3,会话子系统性能与健壮性推进（P1-P3）,open,2026-08-15 12:07:16,40,T5 P3多标签页：会话协调（storage 同步 + 切换广播）,done,44,2,TDD绿：app.js storage 事件监听 + 会话切换广播 + 轮询防抖（多标签页状态一致）,done
-20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,46,P0 感知层：插件信号适配（SensoryOrgan→Signal→PerceptionEvent）,open,,,,
-20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,47,P1 组织层：党组织架构（PartyMember/PartyGroup/上级组织/会议制度）,open,,,,
-20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,48,P2 治理层：八项权利/义务/批评机制/民主集中,open,,,,
-20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,49,P3 执行层：PartyMember 真实任务（BattleUnit 抽象 + 茧化）,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,46,P0 感知层：插件信号适配（SensoryOrgan→Signal→PerceptionEvent）,done,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,47,P1 组织层：党组织架构（PartyMember/PartyGroup/上级组织/会议制度）,done,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,48,P2 治理层：八项权利/义务/批评机制/民主集中,done,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,49,P3 执行层：PartyMember 真实任务（BattleUnit 抽象 + 茧化）,done,,,,
 20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,50,P4 前端：three-arena 组织态势视图 + HITL 双通道,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,51,P0 协议基座：SessionEvent 事件流(复现 dsh)+ServicePort(Signal 化服务),done,65,1,写失败测试 test_service_port.py：ServicePort(Port 契约+Signal 数据+事件持久化)+session_store/model_selector 注册,done
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,51,P0 协议基座：SessionEvent 事件流(复现 dsh)+ServicePort(Signal 化服务),done,66,1,写失败测试 test_session_event.py：EventEnvelope(seq/version/ignorable)+validateEvent/applyTransition 状态机+seed/append/flush+SessionStore 分块持久化,done
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,51,P0 协议基座：SessionEvent 事件流(复现 dsh)+ServicePort(Signal 化服务),done,67,2,写失败测试 test_tool_events.py：appendToolCall/appendToolResult 事件写入事件流,done
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,52,P0 感知层：SensoryOrgan→Signal→PerceptionEvent(事件流接入),done,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,53,P0 符号信道：decision_fn→model_selector+LLM ServicePort（复用 TS2）,done,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,54,rts_api+看板流（threejs-rts 定制对接后端）,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,55,e2e 闭环测试（OrgLoop：世界→事件→看板→组织→行动）,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,56,超模态感知保真（事件流唯一事实源+压缩语义不偏移）,open,,,,
+20260816_战场式多Agent管理沙盘-党组织式组织-v1,战场式多Agent管理沙盘（党组织式组织）v1,open,2026-08-16 00:23:49,57,双层解耦（机制层×政治层 发布订阅）,open,,,,
+20260816_模型目录动态化-spec-id-11,模型目录动态化（spec id=11）,open,2026-08-16 15:44:11,58,T1 model_catalog.py 核心：query_models + group_by_base_url + ModelCatalogService,open,69,1,T1 TDD：model_catalog 5 断言红→绿,done
+20260816_模型目录动态化-spec-id-11,模型目录动态化（spec id=11）,open,2026-08-16 15:44:11,59,T2 配置接入：ProviderConfig.catalog_base_url + settings 可调参数,open,68,1,T2 配置接入：ProviderConfig.catalog_base_url + settings 可调参数,done
+20260816_模型目录动态化-spec-id-11,模型目录动态化（spec id=11）,open,2026-08-16 15:44:11,60,T3 启动接入 + Web API：ensure_refresh 后台任务 + GET /api/models + settings API,open,70,1,T3 启动接入 + Web API 三端点,open
+20260816_模型目录动态化-spec-id-11,模型目录动态化（spec id=11）,open,2026-08-16 15:44:11,61,T4 ModelSelector 消费 + 前端展示,open,71,1,T4 ModelSelector 回填 + 前端展示,open
+20260816_模型目录动态化-spec-id-11,模型目录动态化（spec id=11）,open,2026-08-16 15:44:11,62,T5 config_ui 桌面端设置区,open,72,1,T5 config_ui 模型目录设置区,open

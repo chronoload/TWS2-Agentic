@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>党组织组织态势 · three-arena</title>
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; margin: 0; background: #0f1420; color: #d6e0f0; }
+  header { padding: 12px 20px; background: #161d30; border-bottom: 1px solid #2a3550; }
+  header h1 { margin: 0; font-size: 18px; }
+  header .sub { font-size: 12px; color: #7a8ab0; margin-top: 4px; }
+  .arenas { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; padding: 12px; }
+  .arena { background: #161d30; border: 1px solid #2a3550; border-radius: 8px; padding: 12px; min-height: 320px; }
+  .arena h2 { margin: 0 0 10px; font-size: 14px; color: #7fc7ff; border-bottom: 1px solid #2a3550; padding-bottom: 6px; }
+  .group { margin: 6px 0; padding: 6px 10px; border-left: 3px solid #7fc7ff; background: #1a2238; border-radius: 4px; }
+  .member { display: inline-block; margin: 4px; padding: 4px 10px; background: #223055; border-radius: 12px; font-size: 12px; }
+  .member .role { color: #8fb0e0; font-size: 11px; }
+  .card { padding: 6px 10px; margin: 6px 0; background: #1a2238; border-radius: 6px; font-size: 12px; }
+  .card .tag { color: #ffb86c; }
+  .btn { margin-top: 10px; padding: 8px 16px; background: #2a6dd4; border: none; border-radius: 6px; color: #fff; cursor: pointer; font-size: 13px; }
+  .btn:hover { background: #3a7de4; }
+  .feed { max-height: 240px; overflow-y: auto; font-size: 11px; color: #9aa8cc; }
+  .feed div { padding: 3px 0; border-bottom: 1px dashed #2a3550; }
+  .arena ul { margin: 4px 0; padding-left: 18px; }
+  #toast { position: fixed; bottom: 16px; right: 16px; background: #1d3a2a; border: 1px solid #2fae6a; padding: 10px 16px; border-radius: 6px; display: none; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚔️ 党组织组织态势 · three-arena</h1>
+  <div class="sub">同构 Agent 世界控制台 · 组织拓扑 / 治理看板 / 活性上下文 · HITL 双通道</div>
+</header>
+
+<div class="arenas">
+  <!-- Arena 1: 组织拓扑 -->
+  <section class="arena">
+    <h2>① 组织拓扑</h2>
+    <div id="org-tree">加载中…</div>
+  </section>
+
+  <!-- Arena 2: 治理看板 -->
+  <section class="arena">
+    <h2>② 治理看板</h2>
+    <div id="board">
+      <div class="card"><span class="tag">制度</span> 八项权利 / 批评 / 检举 / 申诉</div>
+      <div class="card"><span class="tag">监督</span> 巡回检查组（独立 / 游走 / 直达中央）</div>
+      <div class="card"><span class="tag">会议</span> 召集 → 议事 → 表决 → 民主集中</div>
+      <div class="card"><span class="tag">执行</span> BattleUnit 领任务 → 执行 → 汇报 → 茧化</div>
+      <div id="patrol-info"></div>
+    </div>
+    <button class="btn" onclick="conveneMeeting()">🏛️ 召集会议（HITL 决策点）</button>
+  </section>
+
+  <!-- Arena 3: 活性上下文 -->
+  <section class="arena">
+    <h2>③ 活性上下文</h2>
+    <div id="context-feed" class="feed">加载中…</div>
+    <div id="meeting-result"></div>
+  </section>
+</div>
+<div id="toast"></div>
+
+<script>
+const API = "/api/organization";
+
+async function loadStatus() {
+  try {
+    const resp = await fetch(API + "/status");
+    const st = await resp.json();
+    renderOrgTree(st);
+    renderPatrol(st.patrol);
+    renderFeed(st);
+  } catch (e) {
+    document.getElementById("org-tree").textContent = "加载失败: " + e;
+  }
+}
+
+function renderOrgTree(st) {
+  const el = document.getElementById("org-tree");
+  let html = "";
+  for (const g of st.groups) {
+    html += `<div class="group">🏛️ ${g.name} <small>(${g.id})</small></div>`;
+    if (g.children && g.children.length) {
+      html += `<ul>${g.children.map(c => `<li>⬇️ 下级: ${c}</li>`).join("")}</ul>`;
+    }
+  }
+  html += `<div style="margin-top:8px;font-size:12px;color:#7a8ab0">👥 成员:</div>`;
+  for (const m of st.members) {
+    html += `<span class="member">${m.id} <span class="role">[${m.role}]</span></span>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderPatrol(p) {
+  if (!p) return;
+  document.getElementById("patrol-info").innerHTML =
+    `<div class="card"><span class="tag">🛡️ 巡回组</span> 派出方=${p.origin} · 目标=${(p.targets||[]).join(",")}</div>`;
+}
+
+function renderFeed(st) {
+  const el = document.getElementById("context-feed");
+  el.innerHTML = st.members.map(m =>
+    `<div>🧑 ${m.id}（${m.role}）信箱就绪 · 事件流可回放</div>`).join("") +
+    `<div>🔄 活性上下文：无 done 终止，可重放 / 分叉 / 恢复</div>` +
+    `<div>🔌 符号信道：model_selector ServicePort（复用 TS2 llm.py）</div>` +
+    `<div>👁 感知信道：SensoryOrgan → Signal → PerceptionEvent</div>`;
+}
+
+async function conveneMeeting() {
+  try {
+    const resp = await fetch(API + "/meeting", { method: "POST" });
+    const r = await resp.json();
+    document.getElementById("meeting-result").innerHTML =
+      `<div class="card"><span class="tag">✅ 会议已召集</span> 议程="${r.agenda}" · 组织=${r.group}</div>`;
+    toast("会议已召集，等待民主集中表决");
+  } catch (e) {
+    toast("召集失败: " + e);
+  }
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 3000);
+}
+
+loadStatus();
+</script>
+</body>
+</html>
