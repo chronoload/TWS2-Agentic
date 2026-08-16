@@ -26,6 +26,10 @@ AGENT_TOOL_SCHEMA = {
                     "type": "object",
                     "description": "传递给子Agent的上下文信息",
                 },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "轮次上限（可选）：0/负数=无限（默认，由 timeout_seconds 兜底）；>0=限制本轮次，覆盖角色默认配置",
+                },
             },
             "required": ["agent", "prompt"],
         },
@@ -45,7 +49,9 @@ class AgentTool:
     def __call__(self, agent: str, prompt: str, context: Optional[Dict[str, Any]] = None, **kwargs) -> str:
         # on_event：子代理执行进度回调（转发到主 Agent 流式通道，前端可实时显示）
         on_event = kwargs.pop("on_event", None)
-        result = self.coordinator.run(agent, prompt, context, on_event=on_event)
+        # 工具轨：max_turns 每次调用可设置（None=角色默认；0/负数=无限；>0=本轮上限）
+        max_turns = kwargs.pop("max_turns", None)
+        result = self.coordinator.run(agent, prompt, context, on_event=on_event, max_turns=max_turns)
         # 返回结构化JSON，前端可识别 __sub_agent__ 标记做特殊渲染
         # 关键：包含子代理的完整历史 (messages)，用于状态机持久化和回退
         structured = {

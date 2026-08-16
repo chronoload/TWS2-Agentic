@@ -87,14 +87,52 @@ class SessionAgent:
         self.messages.append({"role": "user", "content": prompt})
 
         try:
-            for turn in range(self.spec.max_turns):
+            max_turns = self.spec.max_turns
+            max_retries = getattr(self.spec, "max_retries", 3)
+            consecutive_errors = 0
+            turn = 0
+            while max_turns <= 0 or turn < max_turns:
+                turn += 1
                 if self._check_cancelled():
                     break
 
-                self._emit({"event": "llm", "turn": turn + 1})
-                response = self._call_llm()
-                if not response:
-                    break
+                self._emit({"event": "llm", "turn": turn})
+                try:
+                    response = self._call_llm()
+                except Exception as e:
+                    # loop 防异常打断：LLM 异常 → 记录错误并继续下一轮，连续超限才失败
+                    consecutive_errors += 1
+                    if consecutive_errors > max_retries:
+                        logger.error(f"SessionAgent {self.spec.name} LLM 连续异常 {consecutive_errors} 次，终止")
+                        self._result.mark_failed(
+                            error=f"LLM 连续异常 {consecutive_errors} 次: {e}",
+                            messages=list(self.messages),
+                        )
+                        self._emit({"event": "end", "status": "failed", "error": str(e)[:200]})
+                        return self._result
+                    self.messages.append({
+                        "role": "system",
+                        "content": f"[loop-recovery] LLM 调用异常（第 {consecutive_errors} 次）：{e}。请继续。",
+                    })
+                    continue
+                if response is None:
+                    if not self.llm:
+                        break  # LLM 未配置：重试无意义
+                    consecutive_errors += 1
+                    if consecutive_errors > max_retries:
+                        logger.error(f"SessionAgent {self.spec.name} LLM 连续无响应 {consecutive_errors} 次，终止")
+                        self._result.mark_failed(
+                            error=f"LLM 连续无响应 {consecutive_errors} 次",
+                            messages=list(self.messages),
+                        )
+                        self._emit({"event": "end", "status": "failed", "error": "LLM 连续无响应"})
+                        return self._result
+                    self.messages.append({
+                        "role": "system",
+                        "content": f"[loop-recovery] LLM 无响应（第 {consecutive_errors} 次）。请继续。",
+                    })
+                    continue
+                consecutive_errors = 0
 
                 self._result.prompt_tokens += getattr(response, "prompt_tokens", 0)
                 self._result.completion_tokens += getattr(response, "completion_tokens", 0)
@@ -141,7 +179,7 @@ class SessionAgent:
                     self._emit({"event": "tool_call", "turn": turn + 1, "tool_name": tc_name, "tool_args": tc_args})
                     tool_result = self._execute_tool(tc)
                     self._emit({
-                        "event": "tool_result", "turn": turn + 1,
+                        "event": "tool_result", "turn": turn,
                         "tool_name": tc_name,
                         "preview": str(tool_result)[:200],
                     })
@@ -171,12 +209,9 @@ class SessionAgent:
     def _call_llm(self):
         if not self.llm:
             return None
-        try:
-            tools_param = self.tools if self.tools else None
-            return self.llm.chat(self.messages, tools=tools_param)
-        except Exception as e:
-            logger.error(f"LLM call failed: {e}")
-            return None
+        # 异常不在此吞掉：抛给 run() 的 loop 恢复机制处理（防异常打断）
+        tools_param = self.tools if self.tools else None
+        return self.llm.chat(self.messages, tools=tools_param)
 
     def _execute_tool(self, tool_call) -> Any:
         if self.tool_executor:

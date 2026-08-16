@@ -21,7 +21,8 @@ class SubAgentConfig:
     name: str
     enabled: bool = True
     model: str = ""
-    max_turns: int = 10
+    # max_turns: 0/负数 = 无限轮次（由 timeout_seconds 兜底）；>0 = 轮次上限（可配置）
+    max_turns: int = 0
     system_prompt: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -286,7 +287,6 @@ class ConfigManager:
                     name="coder",
                     enabled=True,
                     model="",
-                    max_turns=15,
                     system_prompt="你是一名专业的编程助手。你的任务是编写、调试、重构代码，解决编程问题。请给出清晰、可执行的解决方案。",
                 ),
                 SubAgentConfig(
@@ -294,7 +294,6 @@ class ConfigManager:
                     name="task",
                     enabled=True,
                     model="",
-                    max_turns=10,
                     system_prompt="你是一名任务执行助手。你的任务是完成用户指定的具体任务，一步一步执行，并给出完整的结果。",
                 ),
                 SubAgentConfig(
@@ -302,7 +301,6 @@ class ConfigManager:
                     name="research",
                     enabled=True,
                     model="",
-                    max_turns=8,
                     system_prompt="你是一名研究助手。你的任务是搜索信息、分析资料、总结内容，帮助用户深入了解特定主题。",
                 ),
                 SubAgentConfig(
@@ -310,7 +308,6 @@ class ConfigManager:
                     name="review",
                     enabled=True,
                     model="",
-                    max_turns=5,
                     system_prompt="你是一名代码审查专家。你的任务是审查代码质量、安全性、最佳实践，并给出建设性的改进建议。",
                 ),
             ]

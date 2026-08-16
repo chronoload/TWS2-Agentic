@@ -590,9 +590,9 @@ class SubAgentConfigDialog:
         ttk.Entry(model_frame, textvariable=self.custom_model_var).grid(row=1, column=1, sticky=tk.EW, pady=5)
         ttk.Label(model_frame, text="(留空则使用下拉框选择)").grid(row=2, column=1, sticky=tk.W, pady=2)
         
-        ttk.Label(model_frame, text="最大轮次:").grid(row=3, column=0, sticky=tk.W, pady=5)
-        self.max_turns_var = tk.IntVar(value=10)
-        ttk.Spinbox(model_frame, from_=1, to=50, textvariable=self.max_turns_var).grid(row=3, column=1, sticky=tk.W, pady=5)
+        ttk.Label(model_frame, text="最大轮次 (0=无限):").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.max_turns_var = tk.IntVar(value=0)
+        ttk.Spinbox(model_frame, from_=0, to=9999, textvariable=self.max_turns_var).grid(row=3, column=1, sticky=tk.W, pady=5)
         
         model_frame.columnconfigure(1, weight=1)
         
