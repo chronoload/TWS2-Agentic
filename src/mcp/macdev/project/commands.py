@@ -1,6 +1,7 @@
 """project.commands：产物目录初始化解析。
 
-约定：`<name>-project/` 为唯一产物目录，内含 `.macdev-project`（记录 name）。
+约定（用户强制自演化 2026-08-16）：产物统一收敛到 `<项目根>/docs/<name>-project/`，
+内含 `.macdev-project`（记录 name）。不再散落 src/ 或项目根。
 命令返回 (code, lines)（与 plan/log 同约定）。
 """
 from __future__ import annotations
@@ -13,7 +14,7 @@ MARKER = ".macdev-project"
 
 def project_dir(name: str, base: Path = None) -> Path:
     base = base or Path.cwd()
-    return base / f"{name}-project"
+    return base / "docs" / f"{name}-project"
 
 
 def cmd_init(name: str, git: bool = False, base: str = "") -> tuple:
@@ -37,8 +38,12 @@ def cmd_init(name: str, git: bool = False, base: str = "") -> tuple:
 
 def cmd_list(base: str = "") -> tuple:
     base_path = Path(base) if base else Path.cwd()
-    found = sorted(p for p in base_path.glob("*-project")
+    found = sorted(p for p in (base_path / "docs").glob("*-project")
                    if p.is_dir() and (p / MARKER).exists())
+    # 兼容旧布局（项目根下的 <name>-project，待迁移）
+    found += sorted(p for p in base_path.glob("*-project")
+                    if p.is_dir() and (p / MARKER).exists()
+                    and p not in found)
     if not found:
         return 0, ["[project] 无已初始化产物目录（先 python -m macdev project init --name <n>）"]
     out = ["| 产物目录 | 项目名 |", "|----------|--------|"]

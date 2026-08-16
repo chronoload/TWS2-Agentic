@@ -87,4 +87,5 @@
 20260816_模型目录动态化-spec-id-11,模型目录动态化（spec id=11）,open,2026-08-16 15:44:11,60,T3 启动接入 + Web API：ensure_refresh 后台任务 + GET /api/models + settings API,open,70,1,T3 启动接入 + Web API 三端点,open
 20260816_模型目录动态化-spec-id-11,模型目录动态化（spec id=11）,open,2026-08-16 15:44:11,61,T4 ModelSelector 消费 + 前端展示,open,71,1,T4 ModelSelector 回填 + 前端展示,open
 20260816_模型目录动态化-spec-id-11,模型目录动态化（spec id=11）,open,2026-08-16 15:44:11,62,T5 config_ui 桌面端设置区,open,72,1,T5 config_ui 模型目录设置区,open
-20260816_模型选择断裂修复-Web-Agent-注入-model_selector-cat,模型选择断裂修复：Web Agent 注入 model_selector + catalog 污染/路由/假值/过滤四修复,open,2026-08-16 19:15:42,,,,,,,
+20260816_模型选择断裂修复-Web-Agent-注入-model_selector-cat,模型选择断裂修复：Web Agent 注入 model_selector + catalog 污染/路由/假值/过滤四修复,open,2026-08-16 19:15:42,63,T1 修复：注入 model_selector + catalog 污染/路由/假值/过滤,open,73,1,注入 model_selector + 四修复，提交 197a727,done
+20260816_模型选择断裂修复-Web-Agent-注入-model_selector-cat,模型选择断裂修复：Web Agent 注入 model_selector + catalog 污染/路由/假值/过滤四修复,open,2026-08-16 19:15:42,64,T2 验证：TDD 15 断言 + 6914 全栈,open,74,1,TDD 15 断言绿 + 6914 全栈无污染,done

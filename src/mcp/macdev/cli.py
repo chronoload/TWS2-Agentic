@@ -61,8 +61,22 @@ def _project_name(args) -> str:
 
 
 def _project_root(name: str) -> Path:
-    """<name>-project 产物目录绝对路径。"""
-    return Path.cwd() / f"{name}-project"
+    """<name>-project 产物目录绝对路径（用户强制自演化 2026-08-16）：
+
+    统一收敛到项目根的 docs/ 子目录：`<项目根>/docs/<name>-project/`。
+    定位策略（健壮性）：从 cwd 逐级向上找 `docs/<name>-project`（优先），
+    兼容旧版 `cwd/<name>-project`；均不存在则默认返回 `cwd/docs/<name>-project`
+    （由调用方 mkdir 创建，如 project init / log add / audit）。
+    """
+    cwd = Path.cwd()
+    for d in [cwd, *cwd.parents]:
+        cand_doc = d / "docs" / f"{name}-project"
+        if cand_doc.exists():
+            return cand_doc
+        cand_legacy = d / f"{name}-project"
+        if cand_legacy.exists():
+            return cand_legacy
+    return cwd / "docs" / f"{name}-project"
 
 
 # ─── audit ───

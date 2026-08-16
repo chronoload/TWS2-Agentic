@@ -24,7 +24,10 @@ from typing import List
 from .tools import Tool
 
 MCP_ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = MCP_ROOT.parent
+# 项目根 = mcp/ 的上级的上级（src/mcp → src → TS2_dev）。
+# 用户强制自演化 2026-08-16：macdev 产物统一收敛到 <项目根>/docs/<name>-project/，
+# 工具默认 workdir 必须是项目根（而非 src/），否则产物会落到 src/docs/ 下散落。
+PROJECT_ROOT = MCP_ROOT.parent.parent
 
 # macdev 顶层命令（python -m macdev 的子命令组）
 TOP_LEVEL_COMMANDS = ("audit", "plan", "patch", "log", "requirement", "dev",

@@ -162,7 +162,7 @@ python -m macdev audit --task task.json --root . --out out2      # 再审查（�
 
 经验/教训/模式沉淀在 **log 插件**（与 plan 平级），SKILL.md 只留本指针，避免文档膨胀不通用。
 经验分**随项目**（project，最主要，须指定项目文件夹）与**随包**（pkg，通用方法论随 skill 分发）双轨，
-随项目产物全部落在 `<name>-project/`，包内（macdev-skill）保持干净只放随包经验：
+随项目产物全部落在 `<项目根>/docs/<name>-project/`（如 `docs/ts2-project/`），包内（macdev-skill）保持干净只放随包经验：
 
 - **随项目（最主要，必须指定）**：`log add --project <name> --title ... --category ...`
   → `<name>-project/logs.db` + `LOGS.md`（条目 scope=project；缺 --project/env 会报错，不落 cwd）
@@ -177,20 +177,25 @@ python -m macdev audit --task task.json --root . --out out2      # 再审查（�
 builtin 反射噪音(turn.id→turn_id)、死代码 re-export 清理、回归语境核实、getattr 默认值陷阱、
 pathlib glob 拼接陷阱、双轨产物约定(requirement 参考 audit 扫描健壮性)、大文件阈值决策(12MB)。
 
-## 7. 产物目录约定（<name>-project/，全部产物不溢出）
+## 7. 产物目录约定（<项目根>/docs/<name>-project/，全部产物不溢出）
 
-整个工作流的产物收敛到唯一目录 `<name>-project/`，重跑覆写、不另建新目录：
+**用户强制自演化 2026-08-16**：macdev 产物统一收敛到**相关项目目录的 `docs/` 子目录**下
+（`<项目根>/docs/<name>-project/`，如 `TS2_dev/docs/ts2-project/`），没有 docs/ 就自行创建。
+**不再散落 `src/` 根目录或项目根**（`src/ts2-project`、项目根 `ts2-project` 均属违规）。
+macdev 已自演化：`_project_root` 从 cwd 逐级向上找 `docs/<name>-project`（优先）+ 兼容旧版
+`<name>-project`；`macdev_tools` 默认 workdir=项目根。旧布局产物迁移：移到 `docs/` 下同名目录。
 
 ```
-python -m macdev project init --name ts2 [--git]     # 建 ts2-project/（可选 git init 追踪）
+python -m macdev project init --name ts2 [--git]     # 建 docs/ts2-project/（可选 git init 追踪）
 python -m macdev project list                        # 列出已初始化的产物目录
 ```
 
-- **audit** → `ts2-project/audit/`：`audit --project ts2`（或显式 `--out` 优先）；重跑同目录覆写
-- **plan**  → `ts2-project/plans.db` + 导出的 .md（`plan export --out ts2-project/...`）
-- **log**   → `ts2-project/logs.db` + `LOGS.md`
-- **requirement** → `ts2-project/requirements.db` + `REQUIREMENTS.md` / `requirements.json` / `requirements.csv`
+- **audit** → `docs/ts2-project/audit/`：`audit --project ts2`（或显式 `--out` 优先）；重跑同目录覆写
+- **plan**  → `docs/ts2-project/plans.db` + 导出的 .md（`plan export --out docs/ts2-project/...`）
+- **log**   → `docs/ts2-project/logs.db` + `LOGS.md`
+- **requirement** → `docs/ts2-project/requirements.db` + `REQUIREMENTS.md` / `requirements.json` / `requirements.csv`
   （双轨自动同步）；对齐产物 `REQUIREMENT_ALIGNMENT.md` + `requirement_alignment.json/csv/db`
+- **verify/调试脚本** → `docs/ts2-project/verify/`（第一时间落位，不先建再移）
 
 指向方式：显式 `--project <name>`（audit 支持）或环境变量 `MACDEV_PROJECT=<name>`
 （plan/log/requirement 全部子命令缺省 db/out 自动收敛）；显式 `--db`/`--out` 始终优先。
@@ -202,8 +207,8 @@ python -m macdev project list                        # 列出已初始化的产�
 
 1. **危险 git 命令必须先问**：自演化/开发流程中，绝不允许在未向用户提问确认前直接执行任何危险 git 命令（`checkout` / `reset` / `clean` / `push` / `force-push` / `merge` / `revert` / `branch -D` / `rm` 等）。只读命令（`status` / `branch` / `log` / `diff` / `show`）可随时直接执行。
 2. **绝不假设未追踪（untracked）文件不重要（违反即停）**：`git status` 中的 `??` 项在删除/覆盖/忽略前必须逐项向用户确认，不得擅自忽略或清理。`??` 项可能是用户的成果/调试线索（如 `_verify_*` 脚本、`music/` 目录）——默认视为重要，先问后动。
-3. **会话启动/动手前双查（git + macdev log/plan，用户强制）**：任何新对话/会话（即使看似全新）开始、或上下文压缩恢复后，第一时间执行 `git branch -a` + `git status --short` + `git log --oneline -15`，看清分支/提交/工作区现状再动手；同时查阅随包 log（`log list --scope pkg` / `log query --keyword <词>`）与随项目 log/plan（`log list --scope project`、`plan list`），找回既定事实与历史轨迹。先 git（看仓库现状）→ 再 log/plan（看开发历史与既定事实），双查齐备后才允许继续操作；动手（含澄清/探索/读文件）前未完成 git 状态 + log/plan 双查即属违规。对话中途若发现信息断层、记忆缺失、或对"当前做了什么/部署在哪/某能力现状"不确定，同样立即补查；禁止凭猜测回答或继续操作；私有部署等外部环境信息同样先查 log/plan/会话缓存确认，再动手。同步做产物收敛扫描：`git status --short` 里出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*`/`_diag_*` 等调试文件 = 产物散落违规（引用新 4 产物收敛铁律），立即归位 `<name>-project/verify/` 后再继续。
-4. **🔴🔴 产物收敛铁律（用户强制 · 违反即停 · 本次违规教训固化）**：一切 macdev 产物——audit 输出 / plan / log / requirement / 调试脚本 / 验证脚本 / 一次性工具 / 日志——必须收敛到 `<name>-project/`（如 `ts2-project/verify/`、`ts2-project/audit/`、`ts2-project/plans.db`），绝对禁止散落开发环境（`src/` 根目录、项目根、工作区任意位置都算散落）。
+3. **会话启动/动手前双查（git + macdev log/plan，用户强制）**：任何新对话/会话（即使看似全新）开始、或上下文压缩恢复后，第一时间执行 `git branch -a` + `git status --short` + `git log --oneline -15`，看清分支/提交/工作区现状再动手；同时查阅随包 log（`log list --scope pkg` / `log query --keyword <词>`）与随项目 log/plan（`log list --scope project`、`plan list`），找回既定事实与历史轨迹。先 git（看仓库现状）→ 再 log/plan（看开发历史与既定事实），双查齐备后才允许继续操作；动手（含澄清/探索/读文件）前未完成 git 状态 + log/plan 双查即属违规。对话中途若发现信息断层、记忆缺失、或对"当前做了什么/部署在哪/某能力现状"不确定，同样立即补查；禁止凭猜测回答或继续操作；私有部署等外部环境信息同样先查 log/plan/会话缓存确认，再动手。同步做产物收敛扫描：`git status --short` 里出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*`/`_diag_*` 等调试文件 = 产物散落违规（引用新 4 产物收敛铁律），立即归位 `<项目根>/docs/<name>-project/verify/` 后再继续。
+4. **🔴🔴 产物收敛铁律（用户强制 · 违反即停 · 2026-08-16 自演化升级）**：一切 macdev 产物——audit 输出 / plan / log / requirement / 调试脚本 / 验证脚本 / 一次性工具 / 日志——必须收敛到**相关项目目录的 `docs/` 子目录**（`<项目根>/docs/<name>-project/`，如 `docs/ts2-project/verify/`、`docs/ts2-project/audit/`、`docs/ts2-project/plans.db`；无 docs/ 自行创建），绝对禁止散落开发环境（`src/` 根目录、项目根、工作区任意位置都算散落；`src/ts2-project`、项目根 `ts2-project` 均属违规）。
    - 双轨产物：机器可读（db/csv/json）+ 人类可读（md）双轨缺一不可；重跑覆写、不另建新目录；
    - 调试/验证/一次性脚本：第一时间写入 `<name>-project/verify/`，收尾统一归位，不得先在别处创建再移；
    - 违规检查信号：`git status` 出现 `??` 的 `_verify_*`/`_test_*`/`_boot_*` 等调试文件 = 已违规，立即归位；
