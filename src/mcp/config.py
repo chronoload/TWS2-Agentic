@@ -564,6 +564,40 @@ class ConfigManager:
         """获取总是批准的工具列表"""
         return self.settings.get("always_approved_tools", [])
 
+    # ── 模型目录可调参数（spec id=11）：Web API / config_ui 读写 ──
+    MODEL_CATALOG_DEFAULTS: Dict[str, Any] = {
+        "enabled": True,
+        "ttl_hours": 24,
+        "timeout_seconds": 10,
+        "include_keyless_local": True,
+        "max_concurrent": 4,
+    }
+
+    def get_model_catalog_settings(self) -> Dict[str, Any]:
+        """读取模型目录可调参数（缺省用默认值合并）。"""
+        merged = dict(self.MODEL_CATALOG_DEFAULTS)
+        stored = self.settings.get("model_catalog") or {}
+        merged.update({k: stored[k] for k in self.MODEL_CATALOG_DEFAULTS if k in stored})
+        return merged
+
+    def set_model_catalog_settings(self, **updates) -> Dict[str, Any]:
+        """更新模型目录可调参数（只接受已知键，类型强校验）。"""
+        current = self.settings.setdefault("model_catalog", {})
+        for k, v in updates.items():
+            if k not in self.MODEL_CATALOG_DEFAULTS:
+                continue  # 未知键忽略（防前端随意注入）
+            # 类型强校验：bool / int 规范化
+            if isinstance(self.MODEL_CATALOG_DEFAULTS[k], bool):
+                v = bool(v)
+            elif isinstance(self.MODEL_CATALOG_DEFAULTS[k], int):
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    continue
+            current[k] = v
+        self._save_settings()
+        return self.get_model_catalog_settings()
+
     def add_always_approved_tool(self, tool_name: str):
         """添加总是批准的工具"""
         tools = self.get_always_approved_tools()

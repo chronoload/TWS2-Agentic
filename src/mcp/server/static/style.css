@@ -5363,6 +5363,25 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   border-radius: 4px;
 }
 
+/* 模型选择器（Agent 栏 indicator + 门控面板共用） */
+.model-picker {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  max-width: 240px;
+  min-width: 0;
+}
+.model-picker:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.harness-row .model-picker {
+  max-width: none;
+}
+
 /* Session Modal */
 .modal-content.session-modal {
   background: var(--bg-secondary);

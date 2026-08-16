@@ -1162,6 +1162,13 @@ class Agent:
         session_id: str = "",
         on_sub_agent_event: Optional[Callable[[dict], None]] = None,
     ) -> str:
+        # 并发 gate：同一实例已有 chat 运行中（_chat_active 被 clear）时拒绝重入，
+        # 防止 SSE 断流/前端 fallback/多端并发导致的二次 chat 线程踩踏同一
+        # messages/_cancelled/状态机（普通对话"老是被打断"根因③）。
+        # 调用方（app.py 流式/非流式）会捕获异常并返回明确提示。
+        if not self._chat_active.is_set():
+            logger.warning(f"[Agent.chat] 拒绝重入：会话 '{session_id[:12] or 'default'}' 已有对话进行中（请先停止或等待完成）")
+            raise RuntimeError("对话正在进行中，请稍候（或先停止当前生成）")
         self._cancelled = False  # 新对话，清除取消标志
         self._chat_epoch += 1  # 新代际：旧线程（若有）finally 不再复位本代状态机
         my_epoch = self._chat_epoch

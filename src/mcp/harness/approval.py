@@ -37,7 +37,7 @@ class ApprovalRequest:
         self._decision = decision
         self._event.set()
 
-    def wait(self, timeout: float = 300) -> bool:
+    def wait(self, timeout: float = 600) -> bool:
         return self._event.wait(timeout=timeout)
 
     @property

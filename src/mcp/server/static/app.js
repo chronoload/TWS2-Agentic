@@ -13439,6 +13439,25 @@ async function sendAgentMessage() {
     if (_agentStopRequested) {
       console.warn('[Agent] 流式失败但用户已请求停止，不重发（交停止流程收敛）');
     } else {
+      // 流式失败，回退到普通请求前先查后端状态：
+      // 后端 agent 可能仍在跑（SSE 断流≠后端停止——工具执行/审批等待/LLM 长思考）。
+      // 此时盲目 sync 重发会触发 agent.chat 并发 gate 或踩踏旧任务 → 对话被打断。
+      // 后端仍在 streaming → 不重发，交轮询诚实重建恢复显示。
+      try {
+        const _sidNow = _getAgentSessionId();
+        if (_sidNow) {
+          const _sres = await client.getAgentSession(_sidNow);
+          const _sdata = _sres && _sres.data;
+          const _backendBusy = !!(_sdata && (_sdata.is_streaming || _sdata.status === 'running' || _sdata.status === 'streaming'));
+          if (_backendBusy) {
+            console.warn('[Agent] 流式失败但后端仍在运行，不 sync 重发（交诚实重建恢复）');
+            try { if (_getAgentSessionId() === _sidNow) showToast('⚠️ 后端仍在生成中，结果将自动显示', 'info'); } catch (err) {}
+            return;
+          }
+        }
+      } catch (err) {
+        // 状态查询失败：不阻塞 fallback（保留旧行为）
+      }
       // 流式失败，回退到普通请求
       console.warn('Stream failed, falling back to sync:', e);
       try {
@@ -15052,6 +15071,8 @@ async function switchToSession(sessionId) {
   _lastAgentStopTime = 0;  // 已主动切换，允许轮询刷新
   // 切换会话后刷新门控面板（工具组为单实例，随会话变化）
   refreshHarnessControls().catch(() => {});
+  // 切换会话后刷新会话级模型 indicator（session_overrides 按会话隔离）
+  loadModelStatus();
   
   const restoredMessages = res.data.messages || [];
   
@@ -18732,9 +18753,9 @@ switchNavTab = function(tabName) {
 // ─── Search ─────────────────────────────────────────────────
 
 let searchTimer = null;
-// 读取搜索工具条状态（排序/方向/类型）；prefix='' 为文件 nav，'src' 为源码浏览器
+// 读取搜索工具条状态（排序/方向/类型）；prefix='search' 为文件 nav（HTML ID 带 search 前缀），'src' 为源码浏览器
 function getSearchToolbarState(prefix) {
-  prefix = prefix || '';
+  prefix = prefix || 'search';
   var sortBy = 'name', order = 'asc', typeFilter = '';
   try {
     var sb = document.getElementById(prefix + 'SortBy');
@@ -18780,8 +18801,8 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
 
 // 工具条事件：排序/类型变化、方向切换 → 重新搜索（文件 nav + 源码浏览器）
 (function bindSearchToolbars() {
-  // prefix: ''=文件nav（searchInput）, 'src'=源码浏览器（srcFilterInput）
-  ['', 'src'].forEach(function (prefix) {
+  // prefix: 'search'=文件nav（searchInput/searchSortBy/searchOrderBtn/searchTypeFilter）, 'src'=源码浏览器（srcFilterInput 等）
+  ['search', 'src'].forEach(function (prefix) {
     var inputId = prefix + (prefix === 'src' ? 'FilterInput' : 'Input');
     var sb = document.getElementById(prefix + 'SortBy');
     var tf = document.getElementById(prefix + 'TypeFilter');
@@ -25477,13 +25498,15 @@ function loadModelStatus() {
 }
 
 function renderModelIndicator() {
-  var globalEl = document.getElementById('modelSelector');
+  // 维度 A（会话级）：Agent 栏 indicator —— 显示当前会话生效模型，可选会话专用模型
   var agentEl = document.getElementById('agentModelSelector');
-  var sessionEl = document.getElementById('sessionModelSelector');
+  // 维度 B（全局）：门控面板 —— 模型模式（route/fixed）+ 固定模式默认模型
+  var modeEl = document.getElementById('modelModeSelector');
+  var globalEl = document.getElementById('modelSelector');
   var catalog = Array.isArray(_modelStatus.catalog) ? _modelStatus.catalog : [];
-  var globalValue = _modelStatus.mode === 'fixed' && _modelStatus.default_model
-    ? _modelStatus.default_model : 'route';
-  var sessionValue = _modelStatus.session_model || '';
+  var isFixed = _modelStatus.mode === 'fixed';
+  var defaultModel = _modelStatus.default_model || '';
+  var sessionModel = _modelStatus.session_model || '';
 
   function addOption(select, value, label) {
     var option = document.createElement('option');
@@ -25492,36 +25515,38 @@ function renderModelIndicator() {
     select.appendChild(option);
   }
 
-  function renderOptions(select, selected, prefix) {
+  function renderCatalog(select, selected, emptyLabel) {
     if (!select) return;
     select.innerHTML = '';
-    if (prefix === 'global') addOption(select, 'route', '模型: 路由');
-    else if (prefix === 'session') addOption(select, '', '会话: 跟随全局');
-    else addOption(select, 'route', 'Agent: 路由');
+    addOption(select, '', emptyLabel);
     var seen = {};
     catalog.forEach(function(row) {
       var key = (row.provider || '') + '/' + (row.model_id || '');
       if (!row.provider || !row.model_id || seen[key]) return;
       seen[key] = true;
-      var label = prefix === 'session' ? '会话: ' + key : key;
-      addOption(select, key, label);
+      addOption(select, key, key);
     });
-    if (selected && !seen[selected] && selected !== 'route') {
-      var selectedLabel = prefix === 'session' ? '会话: ' + selected : selected;
-      addOption(select, selected, selectedLabel);
-    }
-    select.value = selected;
+    if (selected && !seen[selected]) addOption(select, selected, selected);
+    select.value = selected || '';
   }
 
-  renderOptions(globalEl, globalValue, 'global');
-  renderOptions(agentEl, globalValue, 'agent');
-  renderOptions(sessionEl, sessionValue, 'session');
+  // ── 维度 A：会话级 indicator ──
+  renderCatalog(agentEl, sessionModel, '🤖 AutoModel');
+
+  // ── 维度 B：全局模式 + 固定默认模型 ──
+  if (modeEl) {
+    modeEl.value = isFixed ? 'fixed' : 'route';
+    // fixed 时展示默认模型下拉，route 时隐藏
+    if (globalEl) globalEl.style.display = isFixed ? 'inline-block' : 'none';
+    if (isFixed) renderCatalog(globalEl, defaultModel, '选择默认模型…');
+  }
 }
 
 function selectGlobalModel(key) {
-  var body = key === 'route'
-    ? { mode: 'route' }
-    : { mode: 'fixed', default_model: key };
+  // 门控面板：modelModeSelector 选 route/fixed；modelSelector 选固定默认模型
+  var body;
+  if (key === 'route' || key === 'fixed') body = { mode: key };
+  else body = { mode: 'fixed', default_model: key };
   _apiPost('/api/models/select', body).then(function(res) {
     if (res.code === 0) loadModelStatus();
     else alert('设置失败: ' + (res.msg || ''));
@@ -25531,11 +25556,14 @@ function selectGlobalModel(key) {
 function selectSessionModel(key) {
   var sid = _currentSessionId();
   if (!sid) { alert('无活动会话'); return; }
-  _apiPost('/api/models/session-select', { session_id: sid, model_key: key.trim() })
-    .then(function(res) {
-      if (res.code === 0) { loadModelStatus(); }
-      else alert('设置失败: ' + (res.msg || ''));
-    }).catch(function(err) { alert('设置失败: ' + err); });
+  // 空值 = 清除会话覆盖，回落全局 AutoModel
+  var body = key && key.trim()
+    ? { session_id: sid, model_key: key.trim() }
+    : { session_id: sid, model_key: null };
+  _apiPost('/api/models/session-select', body).then(function(res) {
+    if (res.code === 0) { loadModelStatus(); }
+    else alert('设置失败: ' + (res.msg || ''));
+  }).catch(function(err) { alert('设置失败: ' + err); });
 }
 
 function refreshModelCatalog() {

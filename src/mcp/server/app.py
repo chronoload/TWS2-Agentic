@@ -761,6 +761,130 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     except Exception:
         pass  # loop_api 缺失时不阻塞服务启动
 
+    # ─── 组织态势 API（three-arena 前端 + HITL）──────────────
+    try:
+        from .organization_api import router as org_router
+        app.include_router(org_router)
+    except Exception:
+        pass  # organization_api 缺失时不阻塞服务启动
+
+    # ─── 模型目录动态化（spec id=11）────────────────────────
+    # 启动时后台刷新 /v1/models → catalog（TTL 24h 自动重查），不阻塞服务启动。
+    # 端点：GET /api/models（全量目录）、GET/POST /api/settings/model-catalog（可调参数）
+    try:
+        from ..model_catalog import ModelCatalogService, group_by_base_url
+        from ..config import get_config_manager as _get_cfg_mgr
+
+        def _make_catalog_service() -> ModelCatalogService:
+            cfg = _get_cfg_mgr()
+            mc = cfg.get_model_catalog_settings()
+            svc = ModelCatalogService(
+                ttl_seconds=float(mc.get("ttl_hours", 24)) * 3600,
+                timeout_seconds=float(mc.get("timeout_seconds", 10)),
+                max_concurrent=int(mc.get("max_concurrent", 4)),
+            )
+            # 从 model_runtime.json 恢复快照（若存在），避免启动空窗
+            try:
+                from ..model_selector import _runtime_path as _rtp
+                import json as _json
+                rp = _rtp()
+                if rp.exists():
+                    rt = _json.loads(rp.read_text(encoding="utf-8"))
+                    snap = (rt.get("catalog") or {}).get("_model_catalog")
+                    if snap:
+                        svc.load_snapshot(snap)
+            except Exception:
+                pass
+            return svc
+
+        app.state.model_catalog = _make_catalog_service()
+
+        def _refresh_catalog_background() -> None:
+            """后台线程刷新模型目录（线程池执行，不阻塞事件循环）"""
+            try:
+                cfg = _get_cfg_mgr()
+                svc = app.state.model_catalog
+                if not cfg.get_model_catalog_settings().get("enabled", True):
+                    return
+                provider_configs = cfg.get_provider_configs_for_manager()
+                groups = group_by_base_url(provider_configs)
+                if not groups:
+                    return
+                refreshed = svc.refresh_all(groups)
+                # 回填 ModelSelector.catalog（provider 维度，复用现有 get_catalog 消费链）：
+                # 动态模型以 provider 为键写入 selector.catalog → 前端下拉/路由自动可见
+                try:
+                    from ..model_selector import get_model_selector as _gms
+                    _sel = _gms()
+                    _bu_by_url: Dict[str, str] = {}
+                    for _c in provider_configs:
+                        _key = getattr(_c, "catalog_base_url", None) or getattr(_c, "base_url", None)
+                        if _key:
+                            _bu_by_url.setdefault(_key.rstrip("/"), _c.provider.value)
+                    _sel.catalog = {}
+                    for _url, _models in refreshed.items():
+                        _pv = _bu_by_url.get(_url.rstrip("/"))
+                        if not _pv:
+                            continue
+                        _sel.catalog[_pv] = [
+                            {"model_id": mid, "context_window": 8192, "max_tokens": 4096,
+                             "is_reasoning": False, "supports_image": False, "supports_video": False,
+                             "supports_tools": True, "pricing_input": 0.0, "pricing_output": 0.0,
+                             "source": "dynamic"}
+                            for mid in _models
+                        ]
+                    _sel.save()
+                except Exception as _se:
+                    logging.getLogger(__name__).debug(f"model_catalog 回填 selector 失败: {_se}")
+                # 写回 model_runtime.json（持久化，重启可恢复）
+                try:
+                    from ..model_selector import _runtime_path as _rtp2
+                    import json as _json2
+                    rp = _rtp2()
+                    rt = _json2.loads(rp.read_text(encoding="utf-8")) if rp.exists() else {}
+                    rt.setdefault("catalog", {})["_model_catalog"] = svc.snapshot()
+                    rp.write_text(_json2.dumps(rt, ensure_ascii=False, indent=2), encoding="utf-8")
+                except Exception as _pe:
+                    logging.getLogger(__name__).debug(f"model_catalog 持久化失败: {_pe}")
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"model_catalog 后台刷新失败: {e}")
+
+        @app.on_event("startup")
+        async def _startup_model_catalog():
+            import threading as _th
+            _th.Thread(target=_refresh_catalog_background, daemon=True, name="model-catalog").start()
+
+        @app.get("/api/models")
+        async def api_models_list():
+            """返回模型目录全量（供前端下拉）：{base_url: [model...]}"""
+            svc = getattr(app.state, "model_catalog", None)
+            return ok(data=svc.snapshot() if svc else {})
+
+        @app.get("/api/settings/model-catalog")
+        async def api_model_catalog_settings_get():
+            cfg = _get_cfg_mgr()
+            return ok(data=cfg.get_model_catalog_settings())
+
+        @app.post("/api/settings/model-catalog")
+        async def api_model_catalog_settings_set(req: Request):
+            cfg = _get_cfg_mgr()
+            body = {}
+            try:
+                body = await req.json()
+            except Exception:
+                pass
+            settings = cfg.set_model_catalog_settings(**body)
+            # 即时生效：同步 TTL/超时到运行中的 service（无需重启）
+            svc = getattr(app.state, "model_catalog", None)
+            if svc:
+                if "ttl_hours" in body:
+                    svc.set_ttl(float(body["ttl_hours"]) * 3600)
+                if "timeout_seconds" in body:
+                    svc.set_timeout(float(body["timeout_seconds"]))
+            return ok(data=settings)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"模型目录模块接入失败（不影响启动）: {e}")
+
     # ─── 自定义 CORS 中间件 ──────────────────────────────
     # 反射 Origin + credentials=True，methods/headers 用显式值（w3c 规范要求）
     @app.middleware("http")
@@ -5533,7 +5657,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             message = _build_multimodal_message(req.message, req.attachments)
             reply = await asyncio.wait_for(
                 _run_agent(agent.chat, message, session_id=req.session_id),
-                timeout=300.0
+                timeout=600.0
             )
             # 对话完成后写回 SessionStore（非流式路径此前缺失，导致会话记录滞后）
             try:
@@ -5962,11 +6086,11 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     def _on_web_approval(request):
                         try:
                             _web_approval_requests[request.id] = (request, agent, req.session_id or 'default')
-                            # 后台线程等待请求结束（decide 立即返回 / 300s 超时返回），
+                            # 后台线程等待请求结束（decide 立即返回 / 600s 超时返回），
                             # 无论结果如何都清理 _web_approval_requests，防止超时泄漏/幽灵条目
                             def _cleanup_when_done(r):
                                 try:
-                                    r.wait(timeout=300)
+                                    r.wait(timeout=600)
                                 finally:
                                     _web_approval_requests.pop(r.id, None)
                             threading.Thread(target=_cleanup_when_done, args=(request,), daemon=True).start()
@@ -6136,11 +6260,14 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
 
             try:
                 while True:
+                    # 心跳保活：30s 无消息（LLM 思考/工具执行/审批等待等正常静默期）时
+                    # 推送 hb 事件，维持连接（防中间代理空闲断连 + 重置前端 XHR 超时）。
+                    # 不再 90s 硬断流——静默 ≠ 故障，断流只会误杀慢响应并诱发并发重发。
                     try:
-                        msg = await asyncio.wait_for(message_queue.get(), timeout=90.0)
+                        msg = await asyncio.wait_for(message_queue.get(), timeout=30.0)
                     except asyncio.TimeoutError:
-                        yield f"data: {_json_dumps_compact({'type': 'error', 'content': '超时'})}\n\n"
-                        break
+                        yield f"data: {_json_dumps_compact({'type': 'hb'})}\n\n"
+                        continue
 
                     if msg.get("type") == "done":
                         yield f"data: {_json_dumps_compact(msg)}\n\n"
@@ -9000,7 +9127,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         try:
             reply = await asyncio.wait_for(
                 _run_agent(agent.chat, enhanced_message),
-                timeout=300.0
+                timeout=600.0
             )
             return ok(data={"reply": reply, "source": "pdf_rag", "contexts": contexts})
         except asyncio.TimeoutError:

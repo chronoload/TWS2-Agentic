@@ -4235,6 +4235,7 @@ class ModelManagerDialog(tk.Toplevel):
         bottom.pack(fill="x")
         ttk.Button(bottom, text="从提供商刷新", command=self._refresh_catalog).pack(side="left", padx=4)
         ttk.Button(bottom, text="导入 opencode 配置", command=self._import_opencode).pack(side="left", padx=4)
+        ttk.Button(bottom, text="模型目录设置", command=self._open_model_catalog_settings).pack(side="left", padx=4)
         ttk.Button(bottom, text="关闭", command=self.destroy).pack(side="right")
 
     def _reload_catalog(self):
@@ -4278,3 +4279,61 @@ class ModelManagerDialog(tk.Toplevel):
             tk.messagebox.showinfo("导入完成", msg)
         except Exception as e:
             tk.messagebox.showerror("错误", f"导入失败: {e}")
+
+    # ── 模型目录可调参数（spec id=11）：TTL/开关/超时/并发 ──
+    def _open_model_catalog_settings(self):
+        """弹出模型目录设置对话框（读 ConfigManager，写回 settings.json）。"""
+        try:
+            from .config import get_config_manager
+            cfg = get_config_manager()
+            settings = cfg.get_model_catalog_settings()
+        except Exception as e:
+            tk.messagebox.showerror("错误", f"读取模型目录设置失败: {e}")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("模型目录设置")
+        win.geometry("420x300")
+        win.transient(self)
+
+        vars_ = {}
+        rows = [
+            ("enabled", "启用动态目录", "check"),
+            ("include_keyless_local", "本地无 key 也查询", "check"),
+            ("ttl_hours", "缓存刷新周期（小时）", "int"),
+            ("timeout_seconds", "查询超时（秒）", "int"),
+            ("max_concurrent", "并发查询上限", "int"),
+        ]
+        for i, (key, label, kind) in enumerate(rows):
+            ttk.Label(win, text=label).grid(row=i, column=0, sticky="w", padx=12, pady=6)
+            if kind == "check":
+                var = tk.BooleanVar(value=bool(settings.get(key, False)))
+                ttk.Checkbutton(win, variable=var).grid(row=i, column=1, sticky="w")
+            else:
+                var = tk.StringVar(value=str(settings.get(key, "")))
+                ttk.Entry(win, textvariable=var, width=20).grid(row=i, column=1, sticky="w")
+            vars_[key] = (var, kind)
+
+        def _save():
+            updates = {}
+            for key, (var, kind) in vars_.items():
+                if kind == "check":
+                    updates[key] = var.get()
+                else:
+                    raw = var.get().strip()
+                    try:
+                        updates[key] = int(raw)
+                    except ValueError:
+                        tk.messagebox.showerror("错误", f"{key} 需要整数")
+                        return
+            try:
+                from .config import get_config_manager
+                cfg = get_config_manager()
+                cfg.set_model_catalog_settings(**updates)
+                tk.messagebox.showinfo("完成", "模型目录设置已保存（下次刷新生效）")
+                win.destroy()
+            except Exception as e:
+                tk.messagebox.showerror("错误", f"保存失败: {e}")
+
+        ttk.Button(win, text="保存", command=_save).grid(row=len(rows), column=0, pady=12)
+        ttk.Button(win, text="取消", command=win.destroy).grid(row=len(rows), column=1)

@@ -548,7 +548,7 @@ function __fallbackLink(el, urls) {
           </div>
           <span class="agent-session-info" id="agentSessionInfo">新对话</span>
           <button class="agent-session-btn" id="harnessToggleBtn" onclick="toggleHarnessPanel(event)" title="门控：Agent 模式 / 审批 / 工具组" style="font-size:13px;padding:2px 7px">🎛</button>
-          <select id="agentModelSelector" title="切换 Agent 模型" onchange="selectGlobalModel(this.value)" style="font-size:9px;padding:1px 5px;border-radius:4px;background:var(--bg-tertiary);color:var(--fg-muted);border:1px solid var(--border);max-width:240px"></select>
+          <select id="agentModelSelector" class="model-picker" title="会话级模型：AutoModel 跟随全局，或指定当前会话专用模型" onchange="selectSessionModel(this.value)"></select>
           <!-- 门控控制面板（点 🎛 展开） -->
           <div class="harness-panel" id="harnessPanel" style="display:none">
             <div class="harness-row">
@@ -576,6 +576,16 @@ function __fallbackLink(el, urls) {
             <div class="harness-row">
               <label title="激活专业工具组（单实例）">工具组</label>
               <select id="agentToolGroupSelector" onchange="activateAgentToolGroup(this.value)"></select>
+            </div>
+            <div class="harness-row">
+              <label title="全局模型策略（作用于所有会话）：AutoModel 按优先级自动路由，或固定一个默认模型">模型</label>
+              <div style="display:flex;gap:4px;align-items:center;flex:1">
+                <select id="modelModeSelector" class="model-picker" title="route=按提供商优先级自动路由；fixed=固定全局默认模型" onchange="selectGlobalModel(this.value)" style="flex:1">
+                  <option value="route">🤖 AutoModel 自动路由</option>
+                  <option value="fixed">📌 固定模型</option>
+                </select>
+                <select id="modelSelector" class="model-picker" title="固定模式下的全局默认模型（作用于所有会话）" onchange="selectGlobalModel(this.value)" style="flex:1;display:none"></select>
+              </div>
             </div>
           </div>
         </div>
@@ -1637,14 +1647,6 @@ function __fallbackLink(el, urls) {
         <span id="statusInfo"></span>
       </div>
       <div class="right">
-        <select id="modelSelector" title="切换全局模型" onchange="selectGlobalModel(this.value)" style="max-width:260px;padding:1px 5px;font-size:11px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:3px">
-          <option value="route">模型: 路由</option>
-        </select>
-        <select id="sessionModelSelector" title="切换当前 Agent 会话模型" onchange="selectSessionModel(this.value)" style="max-width:220px;padding:1px 5px;font-size:11px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:3px">
-          <option value="">会话: 跟随全局</option>
-        </select>
-        <button title="刷新模型目录" onclick="refreshModelCatalog()" style="cursor:pointer;padding:1px 6px;font-size:11px;background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:3px">刷新目录</button>
-        <button title="导入 opencode 配置" onclick="importOpencode()" style="cursor:pointer;padding:1px 6px;font-size:11px;background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:3px">导入opencode</button>
         <span id="statusSync">空闲</span>
         <span id="statusWs">
           <span class="indicator disconnected" id="wsIndicator"></span>

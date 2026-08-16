@@ -530,6 +530,9 @@ class ProviderConfig:
     name: str = ""
     thinking_enabled: Optional[bool] = None
     context_window: int = 0  # 0=自动(使用默认或尝试获取), >0=用户手动设置
+    # 模型目录归组键（spec id=11）：默认=base_url，多个配置指向同一归组键时
+    # 共享一次 /v1/models 查询（一个 api_key+base_url 暴露该供应商全部模型）
+    catalog_base_url: Optional[str] = None
 
     def __post_init__(self):
         if not self.name:
