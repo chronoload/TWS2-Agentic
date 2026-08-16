@@ -171,10 +171,14 @@ class ModelSelector:
 
     def get_catalog(self) -> List[dict]:
         from .llm import DEFAULT_MODEL_INFOS, PROVIDER_DEFAULT_MODELS
+        from .model_catalog import is_local_base_url  # 本地 base_url 无 key 也纳入（对齐 spec v2）
 
         active_configs = [
             cfg for cfg in _get_manager().get_provider_configs_for_manager()
-            if getattr(cfg, "enabled", True) and bool(str(getattr(cfg, "api_key", "")).strip())
+            if getattr(cfg, "enabled", True) and (
+                bool(str(getattr(cfg, "api_key", "")).strip())
+                or is_local_base_url(getattr(cfg, "base_url", "") or "")
+            )
         ]
         active_providers = {cfg.provider.value for cfg in active_configs}
         merged: Dict[tuple[str, str], dict] = {}

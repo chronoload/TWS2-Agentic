@@ -790,7 +790,8 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 rp = _rtp()
                 if rp.exists():
                     rt = _json.loads(rp.read_text(encoding="utf-8"))
-                    snap = (rt.get("catalog") or {}).get("_model_catalog")
+                    # 独立键优先；兼容旧版写入 catalog._model_catalog 的污染数据（迁移）
+                    snap = rt.get("model_catalog_snapshot") or (rt.get("catalog") or {}).get("_model_catalog")
                     if snap:
                         svc.load_snapshot(snap)
             except Exception:
@@ -822,12 +823,16 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                         if _key:
                             _bu_by_url.setdefault(_key.rstrip("/"), _c.provider.value)
                     _sel.catalog = {}
+                    _snap = svc.snapshot()  # 含真实能力 meta（context_window/max_tokens）
                     for _url, _models in refreshed.items():
                         _pv = _bu_by_url.get(_url.rstrip("/"))
                         if not _pv:
                             continue
+                        _caps = (_snap.get(_url) or {}).get("capabilities") or {}
                         _sel.catalog[_pv] = [
-                            {"model_id": mid, "context_window": 8192, "max_tokens": 4096,
+                            {"model_id": mid,
+                             "context_window": (_caps.get(mid) or {}).get("context_window", 8192),
+                             "max_tokens": (_caps.get(mid) or {}).get("max_tokens", 4096),
                              "is_reasoning": False, "supports_image": False, "supports_video": False,
                              "supports_tools": True, "pricing_input": 0.0, "pricing_output": 0.0,
                              "source": "dynamic"}
@@ -842,7 +847,11 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     import json as _json2
                     rp = _rtp2()
                     rt = _json2.loads(rp.read_text(encoding="utf-8")) if rp.exists() else {}
-                    rt.setdefault("catalog", {})["_model_catalog"] = svc.snapshot()
+                    # 独立键持久化（不再污染 ModelSelector.catalog 的 provider 空间）
+                    rt["model_catalog_snapshot"] = svc.snapshot()
+                    _legacy_cat = rt.get("catalog")
+                    if isinstance(_legacy_cat, dict) and "_model_catalog" in _legacy_cat:
+                        _legacy_cat.pop("_model_catalog", None)  # 迁移旧污染
                     rp.write_text(_json2.dumps(rt, ensure_ascii=False, indent=2), encoding="utf-8")
                 except Exception as _pe:
                     logging.getLogger(__name__).debug(f"model_catalog 持久化失败: {_pe}")
@@ -5271,6 +5280,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                 from ..config import get_config_manager
                 from ..llm import MultiProviderManager, SimulatorLLM
                 from ..agent import Agent, AgentConfig
+                from ..model_selector import get_model_selector as _get_sel
 
                 config_mgr = get_config_manager()
                 provider_configs = config_mgr.get_provider_configs_for_manager()
@@ -5384,6 +5394,7 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     'context_injector': _web_context_injector,
                     'workspace_dir': workspace_dir,
                     'is_simulator': isinstance(llm, SimulatorLLM),
+                    'model_selector': _get_sel(),  # 模型选择门面：普通对话恢复三层选择
                 }
                 logger.info(f"Agent base 已初始化 (LLM: {'已配置' if not _agent_base['is_simulator'] else '未配置(模拟模式)'})")
             except Exception as e:
@@ -5562,9 +5573,10 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     _sync_agent_from_store(agent, sid, store)
                 return agent
             
-            # 创建新 Agent 实例
+            # 创建新 Agent 实例（注入 model_selector：普通对话恢复 会话级>全局固定>路由 三层选择）
             from ..agent import Agent
-            agent = Agent(llm=base['llm'], config=base['config'])
+            agent = Agent(llm=base['llm'], config=base['config'],
+                          model_selector=base.get('model_selector'))
             agent.register_context_injector(base['context_injector'])
             agent._active_session_id = sid
             # per-session 模式恢复：从会话记录 metadata 读取，多会话互不串扰
@@ -6774,36 +6786,6 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             })
         except Exception as e:
             return ok(data={"model": model_id, "capabilities": {}, "error": str(e)})
-
-    @app.get("/api/models")
-    async def list_models():
-        """列出所有已知模型及其能力"""
-        try:
-            from ..llm import DEFAULT_MODEL_INFOS, PROVIDER_DEFAULT_MODELS, PROVIDER_DISPLAY_NAMES
-            models = []
-            for name, info in DEFAULT_MODEL_INFOS.items():
-                models.append({
-                    "name": info.name,
-                    "provider": info.provider.value if info.provider else "unknown",
-                    "provider_display": PROVIDER_DISPLAY_NAMES.get(info.provider, info.provider.value if info.provider else "unknown"),
-                    "context_window": info.context_window,
-                    "max_tokens": info.max_tokens,
-                    "is_reasoning_model": info.is_reasoning_model,
-                    "supports_image_input": info.supports_image_input,
-                    "supports_video_input": info.supports_video_input,
-                    "supports_tools": info.supports_tools,
-                    "pricing_input": info.pricing_input,
-                    "pricing_output": info.pricing_output,
-                })
-            providers = {}
-            for pt, model_names in PROVIDER_DEFAULT_MODELS.items():
-                providers[pt.value] = {
-                    "display": PROVIDER_DISPLAY_NAMES.get(pt, pt.value),
-                    "models": model_names,
-                }
-            return ok(data={"models": models, "providers": providers})
-        except Exception as e:
-            return ok(data={"models": [], "providers": {}, "error": str(e)})
 
     @app.get("/api/models/status")
     async def model_status(session_id: str = ""):

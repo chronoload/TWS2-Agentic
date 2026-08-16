@@ -57,15 +57,19 @@ _BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 
 def query_models(base_url: str, api_key: Optional[str] = None,
-                 timeout: float = 10.0, return_error: bool = False):
+                 timeout: float = 10.0, return_error: bool = False,
+                 with_meta: bool = False):
     """GET {base_url}/models 解析 data[].id → 模型 id 列表。
 
     base_url 允许带 /v1 或裸地址，统一拼接 rstrip('/') + '/models'。
     本地无 key 直连；远程无 key 由调用方提前过滤（这里仍可调但通常不触发）。
     return_error=True 时返回 (models, error_msg)；False 时仅返回 models（兼容旧调用）。
+    with_meta=True 时额外返回 {model_id: {context_window, max_tokens}}（能力真实化，供回填）。
     失败不再静默：error 记录 HTTP 状态/网络原因，供调用方写 CacheEntry.error。
     """
     if not base_url:
+        if with_meta:
+            return ([] if not return_error else ([], {}, "base_url 为空"))
         return ([] if not return_error else ([], "base_url 为空"))
     url = base_url.rstrip("/")
     if not url.endswith("/models"):
@@ -89,19 +93,30 @@ def query_models(base_url: str, api_key: Optional[str] = None,
         except Exception:
             pass
         logger.warning(f"query_models HTTP 失败 {url}: {error_msg}")
+        if with_meta:
+            return ([] if not return_error else ([], {}, error_msg))
         return ([] if not return_error else ([], error_msg))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
         error_msg = f"{type(e).__name__}: {e}"
         logger.warning(f"query_models 失败 {url}: {error_msg}")
+        if with_meta:
+            return ([] if not return_error else ([], {}, error_msg))
         return ([] if not return_error else ([], error_msg))
     models = []
+    meta: Dict[str, Dict[str, Any]] = {}
     for item in data.get("data") or []:
         mid = item.get("id") if isinstance(item, dict) else None
         if mid:
-            models.append(str(mid))
+            mid = str(mid)
+            models.append(mid)
+            try:
+                ctx = int(item.get("context_window") or item.get("context_length") or 8192)
+            except (TypeError, ValueError):
+                ctx = 8192
+            meta[mid] = {"context_window": ctx, "max_tokens": ctx}
     if return_error:
-        return models, ""
-    return models
+        return (models, meta, "") if with_meta else (models, "")
+    return (models, meta) if with_meta else models
 
 
 # ── 纯函数 2：按 base_url 归组 ────────────────────────────────────
@@ -136,6 +151,7 @@ class CatalogEntry:
     models: List[str]
     fetched_at: float
     error: Optional[str] = None
+    capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 class ModelCatalogService:
@@ -176,8 +192,8 @@ class ModelCatalogService:
             if entry and not force and (now - entry.fetched_at) < self._ttl:
                 return list(entry.models)
         # 过期/无缓存 → 查询（锁外，避免长时间阻塞其他 base_url）
-        models, error_msg = query_models(base_url, api_key, timeout=self._timeout,
-                                         return_error=True)
+        models, meta, error_msg = query_models(base_url, api_key, timeout=self._timeout,
+                                               return_error=True, with_meta=True)
         with self._lock:
             old = self._entries.get(base_url)
             if error_msg:
@@ -188,11 +204,11 @@ class ModelCatalogService:
                     return list(old.models)
                 self._entries[base_url] = CatalogEntry(
                     base_url=base_url, models=[], fetched_at=time.time(),
-                    error=error_msg)
+                    error=error_msg, capabilities=meta)
                 return []
             self._entries[base_url] = CatalogEntry(
                 base_url=base_url, models=models, fetched_at=time.time(),
-                error=None)
+                error=None, capabilities=meta)
         return models
 
     def refresh_all(self, groups: List[Dict[str, Any]]) -> Dict[str, List[str]]:
@@ -212,6 +228,7 @@ class ModelCatalogService:
                     "models": list(e.models),
                     "fetched_at": e.fetched_at,
                     "error": e.error,
+                    "capabilities": dict(e.capabilities),
                 }
                 for url, e in self._entries.items()
             }
@@ -222,4 +239,5 @@ class ModelCatalogService:
             for url, e in (snap or {}).items():
                 self._entries[url] = CatalogEntry(
                     base_url=url, models=list(e.get("models") or []),
-                    fetched_at=e.get("fetched_at", 0.0), error=e.get("error"))
+                    fetched_at=e.get("fetched_at", 0.0), error=e.get("error"),
+                    capabilities=e.get("capabilities") or {})
