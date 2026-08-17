@@ -14,6 +14,28 @@
 })();
 </script>
 <script>
+// ─── 主题初始化兜底（不依赖 app.js 完整执行）───
+// app.js 是巨型同步脚本（28k 行），若其前部任意一行抛错 → 尾部 initOnLoad IIFE 不执行
+// → 保存的主题/下拉/开关在初始化时不生效（表现为"必须点设置 nav 才加载"——设置 nav 有兜底 handler）。
+// 此处注册 DOMContentLoaded 兜底：app.js 已加载但注册表为空 → 补初始化（幂等，可重入）。
+function __themeInitFallback() {
+  try {
+    if (typeof window.initThemeRegistry !== 'function') return;  // app.js 未加载（函数不存在）
+    var reg = window.__TS2_THEME_REGISTRY;
+    if (reg && Object.keys(reg).length > 0) return;  // 已初始化（initOnLoad 已跑）→ 跳过
+    if (window.__TS2_THEME_MANIFEST) {
+      window.initThemeRegistry(window.__TS2_THEME_MANIFEST);      // 同步注册表 + 填充下拉
+    }
+    if (typeof window.initThemeToggle === 'function') window.initThemeToggle();  // 应用保存主题 + 同步开关
+    if (typeof window.loadThemeRegistry === 'function') window.loadThemeRegistry();  // 异步刷新主题目录
+  } catch (e) { console.warn('[theme] 兜底初始化异常:', e); }
+}
+document.addEventListener('DOMContentLoaded', function() {
+  // 延迟到所有脚本执行后（含 app.js）；若 initOnLoad 正常执行则注册表非空、兜底跳过
+  setTimeout(__themeInitFallback, 100);
+});
+</script>
+<script>
 // ─── 第三方依赖 CDN fallback（HTML 层第一道防线）───
 // 本地 script 加载失败 → 按 URL 列表依次回退到 CDN（unpkg → jsdelivr → cdnjs）
 function __fallbackScript(el, urls) {
@@ -37,33 +59,81 @@ function __fallbackScript(el, urls) {
     document.head.appendChild(s);
   } catch (e) { console.error('[CDN fallback] 异常:', e); }
 }
+// CSS 版本：本地 <link> 加载失败 → 按 URL 列表回退到 CDN
+function __fallbackLink(el, urls) {
+  try {
+    var idx = parseInt((el && el.getAttribute && el.getAttribute('data-fb-idx')) || '0', 10);
+    if (idx >= urls.length) { console.error('[CDN fallback] CSS 全部源失败:', el && el.href); return; }
+    var l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = urls[idx];
+    if (el && el.media) l.media = el.media;
+    l.onload = function() { console.log('[CDN fallback] CSS 成功:', urls[idx]); };
+    l.onerror = function() {
+      try { l.remove(); } catch (e) {}
+      if (el) el.setAttribute('data-fb-idx', String(idx + 1));
+      __fallbackLink(el, urls);
+    };
+    if (el) { try { el.setAttribute('data-fb-idx', String(idx)); el.remove(); } catch (e) {} }
+    document.head.appendChild(l);
+  } catch (e) { console.error('[CDN fallback] CSS 异常:', e); }
+}
 </script>
-<link rel="stylesheet" href="https://unpkg.com/vditor@3.10.7/dist/index.css">
+<link rel="stylesheet" href="/static/vditor/dist/index.css" onerror="__fallbackLink(event.target,['https://unpkg.com/vditor@3.10.7/dist/index.css','https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.css'])">
 <script>
-// 立即应用主题并加载对应的 content-theme CSS
+// 立即应用主题并加载对应的 content-theme CSS（本地优先 → CDN fallback）
 (function() {
+  try {
   var savedTheme = localStorage.getItem('ts2_static_theme') || 'dark';
   document.documentElement.setAttribute('data-theme', savedTheme);
   var link = document.createElement('link');
   link.id = 'vditorContentTheme';
   link.rel = 'stylesheet';
-  link.href = (savedTheme === 'light' || savedTheme === 'chuizi' || savedTheme === 'savor')
-    ? 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/light.css'
-    : 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/dark.css';
+  // 依据 manifest（已同步注入）判断明暗，无需硬编码；自定义主题默认按 modes 判定
+  var isLight = (savedTheme === 'light');
+  var mf = window.__TS2_THEME_MANIFEST;
+  if (mf && mf.themes) {
+    for (var i = 0; i < mf.themes.length; i++) {
+      if (mf.themes[i].id === savedTheme && mf.themes[i].modes && mf.themes[i].modes.indexOf('light') >= 0) {
+        isLight = true;
+        break;
+      }
+    }
+  }
+  var lightCss = ['/static/vditor/dist/css/content-theme/light.css', 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/light.css'];
+  var darkCss = ['/static/vditor/dist/css/content-theme/dark.css', 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/dark.css'];
+  var cssList = isLight ? lightCss : darkCss;
+  link.href = cssList[0];
+  link.onerror = function() {
+    // 本地失败 → CDN fallback
+    if (link.href.indexOf('/static/') === 0) {
+      link.href = cssList[1];
+      link.onerror = null;
+    }
+  };
   document.head.appendChild(link);
+  } catch (e) { console.warn('[theme] 内联主题初始化失败，降级：', e); }
 })();
 </script>
 <link rel="stylesheet" href="/static/xterm.min.css" data-name="opencode-xterm">
 <script src="/static/xterm.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/lib/xterm.min.js','https://unpkg.com/@xterm/xterm@5.3.0/lib/xterm.min.js'])"></script>
 <script src="/static/xterm-addon-fit.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js','https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js'])"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js','https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js'])"></script>
-<script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="/static/pdfjs/pdf.min.js" data-name="pdfjs" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js','https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js','https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'])"></script>
+<script>
+// pdf.js worker 本地优先 → CDN fallback（pdfjs 加载后设置）
+(function() {
+  var applyWorker = function() {
+    if (window.pdfjsLib) window.pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.min.js';
+  };
+  if (window.pdfjsLib) applyWorker();
+  else document.addEventListener('DOMContentLoaded', applyWorker);
+})();
+</script>
+<link rel="stylesheet" href="/static/vditor/js/katex/katex.min.css" onerror="__fallbackLink(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css','https://unpkg.com/katex@0.16.9/dist/katex.min.css'])">
 <script src="/static/vditor/js/katex/katex.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js','https://unpkg.com/katex@0.16.9/dist/katex.min.js'])"></script>
 <script src="/static/vditor/js/katex/mhchem.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/mhchem.min.js','https://unpkg.com/katex@0.16.9/dist/contrib/mhchem.min.js'])"></script>
 <script src="/static/vditor/js/katex/auto-render.min.js" defer onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js','https://unpkg.com/katex@0.16.9/dist/contrib/auto-render.min.js'])"></script>
 <link rel="stylesheet" href="/static/style.css?v=tc14">
-<link rel="preload" href="/static/theme/Cliff%20Dark/cliff_bg.jpg" as="image">
 </head>
 <body>
 
@@ -418,6 +488,10 @@ function __fallbackScript(el, urls) {
             <button class="conv-filter" data-filter="active" onclick="filterConvSessions('active')">活跃</button>
             <button class="conv-filter" data-filter="streaming" onclick="filterConvSessions('streaming')">流式中</button>
           </div>
+          <div class="agent-conv-search">
+            <input id="convSearch" type="text" placeholder="🔍 搜索会话（名称/内容）…" spellcheck="false"
+                   oninput="onConvSearchInput(this.value)" />
+          </div>
           <div class="agent-conv-list" id="agentConvList">
             <div class="agent-conv-loading">加载中...</div>
           </div>
@@ -464,6 +538,7 @@ function __fallbackScript(el, urls) {
           <button class="agent-session-btn" onclick="toggleFlowNav()" title="对话流导航">📑</button>
           <button class="agent-session-btn" onclick="toggleConvSidebar()" title="会话管理">💬</button>
           <button class="agent-session-btn" onclick="toggleAgentStatusPanel()" title="Agent 实例状态面板">📊</button>
+          <button class="agent-session-btn" id="intraSplitBtn" onclick="toggleIntraSplit()" title="单窗口内分屏：对话 + 工具面板" style="display:none">⇤⇥</button>
           <button class="agent-session-btn" onclick="showAgentCheckpoints()" title="检查点 — 每轮对话自动保存，可回退对话或文件">🔖</button>
           <button class="agent-session-btn" onclick="createNewSession()" title="新建会话">➕</button>
           <!-- Agent 实例状态指示器 -->
@@ -473,7 +548,7 @@ function __fallbackScript(el, urls) {
           </div>
           <span class="agent-session-info" id="agentSessionInfo">新对话</span>
           <button class="agent-session-btn" id="harnessToggleBtn" onclick="toggleHarnessPanel(event)" title="门控：Agent 模式 / 审批 / 工具组" style="font-size:13px;padding:2px 7px">🎛</button>
-          <select id="agentModelSelector" title="切换 Agent 模型" onchange="selectGlobalModel(this.value)" style="font-size:9px;padding:1px 5px;border-radius:4px;background:var(--bg-tertiary);color:var(--fg-muted);border:1px solid var(--border);max-width:240px"></select>
+          <select id="agentModelSelector" class="model-picker" title="会话级模型：AutoModel 跟随全局，或指定当前会话专用模型" onchange="selectSessionModel(this.value)"></select>
           <!-- 门控控制面板（点 🎛 展开） -->
           <div class="harness-panel" id="harnessPanel" style="display:none">
             <div class="harness-row">
@@ -481,6 +556,13 @@ function __fallbackScript(el, urls) {
               <select id="agentModeSelector" onchange="setAgentMode(this.value)">
                 <option value="act">⚡ Act 直接执行</option>
                 <option value="plan">📋 Plan 先规划</option>
+              </select>
+            </div>
+            <div class="harness-row">
+              <label title="会话级模式：普通对话 / 自主 loop（loop 回合与对话同流显示）">对话模式</label>
+              <select id="agentLoopModeSelector" onchange="setAgentLoopMode(this.value)">
+                <option value="normal">💬 普通对话</option>
+                <option value="loop">⚡ 自主模式</option>
               </select>
             </div>
             <div class="harness-row">
@@ -494,6 +576,16 @@ function __fallbackScript(el, urls) {
             <div class="harness-row">
               <label title="激活专业工具组（单实例）">工具组</label>
               <select id="agentToolGroupSelector" onchange="activateAgentToolGroup(this.value)"></select>
+            </div>
+            <div class="harness-row">
+              <label title="全局模型策略（作用于所有会话）：AutoModel 按优先级自动路由，或固定一个默认模型">模型</label>
+              <div style="display:flex;gap:4px;align-items:center;flex:1">
+                <select id="modelModeSelector" class="model-picker" title="route=按提供商优先级自动路由；fixed=固定全局默认模型" onchange="selectGlobalModel(this.value)" style="flex:1">
+                  <option value="route">🤖 AutoModel 自动路由</option>
+                  <option value="fixed">📌 固定模型</option>
+                </select>
+                <select id="modelSelector" class="model-picker" title="固定模式下的全局默认模型（作用于所有会话）" onchange="selectGlobalModel(this.value)" style="flex:1;display:none"></select>
+              </div>
             </div>
           </div>
         </div>
@@ -619,6 +711,7 @@ function __fallbackScript(el, urls) {
           <div id="mediaPreviewBar" style="display:none;position:absolute;bottom:calc(100% + 4px);left:8px;right:8px;z-index:9999;flex-wrap:wrap;gap:4px;padding:4px 6px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;box-shadow:0 -4px 16px rgba(0,0,0,.25);max-height:120px;overflow-y:auto"></div>
           <input type="text" id="agentInput" placeholder="输入消息... (可粘贴/拖拽图片或视频，右键呼出方法菜单，输入 / 唤醒技能发现)" autocomplete="off">
           <button id="agentSend">发送</button>
+          <span id="agentPendingQueueBadge" style="display:none;position:absolute;bottom:calc(100% + 6px);left:8px;font-size:11px;color:var(--accent,#e8b64c);background:var(--bg-secondary);border:1px dashed var(--border);border-radius:4px;padding:2px 6px;pointer-events:none"></span>
         </div>
         <!-- Agent 发现面板（Skill/Tool/MCP/Workflow） -->
         <div id="agentDiscoverPanel" style="display:none;position:fixed;z-index:10000;background:var(--bg);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.4);width:460px;max-height:70vh;overflow:hidden;font-size:12px">
@@ -635,6 +728,7 @@ function __fallbackScript(el, urls) {
             <div class="discover-tab" data-tab="mcp" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">MCP</div>
             <div class="discover-tab" data-tab="workflow" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">Workflow</div>
             <div class="discover-tab" data-tab="plugin" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent">Plugin</div>
+            <div class="discover-tab" data-tab="loop" style="flex:1;text-align:center;padding:6px 0;cursor:pointer;color:var(--fg-muted);border-bottom:2px solid transparent" title="AgentLoop 长程任务">Loop</div>
           </div>
           <div id="discoverList" style="overflow-y:auto;max-height:calc(70vh - 80px);padding:6px 0"></div>
         </div>
@@ -897,9 +991,6 @@ function __fallbackScript(el, urls) {
             </div>
             <select id="customThemeSelect" onchange="selectCustomTheme(this.value)" style="width:150px;padding:6px 8px;font-size:11px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px">
               <option value="">默认（不注入）</option>
-              <option value="chuizi">😴 锤子</option>
-              <option value="savor">✨ Savor</option>
-              <option value="cliffdark">⛰️ Cliff Dark</option>
             </select>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center">
@@ -1556,14 +1647,6 @@ function __fallbackScript(el, urls) {
         <span id="statusInfo"></span>
       </div>
       <div class="right">
-        <select id="modelSelector" title="切换全局模型" onchange="selectGlobalModel(this.value)" style="max-width:260px;padding:1px 5px;font-size:11px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:3px">
-          <option value="route">模型: 路由</option>
-        </select>
-        <select id="sessionModelSelector" title="切换当前 Agent 会话模型" onchange="selectSessionModel(this.value)" style="max-width:220px;padding:1px 5px;font-size:11px;background:var(--bg-secondary);color:var(--fg);border:1px solid var(--border);border-radius:3px">
-          <option value="">会话: 跟随全局</option>
-        </select>
-        <button title="刷新模型目录" onclick="refreshModelCatalog()" style="cursor:pointer;padding:1px 6px;font-size:11px;background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:3px">刷新目录</button>
-        <button title="导入 opencode 配置" onclick="importOpencode()" style="cursor:pointer;padding:1px 6px;font-size:11px;background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:3px">导入opencode</button>
         <span id="statusSync">空闲</span>
         <span id="statusWs">
           <span class="indicator disconnected" id="wsIndicator"></span>
@@ -1826,15 +1909,21 @@ function __fallbackScript(el, urls) {
   <div style="font-size:13px;opacity:0.3;position:absolute;bottom:40px">点击任意位置跳过</div>
 </div>
 
-<script id="vditorScriptTag" src="/static/vditor/index.min.js" defer
+<script id="vditorScriptTag" src="/static/vditor/dist/index.min.js" defer
   onerror="__fallbackScript(event.target,['https://unpkg.com/vditor@3.10.7/dist/index.min.js','https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js'])"></script>
 <script src="/static/cytoscape.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js','https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js'])"></script>
 <script src="/static/autosave-scheduler.js"></script>
  <script src="/static/rmd-chunk.js"></script>
 <script src="/static/editor-chunks.js"></script>
-<script src="/static/app.js?v=tc24"></script>
+<script src="/static/theme/manifest.js"></script>
+<script src="/static/discover-utils.js?v=1"></script>
+<script src="/static/app.js?v=tc29"></script>
 <script src="/static/office.js"></script>
 <script type="module" src="/static/collab-client.js"></script>
 <script type="module" src="/static/collab-editor.js"></script>
+<!-- AgentLoop 长程任务面板 -->
+<script src="/static/frontend-scheduler.js?v=1"></script>
+<script src="/static/loop-panel.js?v=1"></script>
+<script src="/static/loop-panel-init.js?v=1"></script>
 </body>
 </html>

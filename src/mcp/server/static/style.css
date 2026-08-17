@@ -4542,6 +4542,27 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   color: #fff;
   border-color: var(--accent);
 }
+.agent-conv-search {
+  padding: 8px 12px 2px;
+  flex-shrink: 0;
+}
+.agent-conv-search input,
+.session-modal-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  color: var(--fg);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.agent-conv-search input:focus,
+.session-modal-search input:focus {
+  border-color: var(--accent);
+}
 .agent-conv-list {
   flex: 1;
   overflow-y: auto;
@@ -4651,6 +4672,12 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   background: rgba(74, 222, 128, 0.15);
   color: #4ade80;
 }
+.agent-conv-item .conv-item-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.agent-conv-item .conv-item-rename,
 .agent-conv-item .conv-item-del {
   background: none;
   border: none;
@@ -4663,8 +4690,14 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   transition: opacity 0.15s, background 0.15s, color 0.15s;
   flex-shrink: 0;
 }
+.agent-conv-item:hover .conv-item-rename,
 .agent-conv-item:hover .conv-item-del {
   opacity: 0.6;
+}
+.agent-conv-item .conv-item-rename:hover {
+  opacity: 1;
+  background: var(--bg-tertiary);
+  color: var(--accent);
 }
 .agent-conv-item .conv-item-del:hover {
   opacity: 1;
@@ -4850,6 +4883,20 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
 .status-last-active {
   margin-left: auto;
   font-size: 9px;
+  color: var(--fg-muted);
+}
+.status-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+.status-item-id {
+  font-family: monospace;
+  font-size: 10px;
   color: var(--fg-muted);
 }
 .status-item-stats {
@@ -5234,6 +5281,11 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
+  height: 36px;
+  min-height: 36px;
+  max-height: 36px;
+  flex-shrink: 0;
+  overflow: visible;
   border-bottom: 1px solid var(--border);
   background: var(--bg-secondary);
 }
@@ -5245,6 +5297,8 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   padding: 2px 8px;
   border-radius: 4px;
   cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .agent-session-btn:hover {
   color: var(--accent);
@@ -5254,6 +5308,18 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   font-size: 11px;
   color: var(--fg-dim);
   margin-left: auto;
+  /* 长会话标题 ellipsis 截断，防止撑开顶栏高度 */
+  min-width: 0;
+  max-width: 35%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+#agentModelSelector {
+  flex-shrink: 0;
+  max-width: 200px;
+  min-width: 0;
 }
 /* 门控控制面板（🎛 展开，不占 session-bar 空间） */
 .harness-panel {
@@ -5269,6 +5335,11 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+/* 触底反弹：下方空间不足时向上展开（top:auto 避免 top+bottom 同时定位导致拉伸） */
+.harness-panel.up {
+  top: auto;
+  bottom: calc(100% + 4px);
 }
 .harness-row {
   display: flex;
@@ -5290,6 +5361,25 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 4px;
+}
+
+/* 模型选择器（Agent 栏 indicator + 门控面板共用） */
+.model-picker {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  max-width: 240px;
+  min-width: 0;
+}
+.model-picker:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.harness-row .model-picker {
+  max-width: none;
 }
 
 /* Session Modal */
@@ -5385,6 +5475,29 @@ html[data-theme="dark"] .md-too-long-hint { color: #f0c98a; }
 .session-del-btn:hover {
   color: #ef4444;
   border-color: #ef4444;
+}
+.session-rename-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.session-rename-btn:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--accent);
+}
+.session-modal-search {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.session-empty {
+  text-align: center;
+  padding: 32px 12px;
+  color: var(--fg-muted);
+  font-size: 12px;
 }
 
 .agent-typing {
@@ -8228,3 +8341,102 @@ pre.rmd-chunk::first-line {
 .diary-btn-del { border-color: rgba(247,118,142,0.5); color: #f7768e; }
 
 .diary-btn-del:hover { background: rgba(247,118,142,0.12); }
+
+/* ─── 单窗口内分屏（对话 + 工具面板）─── */
+#agentChatMain.intra-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: 0;
+}
+#agentChatMain.intra-split #agentMessages { grid-column: 1; grid-row: 1; min-height: 0; }
+#agentChatMain.intra-split #agentTyping { grid-column: 1; grid-row: 1; align-self: end; }
+#agentChatMain.intra-split #agentSessionBar { grid-column: 1; grid-row: 2; }
+#agentChatMain.intra-split .agent-input-area { grid-column: 1; grid-row: 3; }
+.agent-split-side {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-secondary);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.agent-split-side-header {
+  padding: 6px 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  flex-shrink: 0;
+}
+.agent-split-side-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.agent-side-tool {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.agent-side-tool-args {
+  font-size: 10px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+  font-family: monospace;
+  word-break: break-all;
+  max-height: 60px;
+  overflow: hidden;
+}
+
+/* ── AgentLoop 会话化审核（loop-panel.js，复用 .agent-msg 气泡）── */
+.lp-list { list-style: none; margin: 0; padding: 0; }
+.lp-task { display: flex; align-items: center; gap: 6px; padding: 5px 2px; border-bottom: 1px solid rgba(128,128,128,.12); font-size: 11px; flex-wrap: wrap; }
+.lp-view { margin-left: auto; flex: 0 0 auto; padding: 2px 8px; background: var(--accent); color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 10px; }
+.lp-detail { margin-top: 8px; padding: 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; }
+.lp-detail-head { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; flex-wrap: wrap; }
+.lp-controls { display: flex; gap: 6px; margin-bottom: 8px; }
+.lp-ctrl { padding: 2px 8px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; font-size: 10px; color: var(--fg); }
+.lp-ctrl:hover { border-color: var(--accent); }
+.lp-thread { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.lp-thread .agent-msg { padding: 6px 8px; font-size: 11px; }
+.lp-role { font-size: 10px; color: var(--fg-muted); font-weight: 600; margin-bottom: 2px; }
+.lp-body { word-break: break-word; white-space: pre-wrap; }
+.lp-ts { display: block; font-size: 9px; color: var(--fg-muted); margin-top: 3px; }
+.lp-tool-call { margin-top: 4px; font-size: 10px; color: var(--accent); }
+.lp-tool-call pre { margin: 2px 0 0; padding: 3px 6px; background: rgba(0,0,0,.25); border-radius: 3px; font-size: 9px; overflow-x: auto; }
+.lp-tool-card { padding: 5px 8px; background: rgba(128,128,128,.1); border-left: 2px solid var(--accent); border-radius: 3px; font-size: 10px; color: var(--fg-muted); }
+.lp-tool-card pre { margin: 3px 0 0; padding: 3px 6px; background: rgba(0,0,0,.25); border-radius: 3px; font-size: 9px; overflow-x: auto; }
+.lp-intervene { display: flex; gap: 6px; margin-top: 8px; }
+.lp-intervene-input { flex: 1; padding: 4px 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--fg); font-size: 11px; outline: none; }
+.lp-queue { margin-top: 8px; padding: 6px 8px; background: var(--bg-tertiary); border: 1px dashed var(--border); border-radius: 4px; }
+.lp-queue-badge { display: inline-block; font-size: 10px; color: var(--accent, #e8b64c); margin-bottom: 4px; }
+.lp-queue-list { margin: 0; padding-left: 16px; font-size: 10px; color: var(--fg-secondary); }
+.lp-queue-item { margin: 2px 0; word-break: break-all; }
+.lp-intervene-send { padding: 4px 10px; background: var(--accent); color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.lp-loading, .lp-empty { color: var(--fg-muted); font-size: 11px; padding: 6px 2px; }
+.lp-badge { padding: 1px 6px; border-radius: 8px; font-size: 10px; }
+.lp-pending { background: rgba(255,180,0,.15); color: #ffb400; }
+.lp-running { background: rgba(60,140,255,.15); color: #5aa2ff; }
+.lp-completed { background: rgba(60,200,120,.15); color: #4cd07f; }
+.lp-failed { background: rgba(255,80,80,.15); color: #ff6b6b; }
+.lp-halted { background: rgba(255,180,0,.15); color: #ffb400; }
+.lp-unknown { background: rgba(128,128,128,.15); color: var(--fg-muted); }
+.lp-result { margin-top: 6px; font-size: 11px; color: var(--fg); }
+
+/* ── loop 回合与普通对话同流显示（会话级模式切换，决策A）── */
+.agent-msg.loop { border-left: 2px solid var(--accent); background: var(--bg-secondary); }
+.agent-msg.loop .msg-role { color: var(--accent); }
+.lp-tool-list { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }

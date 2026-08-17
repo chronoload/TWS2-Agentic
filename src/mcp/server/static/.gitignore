@@ -1,2 +1,11 @@
 backup_pre_collab/
 
+# ─── 第三方运行时库（CDN 可再获取，不入版本控制，保持仓库轻量）───
+# 本地存在用于「本地优先 + CDN fallback」加载；clone 后缺失时自动回退 CDN
+/vditor/
+/pdfjs/
+/cytoscape.min.js
+/xterm.min.js
+/xterm-addon-fit.min.js
+/xterm.min.css
+

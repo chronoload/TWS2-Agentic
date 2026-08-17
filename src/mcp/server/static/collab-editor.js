@@ -407,7 +407,7 @@ let _opening = Object.create(null);    // { [srcPath]: true } 并发锁：防止
 // 完整对标主编辑器 refreshVditorInstanceThemes：
 //   1. 宿主 applyBaseTheme 已切全局 #vditorContentTheme link（content-theme，编辑区渲染样式）
 //   2. 这里只调 setTheme(v) 切 Vditor 外壳主题（toolbar/边框），与主编辑器完全一致
-// 判断亮/暗用宿主 isLightTheme（兼容自定义主题 'chuizi'/'savor'），
+// 判断亮/暗用宿主 isLightTheme（基于主题注册表 modes，支持任意自定义主题），
 // 不再硬编码 'light' === 'classic'，避免自定义主题误判。
 function _refreshAllThemes() {
   var t = document.documentElement.getAttribute('data-theme') || 'dark';
@@ -469,7 +469,7 @@ async function _openImpl(srcPath, containerId, opts) {
   editorDiv.innerHTML = '';
 
   // 创建独立 Vditor 实例（配置完全对标主编辑器 initVditor）
-  // 判断亮/暗用宿主 isLightTheme（兼容自定义主题 'chuizi'/'savor'）
+  // 判断亮/暗用宿主 isLightTheme（基于主题注册表 modes，支持任意自定义主题）
   const _themeAttr = document.documentElement.getAttribute('data-theme') || 'dark';
   const isLight = (typeof isLightTheme === 'function') ? isLightTheme(_themeAttr) : (_themeAttr === 'light');
   var editorContent = content;
