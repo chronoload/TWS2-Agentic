@@ -120,10 +120,15 @@ function __fallbackLink(el, urls) {
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js" onerror="__fallbackScript(event.target,['/static/xterm-addon-fit.min.js'])"></script>
 <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js" data-name="pdfjs" onerror="__fallbackScript(event.target,['https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js','https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','/static/pdfjs/pdf.min.js'])"></script>
 <script>
-// pdf.js worker 本地优先 → CDN fallback（pdfjs 加载后设置）
+// pdf.js worker 与主库同源（CDN 优先 → 本地兜底，pdfjs 加载后设置）
 (function() {
   var applyWorker = function() {
-    if (window.pdfjsLib) window.pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.min.js';
+    if (!window.pdfjsLib) return;
+    var src = document.querySelector('script[data-name="pdfjs"]');
+    var fromCdn = src && /^https?:/.test(src.src);
+    var cdnWorker = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+    var localWorker = '/static/pdfjs/pdf.worker.min.js';
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = fromCdn ? cdnWorker : localWorker;
   };
   if (window.pdfjsLib) applyWorker();
   else document.addEventListener('DOMContentLoaded', applyWorker);
