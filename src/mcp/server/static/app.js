@@ -1578,35 +1578,34 @@ function setupCodeBlockPreservation(v) {
   };
 }
 
-// ─── 第三方依赖 CDN fallback 加载器 ─────────────────────────
-// 本地资源加载失败时按 URL 列表依次回退到 CDN（unpkg → jsdelivr → cdnjs）
+// ─── 第三方依赖 CDN 优先加载器 ─────────────────────────
+// 动态加载第三方库：CDN 优先 → 本地兜底（unpkg → jsdelivr → /static）。
 // 注：static/vditor 目录未随仓库部署（缺失），Vditor 内部资源（i18n/css/lute）
 // 统一走 CDN 基址 __VDITOR_CDN（Vditor cdn 参数内部拼 {cdn}/dist/...）。
 var __VDITOR_CDN = 'https://unpkg.com/vditor@3.10.7';
 var __libFallbackMap = {
   'Vditor': [
-    '/static/vditor/index.min.js',
     'https://unpkg.com/vditor@3.10.7/dist/index.min.js',
-    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js'
+    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js',
+    '/static/vditor/dist/index.min.js'
   ],
   'Lute': [
     'https://unpkg.com/vditor@3.10.7/dist/js/lute/lute.min.js',
     'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/js/lute/lute.min.js'
   ],
   'katex': [
-    '/static/vditor/js/katex/katex.min.js',
     'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js',
-    'https://unpkg.com/katex@0.16.9/dist/katex.min.js'
+    'https://unpkg.com/katex@0.16.9/dist/katex.min.js',
+    '/static/vditor/js/katex/katex.min.js'
   ],
   'Terminal': [
-    '/static/xterm.min.js',
-    'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/lib/xterm.min.js',
-    'https://unpkg.com/@xterm/xterm@5.3.0/lib/xterm.min.js'
+    'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js',
+    '/static/xterm.min.js'
   ],
   'cytoscape': [
-    '/static/cytoscape.min.js',
     'https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js',
-    'https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js'
+    'https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js',
+    '/static/cytoscape.min.js'
   ],
   'pdfjsLib': [
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
@@ -1616,7 +1615,7 @@ var __libFallbackMap = {
 };
 
 /**
- * 按全局对象名确保第三方库已加载；缺失时按 URL 列表依次动态加载（本地 → CDN 兜底）。
+ * 按全局对象名确保第三方库已加载；缺失时按 URL 列表依次动态加载（CDN 优先 → 本地兜底）。
  * @param {string} globalName  全局对象名（如 'Vditor' / 'katex' / 'Terminal'）
  * @param {function(boolean)} done 加载完成回调（ok=true 表示可用）
  */

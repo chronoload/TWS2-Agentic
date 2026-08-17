@@ -8654,14 +8654,21 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-    # ─── 静态资源禁用浏览器强缓存（开发期避免加载到旧的 app.js / index.html）────
+    # ─── 静态资源缓存策略 ─────────────────
+    # 带版本参数（?v=）或 hash 文件名（dist 构建产物）→ 长期缓存；
+    # 其余 → 短缓存，避免开发期加载到旧文件。
     @app.middleware("http")
-    async def _no_cache_static(request: Request, call_next):
+    async def _static_cache(request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static"):
-            response.headers["Cache-Control"] = "no-cache"
+            path = request.url.path
+            qs = request.url.query or ""
+            if any(h in path for h in (".min.js", ".min.css", "dist/")) or ("v=" in qs) or path.endswith((".wasm", ".woff2", ".woff", ".ttf", ".eot", ".png", ".svg", ".ico")):
+                response.headers["Cache-Control"] = "public, max-age=604800, immutable"
+            else:
+                response.headers["Cache-Control"] = "no-cache"
             # 修正 Windows mimetypes 对模块脚本的 MIME 误判（collab loro_wasm 等）
-            _p = request.url.path
+            _p = path
             if _p.endswith(".wasm"):
                 response.headers["Content-Type"] = "application/wasm"
             elif _p.endswith(".js") and (response.headers.get("content-type") or "").startswith("application/json"):

@@ -79,7 +79,7 @@ function __fallbackLink(el, urls) {
   } catch (e) { console.error('[CDN fallback] CSS 异常:', e); }
 }
 </script>
-<link rel="stylesheet" href="/static/vditor/dist/index.css" onerror="__fallbackLink(event.target,['https://unpkg.com/vditor@3.10.7/dist/index.css','https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.css'])">
+<link rel="stylesheet" href="https://unpkg.com/vditor@3.10.7/dist/index.css" onerror="__fallbackLink(event.target,['https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.css','/static/vditor/dist/index.css'])">
 <script>
 // 立即应用主题并加载对应的 content-theme CSS（本地优先 → CDN fallback）
 (function() {
@@ -100,13 +100,13 @@ function __fallbackLink(el, urls) {
       }
     }
   }
-  var lightCss = ['/static/vditor/dist/css/content-theme/light.css', 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/light.css'];
-  var darkCss = ['/static/vditor/dist/css/content-theme/dark.css', 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme/dark.css'];
+  var lightCss = ['https://unpkg.com/vditor@3.10.7/dist/css/content-theme/light.css', '/static/vditor/dist/css/content-theme/light.css'];
+  var darkCss = ['https://unpkg.com/vditor@3.10.7/dist/css/content-theme/dark.css', '/static/vditor/dist/css/content-theme/dark.css'];
   var cssList = isLight ? lightCss : darkCss;
   link.href = cssList[0];
   link.onerror = function() {
-    // 本地失败 → CDN fallback
-    if (link.href.indexOf('/static/') === 0) {
+    // CDN 失败 → 本地 fallback
+    if (link.href.indexOf('/static/') !== 0) {
       link.href = cssList[1];
       link.onerror = null;
     }
@@ -115,10 +115,10 @@ function __fallbackLink(el, urls) {
   } catch (e) { console.warn('[theme] 内联主题初始化失败，降级：', e); }
 })();
 </script>
-<link rel="stylesheet" href="/static/xterm.min.css" data-name="opencode-xterm">
-<script src="/static/xterm.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/lib/xterm.min.js','https://unpkg.com/@xterm/xterm@5.3.0/lib/xterm.min.js'])"></script>
-<script src="/static/xterm-addon-fit.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js','https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js'])"></script>
-<script src="/static/pdfjs/pdf.min.js" data-name="pdfjs" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js','https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js','https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'])"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" data-name="opencode-xterm" onerror="__fallbackLink(event.target,['/static/xterm.min.css'])">
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js" onerror="__fallbackScript(event.target,['/static/xterm.min.js'])"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js" onerror="__fallbackScript(event.target,['/static/xterm-addon-fit.min.js'])"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js" data-name="pdfjs" onerror="__fallbackScript(event.target,['https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js','https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','/static/pdfjs/pdf.min.js'])"></script>
 <script>
 // pdf.js worker 本地优先 → CDN fallback（pdfjs 加载后设置）
 (function() {
@@ -129,10 +129,10 @@ function __fallbackLink(el, urls) {
   else document.addEventListener('DOMContentLoaded', applyWorker);
 })();
 </script>
-<link rel="stylesheet" href="/static/vditor/js/katex/katex.min.css" onerror="__fallbackLink(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css','https://unpkg.com/katex@0.16.9/dist/katex.min.css'])">
-<script src="/static/vditor/js/katex/katex.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js','https://unpkg.com/katex@0.16.9/dist/katex.min.js'])"></script>
-<script src="/static/vditor/js/katex/mhchem.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/mhchem.min.js','https://unpkg.com/katex@0.16.9/dist/contrib/mhchem.min.js'])"></script>
-<script src="/static/vditor/js/katex/auto-render.min.js" defer onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js','https://unpkg.com/katex@0.16.9/dist/contrib/auto-render.min.js'])"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" onerror="__fallbackLink(event.target,['https://unpkg.com/katex@0.16.9/dist/katex.min.css','/static/vditor/js/katex/katex.min.css'])">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" onerror="__fallbackScript(event.target,['https://unpkg.com/katex@0.16.9/dist/katex.min.js','/static/vditor/js/katex/katex.min.js'])"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/mhchem.min.js" onerror="__fallbackScript(event.target,['https://unpkg.com/katex@0.16.9/dist/contrib/mhchem.min.js','/static/vditor/js/katex/mhchem.min.js'])"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" defer onerror="__fallbackScript(event.target,['https://unpkg.com/katex@0.16.9/dist/contrib/auto-render.min.js','/static/vditor/js/katex/auto-render.min.js'])"></script>
 <link rel="stylesheet" href="/static/style.css?v=tc14">
 </head>
 <body>
@@ -1909,9 +1909,9 @@ function __fallbackLink(el, urls) {
   <div style="font-size:13px;opacity:0.3;position:absolute;bottom:40px">点击任意位置跳过</div>
 </div>
 
-<script id="vditorScriptTag" src="/static/vditor/dist/index.min.js" defer
-  onerror="__fallbackScript(event.target,['https://unpkg.com/vditor@3.10.7/dist/index.min.js','https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js'])"></script>
-<script src="/static/cytoscape.min.js" onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js','https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js'])"></script>
+<script id="vditorScriptTag" src="https://unpkg.com/vditor@3.10.7/dist/index.min.js" defer
+  onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js','/static/vditor/dist/index.min.js'])"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js" onerror="__fallbackScript(event.target,['https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js','/static/cytoscape.min.js'])"></script>
 <script src="/static/autosave-scheduler.js"></script>
  <script src="/static/rmd-chunk.js"></script>
 <script src="/static/editor-chunks.js"></script>
