@@ -7,7 +7,7 @@
 // 环境变量：
 //   BACKUP_GIT_URL        git 仓库地址（可内嵌 token，如 https://TOKEN@github.com/user/repo.git）
 //   BACKUP_SOURCE         工作区目录（默认取 TS2_WORKSPACE，缺省 /data）
-//   BACKUP_INTERVAL_MIN   间隔分钟（默认 10）
+//   BACKUP_INTERVAL_MIN   间隔分钟（默认 3）
 //   BACKUP_BRANCH         分支（默认 main）
 //   GIT_NAME / GIT_EMAIL  commit 身份（默认 ts2-sync / sync@ts2.local）
 const { spawnSync } = require('child_process');
@@ -16,7 +16,7 @@ const path = require('path');
 
 const REPO = process.env.BACKUP_GIT_URL || '';
 const SOURCE = process.env.BACKUP_SOURCE || process.env.TS2_WORKSPACE || '/data';
-const INTERVAL_MS = (parseInt(process.env.BACKUP_INTERVAL_MIN || '10', 10)) * 60 * 1000;
+const INTERVAL_MS = (parseInt(process.env.BACKUP_INTERVAL_MIN || '3', 10)) * 60 * 1000;
 const BRANCH = process.env.BACKUP_BRANCH || 'main';
 const GIT_NAME = process.env.GIT_NAME || 'ts2-sync';
 const GIT_EMAIL = process.env.GIT_EMAIL || 'sync@ts2.local';
