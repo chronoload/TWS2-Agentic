@@ -3,9 +3,15 @@ services:
     name: ts2
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: free
+    plan: starter
     branch: remote
     healthCheckPath: /
+    disk:
+      name: ts2-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: PORT
         value: 10000
+      - key: TS2_WORKSPACE
+        value: /data
