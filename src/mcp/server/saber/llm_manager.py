@@ -15,10 +15,24 @@ _AGENT_CONFIG_DIR = Path.home() / '.ts2' / 'agent_config'
 _PROVIDERS_FILE = _AGENT_CONFIG_DIR / 'providers.json'
 
 
+def _resolve_providers_file() -> Path:
+    """~/.ts2 优先，回退 $TS2_WORKSPACE/agent_config/providers.json。"""
+    home_cfg = Path.home() / '.ts2' / 'agent_config' / 'providers.json'
+    if home_cfg.exists():
+        return home_cfg
+    ws = os.environ.get("TS2_WORKSPACE", "")
+    if ws:
+        ws_file = Path(ws) / 'agent_config' / 'providers.json'
+        if ws_file.exists():
+            return ws_file
+    return home_cfg
+
+
 def _load_providers() -> list[dict[str, Any]]:
     try:
-        if _PROVIDERS_FILE.exists():
-            return json.loads(_PROVIDERS_FILE.read_text(encoding='utf-8'))
+        pf = _resolve_providers_file()
+        if pf.exists():
+            return json.loads(pf.read_text(encoding='utf-8'))
     except Exception as e:
         logger.warning(f"读取 providers.json 失败: {e}")
     return []
@@ -97,15 +111,14 @@ def get_llm_config(use_selector: bool = True) -> dict[str, Any]:
 
     provider = get_best_provider()
     if provider is None:
-        cfg = {
+        # env 默认不缓存：后续补上 providers.json 时仍能读到
+        return {
             'api_key': os.environ.get('OPENAI_API_KEY', ''),
             'base_url': os.environ.get('OPENAI_BASE_URL', ''),
             'model': os.environ.get('SABER_LLM_MODEL', 'gpt-4o-mini'),
             'temperature': 0.7,
             'max_tokens': 4096,
         }
-        _SABER_LLM_CACHE = cfg
-        return cfg
 
     cfg = {
         'api_key': provider.get('api_key', ''),

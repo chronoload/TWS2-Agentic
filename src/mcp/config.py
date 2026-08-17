@@ -125,10 +125,16 @@ class ConfigManager:
         return cls._LEGACY_CONFIG_DIRS
 
     def _resolve_config_file(self, filename: str) -> Path:
-        """查找配置文件，优先系统目录，回退旧位置"""
+        """查找配置文件，优先系统目录，回退工作区($TS2_WORKSPACE)，再回退旧位置"""
         user_path = self.config_dir / filename
         if user_path.exists():
             return user_path
+        # 工作区回退：容器部署时 ~/.ts2 为空，配置由用户上传到工作区后仍可读
+        ws = os.environ.get("TS2_WORKSPACE", "")
+        if ws:
+            ws_path = Path(ws) / "agent_config" / filename
+            if ws_path.exists():
+                return ws_path
         for legacy_dir in self._get_legacy_dirs():
             legacy_path = legacy_dir / filename
             if legacy_path.exists():

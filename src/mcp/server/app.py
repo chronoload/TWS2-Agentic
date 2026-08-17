@@ -2638,8 +2638,9 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             return []
 
     def _read_bookmarks_data(workspace_dir: str):
-        """同步读取书签数据"""
-        bm_path = Path(workspace_dir) / "bookmarks.json"
+        """同步读取书签数据（~/.ts2 优先，回退工作区）"""
+        bm_home = Path.home() / ".ts2" / "bookmarks.json"
+        bm_path = bm_home if bm_home.exists() else Path(workspace_dir) / "bookmarks.json"
         if not bm_path.exists():
             return []
         try:
