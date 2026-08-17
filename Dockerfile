@@ -7,9 +7,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 装系统依赖（poppler 用于 PDF，字体用于 CJK）
+# 装系统依赖（git/nodejs 用于双向同步脚本，poppler 用于 PDF，字体用于 CJK）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils fonts-wqy-zenhei \
+    git nodejs poppler-utils fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
 # 先装构建工具 + 依赖（利用层缓存）
@@ -25,4 +25,4 @@ RUN mkdir -p /app/data && chmod -R 777 /app/data
 
 EXPOSE 7860
 
-CMD ["sh", "-c", "python deploy_start.py"]
+CMD ["sh", "-c", "node /app/backup-sync.js & python deploy_start.py"]
