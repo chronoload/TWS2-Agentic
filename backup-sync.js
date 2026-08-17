@@ -2,7 +2,9 @@
 // TS2 双向同步脚本：把工作区 /data 做成 git 仓库，定时与远程备份仓库双向同步。
 //  - push：本地改动提交备份（防 Render 免费版丢数据）
 //  - pull：远程改动拉回工作区（换设备/恢复用）
+//  - 冷启动恢复：免费版 /data 不持久，启动时若仓库丢失则从备份仓库整体恢复。
 //  冲突策略：优先保留本地版本（-X ours），远程独有文件仍会合并进来。
+//  用法：node backup-sync.js --once  立即执行一次后退出（用于应用启动前恢复数据）
 //
 // 环境变量：
 //   BACKUP_GIT_URL        git 仓库地址（可内嵌 token，如 https://TOKEN@github.com/user/repo.git）
@@ -34,9 +36,22 @@ function ensureRepo() {
   if (!REPO) { log('BACKUP_GIT_URL 未设置，仅本地记录，不推送'); return; }
   if (fs.existsSync(path.join(SOURCE, '.git'))) return;
 
+  // 冷启动 / 数据被清空（免费版 /data 不持久）：初始化并尝试从备份仓库恢复
   log(`初始化 ${SOURCE} 为 git 仓库 -> ${REPO}`);
   git(SOURCE, 'init', `-b "${BRANCH}"`);
   git(SOURCE, 'remote', 'add', 'origin', `"${REPO}"`);
+
+  const fetch = run(`git fetch origin "${BRANCH}"`, SOURCE);
+  const hasRemote = run(`git rev-parse --verify origin/${BRANCH}`, SOURCE).ok;
+  if (fetch.ok && hasRemote) {
+    // 备份仓库已有历史 → 整体恢复到工作区（丢弃应用生成的默认文件，以备份为准）
+    const reset = run(`git reset --hard origin/${BRANCH}`, SOURCE);
+    git(SOURCE, 'branch', `--set-upstream-to=origin/${BRANCH}`, BRANCH);
+    log(reset.ok ? `已从备份仓库恢复 ${SOURCE}` : `恢复失败：${reset.err}`);
+    return;
+  }
+
+  // 备份仓库为空（首次运行）→ 提交当前状态作为初始快照
   const ignorePath = path.join(SOURCE, '.gitignore');
   if (!fs.existsSync(ignorePath)) {
     fs.writeFileSync(ignorePath,
@@ -45,7 +60,7 @@ function ensureRepo() {
   git(SOURCE, 'add', '-A');
   git(SOURCE, 'commit', '-m', '"init snapshot"');
   const p = run(`git push -u origin "${BRANCH}"`, SOURCE);
-  if (!p.ok) log('首次推送失败（远程可能为空，已初始化）：', p.err);
+  if (!p.ok) log('首次推送失败：', p.err);
 }
 
 function syncOnce() {
@@ -76,5 +91,9 @@ function syncOnce() {
 }
 
 log(`双向同步：${SOURCE} <-> ${REPO || '(无远程)'}，每 ${INTERVAL_MS / 60000} 分钟`);
-syncOnce();
-setInterval(syncOnce, INTERVAL_MS);
+if (process.argv.includes('--once')) {
+  syncOnce();
+} else {
+  syncOnce();
+  setInterval(syncOnce, INTERVAL_MS);
+}

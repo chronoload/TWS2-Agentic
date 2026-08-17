@@ -25,4 +25,5 @@ RUN mkdir -p /app/data && chmod -R 777 /app/data
 
 EXPOSE 7860
 
-CMD ["sh", "-c", "node /app/backup-sync.js & python deploy_start.py"]
+# 先恢复数据再启动应用，后台继续定时同步
+CMD ["sh", "-c", "node /app/backup-sync.js --once; (node /app/backup-sync.js &); python deploy_start.py"]
