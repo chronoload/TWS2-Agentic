@@ -24796,9 +24796,9 @@ function _initMonaco(wrap, content, filePath) {
       });
     };
     loaderEl.onerror = function() {
-      if (vsBase === _vsBaseLocal) {
-        console.warn('Local Monaco load failed, falling back to CDN');
-        tryLoadMonaco(_vsBaseCDN);
+      if (vsBase === _vsBaseCDN) {
+        console.warn('CDN Monaco load failed, falling back to local');
+        tryLoadMonaco(_vsBaseLocal);
       } else {
         _monacoLoading = false;
         wrap.innerHTML = '<div style="padding:20px;color:var(--red)">Monaco Editor 加载失败</div>';
@@ -24806,7 +24806,7 @@ function _initMonaco(wrap, content, filePath) {
     };
     document.head.appendChild(loaderEl);
   }
-  tryLoadMonaco(_vsBaseLocal);
+  tryLoadMonaco(_vsBaseCDN);
 }
 
 function _getMonacoContent() {
@@ -24856,6 +24856,45 @@ function _installDefineProxy(vditorDefine) {
 function _loadMonacoApi() {
   if (_monacoLoading) return;
   _monacoLoading = true;
+  var vsBase = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs';
+  if (!document.querySelector('link[href*="editor.main.min.css"]')) {
+    var cssLink = document.createElement('link');
+    cssLink.rel = 'stylesheet';
+    cssLink.href = vsBase + '/editor/editor.main.min.css';
+    document.head.appendChild(cssLink);
+  }
+  self.MonacoEnvironment = {
+    getWorkerUrl: function(moduleId, label) {
+      if (label === 'json') return vsBase + '/language/json/json.worker.js';
+      if (label === 'css' || label === 'scss' || label === 'less') return vsBase + '/language/css/css.worker.js';
+      if (label === 'html' || label === 'handlebars' || label === 'razor') return vsBase + '/language/html/html.worker.js';
+      if (label === 'typescript' || label === 'javascript') return vsBase + '/language/typescript/ts.worker.js';
+      return vsBase + '/editor/editor.worker.js';
+    }
+  };
+  var _vditorDefine = typeof define !== 'undefined' ? define : null;
+  var loaderEl = document.createElement('script');
+  loaderEl.src = vsBase + '/loader.js';
+  loaderEl.onload = function() {
+    var _monacoRequire = window.require;
+    _monacoRequire.config({ paths: { vs: vsBase } });
+    _installDefineProxy(_vditorDefine);
+    _monacoRequire(['vs/editor/editor.main'], function() {
+      _monacoApi = window.monaco;
+      _monacoLoading = false;
+    });
+  };
+  loaderEl.onerror = function() {
+    console.warn('CDN Monaco load failed, falling back to local');
+    _monacoLoading = false;
+    _loadMonacoApiLocal();
+  };
+  document.head.appendChild(loaderEl);
+}
+
+function _loadMonacoApiLocal() {
+  if (_monacoLoading) return;
+  _monacoLoading = true;
   var vsBase = location.origin + '/static/monaco-editor/vs';
   if (!document.querySelector('link[href*="editor.main.min.css"]')) {
     var cssLink = document.createElement('link');
@@ -24885,43 +24924,7 @@ function _loadMonacoApi() {
     });
   };
   loaderEl.onerror = function() {
-    console.warn('Local Monaco load failed, falling back to CDN');
     _monacoLoading = false;
-    _loadMonacoApiCdn();
-  };
-  document.head.appendChild(loaderEl);
-}
-
-function _loadMonacoApiCdn() {
-  if (_monacoLoading) return;
-  _monacoLoading = true;
-  var vsBase = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs';
-  if (!document.querySelector('link[href*="editor.main.min.css"]')) {
-    var cssLink = document.createElement('link');
-    cssLink.rel = 'stylesheet';
-    cssLink.href = vsBase + '/editor/editor.main.min.css';
-    document.head.appendChild(cssLink);
-  }
-  self.MonacoEnvironment = {
-    getWorkerUrl: function(moduleId, label) {
-      if (label === 'json') return vsBase + '/language/json/json.worker.js';
-      if (label === 'css' || label === 'scss' || label === 'less') return vsBase + '/language/css/css.worker.js';
-      if (label === 'html' || label === 'handlebars' || label === 'razor') return vsBase + '/language/html/html.worker.js';
-      if (label === 'typescript' || label === 'javascript') return vsBase + '/language/typescript/ts.worker.js';
-      return vsBase + '/editor/editor.worker.js';
-    }
-  };
-  var _vditorDefine = typeof define !== 'undefined' ? define : null;
-  var loaderEl = document.createElement('script');
-  loaderEl.src = vsBase + '/loader.js';
-  loaderEl.onload = function() {
-    var _monacoRequire = window.require;
-    _monacoRequire.config({ paths: { vs: vsBase } });
-    _installDefineProxy(_vditorDefine);
-    _monacoRequire(['vs/editor/editor.main'], function() {
-      _monacoApi = window.monaco;
-      _monacoLoading = false;
-    });
   };
   document.head.appendChild(loaderEl);
 }
