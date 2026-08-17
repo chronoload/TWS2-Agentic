@@ -8,6 +8,7 @@ __pycache__/
 # Node / frontend build
 node_modules/
 dist/
+!static/mindmap/dist/
 build/
 
 # Large / unrelated bundled subprojects (not part of core TS2 server)
