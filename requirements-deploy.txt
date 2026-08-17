@@ -15,7 +15,7 @@ psutil
 pygments                 # 修复 timetable / agent 输出高亮的 NameError
 
 # ─── 核心 / LLM / 笔记 / PDF 文本（app 启动或运行时会 import）─────
-numpy<=1.24.0
+numpy>=1.26.0
 matplotlib>=3.5.0
 openai>=1.0.0
 anthropic>=0.7.0
@@ -31,8 +31,8 @@ tiktoken>=0.5.0
 rank_bm25
 loro>=1.13.2             # collab.py 顶层无条件 import，启动必需
 
-# ─── 可选（按需取消注释；部分与 numpy<=1.24.0 存在版本约束）──────
-# chromadb>=0.4.0      # RAG 向量库；需 numpy>=1.26，放开上面 numpy 上限方可启用
+# ─── 可选（按需取消注释）──────────────────────────────────
+# chromadb>=0.4.0      # RAG 向量库
 # faiss-cpu>=1.7.0     # RAG 向量检索
 # feedparser>=6.0.0    # RSS
 # pdf2image>=1.16.0    # PDF 转图片（Linux 还需系统装 poppler-utils）
