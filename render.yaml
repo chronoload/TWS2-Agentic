@@ -15,3 +15,5 @@ services:
         value: 10000
       - key: TS2_WORKSPACE
         value: /data
+      - key: BACKUP_GIT_URL
+        sync: false   # 在 Render 控制台手动填：https://TOKEN@github.com/用户名/备份仓库.git
