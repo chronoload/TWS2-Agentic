@@ -7,9 +7,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 先装依赖（利用层缓存）
+# 先装构建工具 + 依赖（利用层缓存）
 COPY requirements-deploy.txt .
-RUN pip install --no-cache-dir -r requirements-deploy.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements-deploy.txt
 
 # 再拷贝源码
 COPY . .
