@@ -1,9 +1,6 @@
-# TS2 Web 部署依赖（精简版）
-# 基础 requirements.txt 缺少整套 Web 框架与 pygments，这里补齐。
-# 重型/可选依赖（chromadb / faiss-cpu / feedparser / pdf2image）已省略，
-# 缺失时服务端相关功能会优雅降级（try/except），不影响启动与核心文件/笔记功能。
+# TS2 Web 部署依赖（完整版：仓库实际 import 的部分 + Web 框架 + pygments）
 
-# ─── Web 框架（基础 requirements.txt 缺失，必须补）──────────────
+# ─── Web 框架（仓库 requirements.txt 缺失，必须补）──────────────
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 starlette==0.35.1
@@ -17,7 +14,7 @@ httpx
 psutil
 pygments                 # 修复 timetable / agent 输出高亮的 NameError
 
-# ─── 核心（取自基础 requirements.txt，部署必需）────────────────
+# ─── 核心 / LLM / 笔记 / PDF 文本（app 启动或运行时会 import）─────
 numpy<=1.24.0
 matplotlib>=3.5.0
 openai>=1.0.0
@@ -28,3 +25,14 @@ pyyaml>=5.4.0
 requests>=2.26.0
 beautifulsoup4>=4.9.0
 PyPDF2>=3.0.0
+python-docx>=1.1.0
+Pillow>=10.0.0
+tiktoken>=0.5.0
+rank_bm25
+loro>=1.13.2             # collab.py 顶层无条件 import，启动必需
+
+# ─── 可选（按需取消注释；部分与 numpy<=1.24.0 存在版本约束）──────
+# chromadb>=0.4.0      # RAG 向量库；需 numpy>=1.26，放开上面 numpy 上限方可启用
+# faiss-cpu>=1.7.0     # RAG 向量检索
+# feedparser>=6.0.0    # RSS
+# pdf2image>=1.16.0    # PDF 转图片（Linux 还需系统装 poppler-utils）
