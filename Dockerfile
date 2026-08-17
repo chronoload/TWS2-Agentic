@@ -7,6 +7,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# 装系统依赖（tkinter、poppler、字体等）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tk-dev poppler-utils fonts-wqy-zenhei \
+    && rm -rf /var/lib/apt/lists/*
+
 # 先装构建工具 + 依赖（利用层缓存）
 COPY requirements-deploy.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
