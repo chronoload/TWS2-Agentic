@@ -1,0 +1,103 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width,user-scalable=no,initial-scale=1,maximum-scale=1,minimum-scale=1"><link rel="icon" href="dist/logo.ico"><title>思维导图</title><style>body{margin:0;overflow:hidden}#app{width:100vw;height:100vh}</style></head><body><div id="app"></div>
+<script>
+window.takeOverApp = true;
+window.externalPublicPath = './dist/';
+
+var _savedData = null;
+var _hasDataFromParent = false;
+var _vueReady = false;
+var _initApp = null;
+var _appInitialized = false;
+
+window.takeOverAppMethods = {
+  getMindMapData: function() { return _hasDataFromParent ? _savedData : null; },
+  saveMindMapData: function(data) {
+    _savedData = data;
+    window.parent.postMessage({ action: 'saveData', data: data }, '*');
+  },
+  getMindMapConfig: function() {
+    try { return JSON.parse(localStorage.getItem('kmind_config')); } catch(e) { return null; }
+  },
+  saveMindMapConfig: function(config) { localStorage.setItem('kmind_config', JSON.stringify(config)); },
+  getLanguage: function() { return 'zh'; },
+  saveLanguage: function(lang) {},
+  getLocalConfig: function() {
+    return { isDark: document.documentElement.getAttribute('data-theme') === 'dark' };
+  },
+  saveLocalConfig: function() {}
+};
+
+window.addEventListener('message', function(e) {
+  var msg = e.data;
+  if (!msg || !msg.action) return;
+
+  if (msg.action === 'ping') {
+    if (_vueReady) {
+      window.parent.postMessage({ action: 'mindmapReady' }, '*');
+    }
+    return;
+  }
+
+  if (msg.action === 'loadData' && msg.data) {
+    _hasDataFromParent = true;
+    _savedData = msg.data;
+    if (_initApp && !_appInitialized) {
+      _appInitialized = true;
+      _initApp();
+    }
+    window.parent.postMessage({ action: 'dataLoaded' }, '*');
+    return;
+  }
+
+  if (msg.action === 'getData') {
+    if (_savedData) {
+      window.parent.postMessage({ action: 'saveData', data: _savedData }, '*');
+    }
+    return;
+  }
+
+  if (msg.action === 'setTheme') {
+    if (msg.theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+    else document.documentElement.removeAttribute('data-theme');
+    return;
+  }
+});
+
+function _waitVue() {
+  if (window.$bus && window.$bus.$emit && window.initApp) {
+    _initApp = window.initApp;
+    _vueReady = true;
+    window.parent.postMessage({ action: 'mindmapReady' }, '*');
+    if (_hasDataFromParent && _savedData && !_appInitialized) {
+      _appInitialized = true;
+      _initApp();
+    }
+    return;
+  }
+  setTimeout(_waitVue, 100);
+}
+_waitVue();
+
+setTimeout(function() {
+  if (!_vueReady) {
+    _vueReady = true;
+    _initApp = window.initApp || null;
+    window.parent.postMessage({ action: 'mindmapReady' }, '*');
+  }
+}, 8000);
+
+setTimeout(function() {
+  if (!_hasDataFromParent && !_savedData) {
+    document.body.innerHTML = '<div style="padding:40px;text-align:center;color:#999">思维导图加载失败，请检查网络</div>';
+  }
+}, 30000);
+</script>
+<link href="dist/css/chunk-vendors.css" rel="stylesheet">
+<link href="dist/css/app.css" rel="stylesheet">
+<link href="dist/css/chunk-2f9a41ed.css" rel="stylesheet">
+<link href="dist/css/chunk-3222d6ee.css" rel="stylesheet">
+<script src="dist/js/chunk-vendors.js"></script>
+<script src="dist/js/chunk-2f9a41ed.js"></script>
+<script src="dist/js/chunk-3222d6ee.js"></script>
+<script src="dist/js/app.js"></script>
+</body></html>
