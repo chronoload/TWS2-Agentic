@@ -4,10 +4,13 @@
 import * as Loro from './collab/loro_wasm_bg.js';
 
 let _wasmReady = null;
+const _WASM_CDN = 'https://cdn.jsdelivr.net/npm/loro-wasm@1.0.7/bundler/loro_wasm_bg.wasm';
+const _WASM_LOCAL = '/static/collab/loro_wasm_bg.wasm';
 function initLoro() {
   if (!_wasmReady) {
     _wasmReady = (async () => {
-      const res = await fetch('/static/collab/loro_wasm_bg.wasm');
+      let res = await fetch(_WASM_CDN);
+      if (!res.ok) res = await fetch(_WASM_LOCAL);
       if (!res.ok) throw new Error('wasm 下载失败 ' + res.status);
       const bytes = await res.arrayBuffer();
       const { instance } = await WebAssembly.instantiate(bytes, {
