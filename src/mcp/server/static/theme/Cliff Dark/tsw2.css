@@ -1,0 +1,1144 @@
+/* ═══════════════════════════════════════════════════════════════
+   Cliff Dark 深度升级主题（TS2 清单注入入口 tsw2.css）
+   通过 html[data-theme="Cliff Dark"] 应用，由 app.js 动态注入
+
+   视觉来源：Cliff Dark 思源主题（theme/Cliff Dark/theme.css + styles/）
+   设计语言：
+     - cliff_bg.jpg 全屏固定背景
+     - 全界面毛玻璃（backdrop-filter blur + 半透明深灰底）
+     - 代码块 macOS 红黄绿圆点
+     - 引述块大圆角卡片、表格斑马纹、行内代码高亮
+   所有规则限定在 html[data-theme="Cliff Dark"] 作用域内，不影响其他主题
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ─── 变量层（半透明底，供毛玻璃透出背景图） ─── */
+html[data-theme="Cliff Dark"] {
+  /* 主色：Cliff 青 teal (30,195,180) + 强调橙 #f3a92f */
+  --color: 30, 195, 180;
+  --accent: #1ec3b4;
+  --accent-hover: #3ad1c3;
+  --accent-bg: rgba(30, 195, 180, 0.16);
+
+  /* 文本：Cliff 米白 #F2F1E8 系 */
+  --fg: #e8eaed;
+  --fg-muted: #9aa0a6;
+  --fg-dim: #6a7078;
+
+  /* 背景：半透明深灰（毛玻璃透出 cliff_bg.jpg） */
+  --bg: rgba(24, 24, 24, 0.6);
+  --bg-secondary: rgba(43, 43, 43, 0.52);
+  --bg-tertiary: rgba(53, 53, 53, 0.42);
+  --bg-hover: rgba(59, 59, 59, 0.5);
+  --bg-card: rgba(43, 43, 43, 0.58);
+  --bg-elevated: rgba(52, 52, 52, 0.72);
+
+  /* 语义色（Cliff 原版卡片色板） */
+  --green: #8fbf78;
+  --green-bg: rgba(143, 191, 120, 0.16);
+  --red: #e46a62;
+  --red-bg: rgba(228, 106, 98, 0.16);
+  --yellow: #f3a92f;
+  --yellow-bg: rgba(243, 169, 47, 0.16);
+  --cyan: #4db2d8;
+  --cyan-bg: rgba(77, 178, 216, 0.16);
+  --purple: #a98fbb;
+  --purple-bg: rgba(169, 143, 187, 0.16);
+  --orange: #e8843c;
+  --orange-bg: rgba(232, 132, 60, 0.16);
+
+  /* 边框：半透明白（Cliff 原版 rgba(230,230,230,.1) 系） */
+  --border: rgba(230, 230, 230, 0.14);
+  --border-light: rgba(230, 230, 230, 0.22);
+
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --sidebar-w: 280px;
+  --toolbar-h: 44px;
+  --statusbar-h: 28px;
+  --tab-h: 36px;
+  --transition: 0.2s ease;
+
+  /* Cliff 专属辅助变量 */
+  --cliff-blur: blur(16px);
+  --cliff-glass: rgba(31, 31, 31, 0.62);
+  --cliff-glass-deep: rgba(20, 20, 20, 0.7);
+  --cliff-highlight: rgba(230, 230, 230, 0.06);
+  --cliff-code-bg: linear-gradient(to bottom, rgba(28, 36, 33, 0.85), rgba(28, 36, 33, 0.5));
+  --cliff-quote-bg: rgba(51, 55, 57, 0.55);
+  --cliff-quote-border: rgba(30, 195, 180, 0.5);
+}
+
+/* ─── 背景层：cliff_bg.jpg 全屏固定 ─── */
+html[data-theme="Cliff Dark"] body {
+  background-color: #1b1b1b;
+  background-image: url('/static/theme/Cliff%20Dark/cliff_bg.jpg');
+  background-size: cover;
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+/* ─── 玻璃工具类（复用） ─── */
+html[data-theme="Cliff Dark"] .glass-surface {
+  background: var(--cliff-glass) !important;
+  -webkit-backdrop-filter: var(--cliff-blur) !important;
+  backdrop-filter: var(--cliff-blur) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   布局玻璃面板
+   ═══════════════════════════════════════════════════════════════ */
+
+/* 侧栏
+   注意：backdrop-filter 会让内部 position:fixed 后代（dash 树/焦点浮层）
+   相对侧栏定位而非视口，故毛玻璃必须放到 ::before 伪元素上，本体不设。
+   isolation:isolate 创建 stacking context（让 ::before z-index:-1 保持在内容下、
+   背景上），且不改变 fixed 定位基准。 */
+html[data-theme="Cliff Dark"] .sidebar {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+  border-right: 1px solid var(--border);
+  box-shadow: 2px 0 24px rgba(0, 0, 0, 0.35);
+}
+
+html[data-theme="Cliff Dark"] .sidebar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--cliff-glass);
+  -webkit-backdrop-filter: var(--cliff-blur);
+  backdrop-filter: var(--cliff-blur);
+}
+
+html[data-theme="Cliff Dark"] .sidebar-header {
+  border-bottom: 1px solid var(--border);
+  background: var(--cliff-highlight);
+}
+
+html[data-theme="Cliff Dark"] .sidebar-header .logo {
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(30, 195, 180, 0.4);
+}
+
+html[data-theme="Cliff Dark"] .sidebar-header .version {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+/* 导航标签 */
+html[data-theme="Cliff Dark"] .nav-tabs {
+  background: rgba(31, 31, 31, 0.35);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .nav-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* 主区 */
+html[data-theme="Cliff Dark"] .main {
+  background: transparent;
+}
+
+html[data-theme="Cliff Dark"] .toolbar {
+  background: rgba(31, 31, 31, 0.4);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .toolbar .btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+
+html[data-theme="Cliff Dark"] .toolbar .btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .toolbar .btn.save-btn {
+  background: var(--green);
+  color: var(--bg);
+  border-color: var(--green);
+}
+
+html[data-theme="Cliff Dark"] .path-bar .crumb:hover { color: var(--accent); }
+html[data-theme="Cliff Dark"] .path-bar .path-new-btn {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/* 编辑器标签 */
+html[data-theme="Cliff Dark"] .editor-tabs {
+  background: rgba(31, 31, 31, 0.4);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .tab {
+  border-right: 1px solid var(--border);
+  color: var(--fg-muted);
+  background: transparent;
+}
+
+html[data-theme="Cliff Dark"] .tab.active {
+  color: var(--accent);
+  background: var(--accent-bg);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .tab:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+/* 编辑区容器（毛玻璃，透出背景图） */
+html[data-theme="Cliff Dark"] .editor-container {
+  background: rgba(20, 20, 20, 0.6);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="Cliff Dark"] .welcome {
+  background: transparent;
+}
+
+html[data-theme="Cliff Dark"] .welcome .logo-large {
+  color: var(--accent);
+  text-shadow: 0 0 20px rgba(30, 195, 180, 0.45);
+}
+
+/* 状态栏 */
+html[data-theme="Cliff Dark"] .statusbar {
+  background: rgba(31, 31, 31, 0.5);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .statusbar select {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+/* 终端 */
+html[data-theme="Cliff Dark"] .terminal-panel {
+  background: rgba(20, 20, 20, 0.66);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .terminal-panel .terminal-header {
+  background: rgba(31, 31, 31, 0.5);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .terminal-panel .terminal-tabbar {
+  background: rgba(31, 31, 31, 0.5);
+}
+
+html[data-theme="Cliff Dark"] .terminal-panel .terminal-tabbar .term-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* 分割条 */
+html[data-theme="Cliff Dark"] .resize-handle:hover { background: var(--accent); }
+
+/* ═══════════════════════════════════════════════════════════════
+   侧栏面板
+   ═══════════════════════════════════════════════════════════════ */
+
+/* 搜索框 */
+html[data-theme="Cliff Dark"] .sidebar-search {
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .sidebar-search input {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+html[data-theme="Cliff Dark"] .sidebar-search input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(30, 195, 180, 0.2);
+}
+
+/* 文件树 */
+html[data-theme="Cliff Dark"] .file-breadcrumb {
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .tree-item {
+  color: var(--fg);
+}
+
+html[data-theme="Cliff Dark"] .tree-item:hover {
+  background: var(--bg-tertiary);
+}
+
+html[data-theme="Cliff Dark"] .tree-item.active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .tree-item.selected {
+  background: rgba(30, 195, 180, 0.2) !important;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .tree-item .icon { color: var(--fg-muted); }
+html[data-theme="Cliff Dark"] .tree-item .folder-icon,
+html[data-theme="Cliff Dark"] .tree-folder .icon { color: var(--accent); opacity: 0.85; }
+html[data-theme="Cliff Dark"] .tree-item .size { color: var(--fg-dim); }
+
+/* 上传区 */
+html[data-theme="Cliff Dark"] .upload-area {
+  border: 2px dashed var(--border);
+  background: var(--bg-tertiary);
+}
+html[data-theme="Cliff Dark"] .upload-area:hover,
+html[data-theme="Cliff Dark"] .upload-area.dragover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* 任务看板 */
+html[data-theme="Cliff Dark"] .task-stats-bar { gap: 6px; }
+html[data-theme="Cliff Dark"] .task-stats-bar .task-stat {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border-radius: 8px;
+}
+
+html[data-theme="Cliff Dark"] .kanban-column {
+  background: rgba(31, 31, 31, 0.45);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+html[data-theme="Cliff Dark"] .kanban-column-header {
+  border-bottom: 1px solid var(--border);
+  background: var(--cliff-highlight);
+}
+
+html[data-theme="Cliff Dark"] .kanban-column-header .count {
+  background: var(--bg-tertiary);
+  color: var(--fg-muted);
+}
+
+html[data-theme="Cliff Dark"] .task-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-radius: 8px;
+  transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
+}
+
+html[data-theme="Cliff Dark"] .task-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 16px rgba(30, 195, 180, 0.15);
+  transform: translateY(-1px);
+}
+
+html[data-theme="Cliff Dark"] .task-card.task-overdue { border-left: 3px solid var(--red); }
+html[data-theme="Cliff Dark"] .task-card.task-highlight { border-left: 3px solid var(--accent); }
+
+/* 日期筛选 */
+html[data-theme="Cliff Dark"] #taskDateFilter {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+/* 书签 */
+html[data-theme="Cliff Dark"] .bookmarks-search input,
+html[data-theme="Cliff Dark"] #bookmarkSearch {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+html[data-theme="Cliff Dark"] .bookmark-category,
+html[data-theme="Cliff Dark"] .bookmark-item {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="Cliff Dark"] .bookmark-item:hover {
+  border-color: var(--accent);
+}
+
+/* 项目 / 源码浏览器 */
+html[data-theme="Cliff Dark"] .src-layout .src-sidebar {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .src-content {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .src-toolbar input {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+/* 课程 */
+html[data-theme="Cliff Dark"] .course-search-wrap input,
+html[data-theme="Cliff Dark"] #courseSearchInput,
+html[data-theme="Cliff Dark"] .course-domain-filter {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+html[data-theme="Cliff Dark"] .course-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-radius: var(--radius);
+}
+
+html[data-theme="Cliff Dark"] .course-card:hover {
+  border-color: var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .course-action-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] .course-action-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 执行模式 / 统计卡 */
+html[data-theme="Cliff Dark"] .exec-select-group select,
+html[data-theme="Cliff Dark"] #execCourseSelect,
+html[data-theme="Cliff Dark"] #execLessonSelect {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+html[data-theme="Cliff Dark"] .stat-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-radius: var(--radius);
+}
+
+html[data-theme="Cliff Dark"] .stat-card .stat-value { color: var(--accent); }
+
+html[data-theme="Cliff Dark"] .timer-display {
+  color: var(--accent);
+  text-shadow: 0 0 12px rgba(30, 195, 180, 0.4);
+}
+
+html[data-theme="Cliff Dark"] .exec-complete-btn {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* 笔记 / 分页 */
+html[data-theme="Cliff Dark"] #slidesSearchInput,
+html[data-theme="Cliff Dark"] .slides-search-input {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+html[data-theme="Cliff Dark"] .btn-action {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] .btn-action:hover { opacity: 0.85; border-color: var(--accent); }
+html[data-theme="Cliff Dark"] .btn-action.btn-secondary { background: var(--bg-secondary); }
+html[data-theme="Cliff Dark"] .btn-action.btn-outline { background: transparent; }
+html[data-theme="Cliff Dark"] .btn-action[onclick*="slides"] { -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+
+/* 资源面板 */
+html[data-theme="Cliff Dark"] #resourceSearchInput,
+html[data-theme="Cliff Dark"] #resourceCourseFilter,
+html[data-theme="Cliff Dark"] #resourceLessonFilter {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+html[data-theme="Cliff Dark"] .resource-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+html[data-theme="Cliff Dark"] .resource-card:hover { border-color: var(--accent); }
+
+/* ═══════════════════════════════════════════════════════════════
+   Agent 面板
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] .agent-panel {
+  background: var(--cliff-glass);
+}
+
+html[data-theme="Cliff Dark"] .agent-msg {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border-radius: var(--radius);
+}
+
+html[data-theme="Cliff Dark"] .agent-msg.agent-msg-user {
+  background: var(--accent-bg);
+  border-color: rgba(30, 195, 180, 0.3);
+}
+
+html[data-theme="Cliff Dark"] .agent-input-area input {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+html[data-theme="Cliff Dark"] .agent-input-area input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(30, 195, 180, 0.2);
+}
+
+html[data-theme="Cliff Dark"] #agentSend {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .agent-session-bar {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .agent-session-btn:hover { color: var(--accent); }
+
+/* ═══════════════════════════════════════════════════════════════
+   DataHub 面板
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] .hub-panel { background: transparent; }
+
+html[data-theme="Cliff Dark"] .hub-stat {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="Cliff Dark"] .hub-stat-value { color: var(--accent); }
+
+html[data-theme="Cliff Dark"] .hub-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] .hub-btn:hover { border-color: var(--accent); }
+
+html[data-theme="Cliff Dark"] .hub-rail {
+  background: var(--bg-tertiary);
+  border-right: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .hub-view-item:hover,
+html[data-theme="Cliff Dark"] .hub-sub-item:hover { background: var(--bg-hover); }
+html[data-theme="Cliff Dark"] .hub-view-item.hub-view-active,
+html[data-theme="Cliff Dark"] .hub-sub-item.hub-sub-active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .hub-feed-header {
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .hub-item-card:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .hub-item-card.hub-item-unread { border-left: 3px solid var(--accent); }
+
+/* ═══════════════════════════════════════════════════════════════
+   统计面板
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] .stats-grid .stat-card { background: var(--bg-tertiary); }
+
+html[data-theme="Cliff Dark"] #activityHeatmap .heat-cell {
+  border-radius: 3px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   设置面板
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] #panel-settings > div > div {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+html[data-theme="Cliff Dark"] #panel-settings input,
+html[data-theme="Cliff Dark"] #panel-settings select,
+html[data-theme="Cliff Dark"] #panel-settings .tunnel-input {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+html[data-theme="Cliff Dark"] .tunnel-type-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] .tunnel-type-btn.active {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   浮层：弹窗 / 菜单 / 提示 / 面板
+   ═══════════════════════════════════════════════════════════════ */
+
+/* 通用下拉 */
+html[data-theme="Cliff Dark"] .dropdown-menu,
+html[data-theme="Cliff Dark"] #openWithDropdown,
+html[data-theme="Cliff Dark"] #recentFilesDropdown {
+  background: var(--bg-elevated);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+html[data-theme="Cliff Dark"] .dropdown-item:hover {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+/* 右键菜单 */
+html[data-theme="Cliff Dark"] .context-menu {
+  background: var(--bg-elevated);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+html[data-theme="Cliff Dark"] .context-menu-item:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+html[data-theme="Cliff Dark"] .context-menu-sep { background: var(--border); }
+
+/* 弹窗 */
+html[data-theme="Cliff Dark"] .modal-overlay {
+  background: rgba(10, 10, 10, 0.55);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+html[data-theme="Cliff Dark"] .modal {
+  background: rgba(24, 24, 24, 0.92);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55);
+}
+
+html[data-theme="Cliff Dark"] .modal h3 { color: var(--accent); }
+html[data-theme="Cliff Dark"] .modal input,
+html[data-theme="Cliff Dark"] .modal select,
+html[data-theme="Cliff Dark"] .modal textarea {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] .modal input:focus,
+html[data-theme="Cliff Dark"] .modal select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(30, 195, 180, 0.2);
+}
+
+html[data-theme="Cliff Dark"] .modal .actions .btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] .modal .actions .btn.primary {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* toast */
+html[data-theme="Cliff Dark"] .toast {
+  background: var(--bg-elevated);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+html[data-theme="Cliff Dark"] .toast.success { border-left: 3px solid var(--green); }
+html[data-theme="Cliff Dark"] .toast.error { border-left: 3px solid var(--red); }
+html[data-theme="Cliff Dark"] .toast.info { border-left: 3px solid var(--accent); }
+
+/* 传输面板 */
+html[data-theme="Cliff Dark"] .transfer-panel {
+  background: var(--bg-elevated);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+
+/* 大纲面板 */
+html[data-theme="Cliff Dark"] .editor-outline-panel {
+  background: rgba(31, 31, 31, 0.55);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border-left: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .editor-outline-header {
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .vditor-outline__item--current {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* PDF 阅读器 */
+html[data-theme="Cliff Dark"] .pdf-viewer,
+html[data-theme="Cliff Dark"] #pdfViewer {
+  background: rgba(20, 20, 20, 0.6);
+}
+
+html[data-theme="Cliff Dark"] .pdf-toolbar {
+  background: rgba(31, 31, 31, 0.5);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .pdf-nav-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] .pdf-nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+html[data-theme="Cliff Dark"] #pdfOutlinePanel,
+html[data-theme="Cliff Dark"] #pdfAiPanel {
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+}
+
+/* 登录浮层 */
+html[data-theme="Cliff Dark"] #authOverlay { background: rgba(10, 10, 10, 0.6); }
+html[data-theme="Cliff Dark"] #authOverlay input {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] #authOverlay input:focus { border-color: var(--accent); }
+
+/* 快捷键浮层 */
+html[data-theme="Cliff Dark"] .shortcut-help-overlay { background: rgba(10, 10, 10, 0.6); }
+html[data-theme="Cliff Dark"] .shortcut-help-box {
+  background: var(--bg-elevated);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--border);
+}
+html[data-theme="Cliff Dark"] .shortcut-help-box kbd {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Dashboard 浮层（树 / 焦点 / HUD / 日志）
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] .dash-tree-overlay,
+html[data-theme="Cliff Dark"] .dash-focus-overlay,
+html[data-theme="Cliff Dark"] .hud-overlay,
+html[data-theme="Cliff Dark"] .copilot-overlay {
+  background: rgba(28, 28, 28, 0.72);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+}
+
+html[data-theme="Cliff Dark"] .dash-section-title {
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .dash-plan {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="Cliff Dark"] .dash-plan:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 16px rgba(30, 195, 180, 0.12);
+}
+
+html[data-theme="Cliff Dark"] .dash-plan.dash-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(30, 195, 180, 0.3);
+}
+
+html[data-theme="Cliff Dark"] .dash-task {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+html[data-theme="Cliff Dark"] .dash-task:hover { border-color: var(--accent); }
+
+html[data-theme="Cliff Dark"] .dash-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+html[data-theme="Cliff Dark"] .dash-btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .hud-cell {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="Cliff Dark"] .hud-cell:hover { border-color: var(--accent); }
+html[data-theme="Cliff Dark"] .hud-agent-btn {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+html[data-theme="Cliff Dark"] .overlay-collapse-btn:hover,
+html[data-theme="Cliff Dark"] .overlay-drag-handle:hover { color: var(--accent); }
+
+/* ═══════════════════════════════════════════════════════════════
+   Vditor 内容区（Markdown 渲染）
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] .vditor-reset {
+  color: var(--fg) !important;
+  background: transparent !important;
+}
+
+html[data-theme="Cliff Dark"] .vditor-reset h1,
+html[data-theme="Cliff Dark"] .vditor-reset h2,
+html[data-theme="Cliff Dark"] .vditor-reset h3,
+html[data-theme="Cliff Dark"] .vditor-reset h4,
+html[data-theme="Cliff Dark"] .vditor-reset h5,
+html[data-theme="Cliff Dark"] .vditor-reset h6 {
+  color: var(--fg) !important;
+  text-shadow: 0 1px 4px rgba(30, 195, 180, 0.35);
+}
+
+html[data-theme="Cliff Dark"] .vditor-reset h1,
+html[data-theme="Cliff Dark"] .vditor-reset h2 {
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-theme="Cliff Dark"] .vditor-reset a {
+  color: #8ab4f8 !important;
+}
+
+html[data-theme="Cliff Dark"] .vditor-reset strong { color: #f2f1e8; }
+
+/* 行内代码 */
+html[data-theme="Cliff Dark"] .vditor-reset code:not(pre code) {
+  background: rgba(30, 195, 180, 0.18) !important;
+  color: #7fe3d8 !important;
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+}
+
+/* 代码块：macOS 红黄绿圆点 + 玻璃底 */
+html[data-theme="Cliff Dark"] .vditor-reset pre,
+html[data-theme="Cliff Dark"] .vditor-preview__content pre,
+html[data-theme="Cliff Dark"] .note-preview-content pre,
+html[data-theme="Cliff Dark"] .agent-msg .msg-content pre,
+html[data-theme="Cliff Dark"] .review-card-body pre {
+  position: relative !important;
+  background: var(--cliff-code-bg) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(8px) !important;
+  padding: 2.4em 1em 1em 1em !important;
+  overflow-x: auto;
+}
+
+/* 红黄绿圆点 */
+html[data-theme="Cliff Dark"] .vditor-reset pre::before,
+html[data-theme="Cliff Dark"] .vditor-preview__content pre::before,
+html[data-theme="Cliff Dark"] .note-preview-content pre::before,
+html[data-theme="Cliff Dark"] .agent-msg .msg-content pre::before,
+html[data-theme="Cliff Dark"] .review-card-body pre::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 15px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fa625c;
+  box-shadow: 23px 0 #fdbc40, 45px 0 #35cd4b;
+  z-index: 1;
+}
+
+/* 代码高亮内容 */
+html[data-theme="Cliff Dark"] .vditor-reset pre code,
+html[data-theme="Cliff Dark"] .vditor-preview__content pre code {
+  background: transparent !important;
+  color: #c9d1d9 !important;
+}
+
+/* 引述块：大圆角卡片 */
+html[data-theme="Cliff Dark"] .vditor-reset blockquote,
+html[data-theme="Cliff Dark"] .vditor-preview__content blockquote,
+html[data-theme="Cliff Dark"] .note-preview-content blockquote,
+html[data-theme="Cliff Dark"] .agent-msg .msg-content blockquote {
+  background: var(--cliff-quote-bg) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(8px) !important;
+  border: 1px solid var(--border) !important;
+  border-left: 3px solid var(--cliff-quote-border) !important;
+  border-radius: 30px 8px 8px 30px !important;
+  padding: 10px 16px !important;
+  color: rgba(248, 248, 248, 0.9) !important;
+}
+
+/* 表格：斑马纹 + 圆角 */
+html[data-theme="Cliff Dark"] .vditor-reset table,
+html[data-theme="Cliff Dark"] .vditor-preview__content table {
+  border: none !important;
+  border-collapse: separate !important;
+  border-spacing: 2px !important;
+  border-radius: 12px !important;
+}
+
+html[data-theme="Cliff Dark"] .vditor-reset table th,
+html[data-theme="Cliff Dark"] .vditor-preview__content table th {
+  background: rgba(20, 20, 20, 0.72) !important;
+  border: none !important;
+  color: var(--fg) !important;
+}
+
+html[data-theme="Cliff Dark"] .vditor-reset table td,
+html[data-theme="Cliff Dark"] .vditor-preview__content table td {
+  background: rgba(20, 20, 20, 0.38) !important;
+  border: none !important;
+  color: var(--fg) !important;
+}
+
+html[data-theme="Cliff Dark"] .vditor-reset table tr:nth-child(2n) td,
+html[data-theme="Cliff Dark"] .vditor-preview__content table tr:nth-child(2n) td {
+  background: rgba(20, 20, 20, 0.55) !important;
+}
+
+html[data-theme="Cliff Dark"] .vditor-reset table th:first-child { border-top-left-radius: 12px !important; }
+html[data-theme="Cliff Dark"] .vditor-reset table th:last-child { border-top-right-radius: 12px !important; }
+html[data-theme="Cliff Dark"] .vditor-reset table tr:last-child td:first-child { border-bottom-left-radius: 12px !important; }
+html[data-theme="Cliff Dark"] .vditor-reset table tr:last-child td:last-child { border-bottom-right-radius: 12px !important; }
+
+/* 分割线 */
+html[data-theme="Cliff Dark"] .vditor-reset hr {
+  border-color: var(--border) !important;
+}
+
+/* 图片 */
+html[data-theme="Cliff Dark"] .vditor-reset img {
+  opacity: 0.9;
+  border-radius: 6px;
+}
+
+/* 待办复选框 */
+html[data-theme="Cliff Dark"] .vditor-reset input[type="checkbox"] {
+  accent-color: var(--accent) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   数学环境块（md-env，物理笔记专用）
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] .md-env {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(8px) !important;
+  border-radius: var(--radius) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   编辑器内嵌（Monaco / 原生）
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] #monacoEditorView,
+html[data-theme="Cliff Dark"] #texpileEditorView,
+html[data-theme="Cliff Dark"] #kmindEditorView,
+html[data-theme="Cliff Dark"] #jupyterEditorView,
+html[data-theme="Cliff Dark"] #slidesEditorView,
+html[data-theme="Cliff Dark"] #browserView,
+html[data-theme="Cliff Dark"] #officeEditorView {
+  background: rgba(20, 20, 20, 0.5);
+}
+
+html[data-theme="Cliff Dark"] #monacoStatusBar {
+  background: var(--bg-tertiary);
+  border-top: 1px solid var(--border);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   健康横幅 / 空态 / 其他
+   ═══════════════════════════════════════════════════════════════ */
+
+html[data-theme="Cliff Dark"] .health-banner {
+  background: var(--bg-elevated);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(228, 106, 98, 0.4);
+}
+
+html[data-theme="Cliff Dark"] .health-banner .rest-btn {
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+}
+
+html[data-theme="Cliff Dark"] .empty-state {
+  color: var(--fg-muted);
+}
+
+html[data-theme="Cliff Dark"] .empty-state .empty-icon { opacity: 0.5; }
+
+/* 树加载/加载提示 */
+html[data-theme="Cliff Dark"] .tree-loading,
+html[data-theme="Cliff Dark"] .hub-sub-loading,
+html[data-theme="Cliff Dark"] .hub-feed-empty {
+  color: var(--fg-muted);
+}
+
+/* 滚动条：Cliff 半透明白 */
+html[data-theme="Cliff Dark"] ::-webkit-scrollbar { width: 6px; height: 6px; }
+html[data-theme="Cliff Dark"] ::-webkit-scrollbar-track { background: transparent; }
+html[data-theme="Cliff Dark"] ::-webkit-scrollbar-thumb {
+  background: rgba(230, 230, 230, 0.22);
+  border-radius: 3px;
+}
+html[data-theme="Cliff Dark"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(230, 230, 230, 0.35);
+}
+
+/* 主题选择器按钮 */
+html[data-theme="Cliff Dark"] .theme-opt {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+html[data-theme="Cliff Dark"] .theme-opt:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+html[data-theme="Cliff Dark"] .theme-opt.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* 过渡：切换主题时的平滑 */
+html[data-theme="Cliff Dark"] .sidebar,
+html[data-theme="Cliff Dark"] .main,
+html[data-theme="Cliff Dark"] .toolbar,
+html[data-theme="Cliff Dark"] .statusbar,
+html[data-theme="Cliff Dark"] .nav-tabs,
+html[data-theme="Cliff Dark"] .kanban-column,
+html[data-theme="Cliff Dark"] .modal,
+html[data-theme="Cliff Dark"] .context-menu {
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Fragmented fallback：不支持 backdrop-filter 的浏览器
+   ═══════════════════════════════════════════════════════════════ */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  html[data-theme="Cliff Dark"] .sidebar { background: rgba(31, 31, 31, 0.94); }
+  html[data-theme="Cliff Dark"] .kanban-column { background: rgba(31, 31, 31, 0.92); }
+  html[data-theme="Cliff Dark"] .modal,
+  html[data-theme="Cliff Dark"] .context-menu,
+  html[data-theme="Cliff Dark"] .dropdown-menu,
+  html[data-theme="Cliff Dark"] .dash-tree-overlay,
+  html[data-theme="Cliff Dark"] .dash-focus-overlay,
+  html[data-theme="Cliff Dark"] .hud-overlay,
+  html[data-theme="Cliff Dark"] .copilot-overlay { background: rgba(31, 31, 31, 0.97); }
+}

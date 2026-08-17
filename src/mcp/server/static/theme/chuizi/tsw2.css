@@ -1,0 +1,83 @@
+/* ═══════════════════════════════════════════════════════════════
+   思源「锤子便签」主题 → TWS2 适配层
+   源主题：chenshinshi/chuizi v0.41（UserZYF 仿锤子便签，浅色）
+   适配说明：思源主题 CSS 面向思源 DOM（.protyle-wysiwyg 等），
+   直接引入会大量失效。本文件把其色板 / 原木背景 / 圆角映射到
+   TWS2 的 CSS 变量体系（html[data-theme="chuizi"] 作用域），
+   全局组件通过变量自动生效；另补少量组件级规则还原便签质感。
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ─── 变量映射（取自 style/01-color-font/color-font.css） ─── */
+html[data-theme="chuizi"] {
+  --bg: #fffcf6;                 /* --b3-theme-background 正文米白 */
+  --bg-secondary: #fbf7ed;       /* --b3-theme-background2 侧栏米色 */
+  --bg-tertiary: #f1ece1;        /* --b3-theme-hover-gray */
+  --bg-hover: #f1ece1;           /* 悬浮 */
+  --bg-card: #fffdf8;            /* 卡片暖白 */
+  --fg: #645647;                 /* --b3-theme-on-background 棕褐文字 */
+  --fg-muted: #8f8678;           /* 灰色文字 */
+  --fg-dim: #cfc8bd;
+  --accent: #645647;             /* --b3-theme-primary */
+  --accent-hover: #ff9607;       /* --b3-theme-secondary 橙色点缀 */
+  --accent-bg: rgba(100, 86, 71, 0.10);
+  --green: #2e7d32;
+  --green-bg: rgba(204, 242, 200, 0.65);   /* 浅绿便利贴 */
+  --red: #c81a31;
+  --red-bg: rgba(252, 231, 233, 0.70);     /* 浅红便利贴 */
+  --yellow: #ec6f05;
+  --yellow-bg: rgba(254, 229, 172, 0.65);  /* 浅黄便利贴 */
+  --cyan: #384b76;
+  --cyan-bg: rgba(207, 221, 254, 0.70);    /* 浅蓝便利贴 */
+  --purple: #6a1b9a;
+  --purple-bg: rgba(219, 220, 244, 0.70);
+  --orange: #ff9607;
+  --orange-bg: rgba(255, 150, 7, 0.14);
+  --border: rgba(0, 0, 0, 0.12);  /* --b3-border-color 线条 */
+  --border-light: rgba(0, 0, 0, 0.07);
+  --radius: 8px;
+  --radius-lg: 14px;
+  --shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+  --font-sans: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+  --font-mono: 'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace;
+}
+
+/* ─── 原木背景（源主题 begin-setting.css：.fn__flex.fn__flex-1 用 src/background1.jpg） ─── */
+html[data-theme="chuizi"] body {
+  background-image: url('src/background1.jpg');
+  background-repeat: repeat;
+  background-attachment: fixed;
+  background-color: var(--bg);
+}
+
+/* ─── 组件级适配（少量、有把握的选择器） ─── */
+/* 侧栏：米色便签纸质感 */
+html[data-theme="chuizi"] .sidebar {
+  background: var(--bg-secondary);
+}
+/* 编辑器内容区文字跟随主题棕褐色 */
+html[data-theme="chuizi"] .vditor-reset,
+html[data-theme="chuizi"] .vditor-reset--mp {
+  color: var(--fg);
+}
+/* 引用块：便签风浅色底 + 圆角（对应思源 blockquote 风格） */
+html[data-theme="chuizi"] .vditor-reset blockquote,
+html[data-theme="chuizi"] .markdown-body blockquote {
+  background: rgba(255, 150, 7, 0.06);
+  border-left: 3px solid #ff9607;
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+/* 代码块：暖白底、棕褐文字 */
+html[data-theme="chuizi"] .vditor-reset pre,
+html[data-theme="chuizi"] .markdown-body pre {
+  background: #f1ece1;
+  color: #645647;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: var(--radius);
+}
+/* 行内代码：便签色块 */
+html[data-theme="chuizi"] .vditor-reset code:not(pre code),
+html[data-theme="chuizi"] .markdown-body code:not(pre code) {
+  background: rgba(100, 86, 71, 0.10);
+  color: #645647;
+  border-radius: 4px;
+}

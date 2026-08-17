@@ -1,0 +1,21 @@
+{
+  "name": "chuizi",
+  "author": "chenshinshi",
+  "url": "https://github.com/chenshinshi/chuizi",
+  "version": "0.41",
+  "displayName": {
+    "default": "chuizi",
+    "zh_CN": "锤子"
+  },
+  "description": {
+    "default": "Upload chuizi theme by UserZYF",
+    "zh_CN": "搬运UserZYF仿锤子便签主题"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh_CN": "README.md"
+  },
+  "modes": [
+    "light"
+  ]
+}
