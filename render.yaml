@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ts2
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    branch: remote
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 10000

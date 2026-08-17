@@ -470,6 +470,13 @@ class ResourceMgr:
         try:
             return json.loads(self.path.read_text(encoding="utf-8"))
         except Exception:
+            # 文件缺失或损坏时返回空索引；若文件确实不存在则生成默认文件
+            if not self.path.exists():
+                try:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    self.path.write_text("{}", encoding="utf-8")
+                except Exception:
+                    pass
             return {}
 
     def reload(self):
@@ -891,7 +898,14 @@ class CourseSystem:
             with open(self.json_path, "r", encoding="utf-8") as f:
                 self.data = json.load(f)
         else:
+            # 缺失时自动生成默认结构文件，避免硬依赖导致后续读取/写入失败
             self.data = {"metadata": {}, "courses": []}
+            try:
+                Path(self.json_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(self.json_path, "w", encoding="utf-8") as f:
+                    json.dump(self.data, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
         self.metadata = self.data.get("metadata", {})
         self.courses = self.data.get("courses", [])
         # 合并所有已发现的数据库源

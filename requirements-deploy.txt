@@ -1,0 +1,30 @@
+# TS2 Web 部署依赖（精简版）
+# 基础 requirements.txt 缺少整套 Web 框架与 pygments，这里补齐。
+# 重型/可选依赖（chromadb / faiss-cpu / feedparser / pdf2image）已省略，
+# 缺失时服务端相关功能会优雅降级（try/except），不影响启动与核心文件/笔记功能。
+
+# ─── Web 框架（基础 requirements.txt 缺失，必须补）──────────────
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+starlette==0.35.1
+pydantic==2.13.4
+orjson
+websockets
+aiofiles
+python-multipart
+jinja2
+httpx
+psutil
+pygments                 # 修复 timetable / agent 输出高亮的 NameError
+
+# ─── 核心（取自基础 requirements.txt，部署必需）────────────────
+numpy<=1.24.0
+matplotlib>=3.5.0
+openai>=1.0.0
+anthropic>=0.7.0
+aiohttp>=3.8.0
+tenacity>=8.0.0
+pyyaml>=5.4.0
+requests>=2.26.0
+beautifulsoup4>=4.9.0
+PyPDF2>=3.0.0

@@ -1,0 +1,18 @@
+.git
+**/__pycache__
+*.pyc
+__pycache__
+node_modules
+.mypy_cache
+.pytest_cache
+.venv
+venv
+build/
+dist/
+**/*.egg-info
+
+# 与部署无关的大目录，避免镜像被撑爆
+music/
+src/PLAN*
+src/skills/macdev-skill/
+**/__MACOSX
