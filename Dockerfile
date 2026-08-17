@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -7,9 +7,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 装系统依赖（tkinter、poppler、字体等）
+# 装系统依赖（poppler 用于 PDF，字体用于 CJK）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tk-dev poppler-utils fonts-wqy-zenhei \
+    poppler-utils fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
 # 先装构建工具 + 依赖（利用层缓存）
