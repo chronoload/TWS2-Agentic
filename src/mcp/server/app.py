@@ -2383,8 +2383,14 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         if init_cols < 1 or init_rows < 1:
             init_cols, init_rows = 100, 30
 
-        import winpty as _winpty
         import shutil as _shutil
+        # winpty 仅 Windows 可用；Linux 容器无此包，直接走 subprocess fallback
+        _winpty = None
+        if os.name == "nt":
+            try:
+                import winpty as _winpty
+            except ImportError:
+                _winpty = None
         # pywinpty 3.x 接口要点：
         #   - spawn 的 appname 必须是完整路径（'cmd.exe' 会 os error 2）
         #   - write 要 str（bytes 报 TypeError）
