@@ -8,7 +8,8 @@ import os
 import re
 from pathlib import Path
 
-NOTES_DIR = Path(r"c:\Users\qu\Desktop\物理科学与技术论题\TS2\Notes")
+# 可配置的 Notes 目录，默认从环境变量读取，回退到项目相对路径
+NOTES_DIR = Path(os.environ.get("TS2_NOTES_DIR", Path(__file__).resolve().parents[1] / "Notes"))
 
 REPLACEMENTS = [
     (r'in_header:\s*template/preamble-book\.tex', 'in_header: ../template/preamble-book.tex'),
@@ -33,25 +34,25 @@ def update_file(filepath):
             return True
         return False
     except Exception as e:
-        print(f"  ❌ 错误: {filepath.name}: {e}")
+        print(f"  [ERROR] {filepath.name}: {e}")
         return False
 
 def main():
     rmd_files = list(NOTES_DIR.glob("**/*.Rmd"))
-    print(f"🔍 扫描 Notes 目录: {NOTES_DIR}")
-    print(f"📁 找到 {len(rmd_files)} 个 .Rmd 文件\n")
+    print(f"[SCAN] Notes 目录: {NOTES_DIR}")
+    print(f"[FOUND] {len(rmd_files)} 个 .Rmd 文件\n")
 
     updated = 0
     skipped = 0
 
     for rmd_file in sorted(rmd_files):
         if update_file(rmd_file):
-            print(f"  ✅ 更新: {rmd_file.relative_to(NOTES_DIR)}")
+            print(f"  [OK] 更新: {rmd_file.relative_to(NOTES_DIR)}")
             updated += 1
         else:
             skipped += 1
 
-    print(f"\n📊 完成!")
+    print(f"\n[DONE]")
     print(f"   更新: {updated} 个文件")
     print(f"   跳过: {skipped} 个文件")
 
