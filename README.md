@@ -340,7 +340,7 @@ TS2-OpenSource/
 
 ## 许可证
 
-MIT License
+AGPL-3.0License
 
 ## 作者
 
