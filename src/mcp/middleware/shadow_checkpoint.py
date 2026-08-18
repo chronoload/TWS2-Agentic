@@ -19,6 +19,7 @@ import logging
 import os
 import stat
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -451,7 +452,12 @@ class ShadowGitCheckpointer:
 
             with self._lock:
                 self._ensure_branch()
-                self._run_nested_rename(True)
+                # 全量快照（files=None，如 baseline/Saber）需要重命名嵌套 .git 防拖入；
+                # 增量快照（files 非空）只 git add 指定文件，不会误拖嵌套 .git，跳过以消除
+                # rglob(".git") 遍历阻塞源（后台 worker 每次工具快照都会走到这里）
+                is_full = files is None
+                if is_full:
+                    self._run_nested_rename(True)
                 try:
                     start = time.time()
                     if files:
@@ -496,7 +502,8 @@ class ShadowGitCheckpointer:
                                     pass
                             return h
                 finally:
-                    self._run_nested_rename(False)
+                    if is_full:
+                        self._run_nested_rename(False)
 
         except subprocess.TimeoutExpired:
             logger.warning("git snapshot 超时")
@@ -910,6 +917,16 @@ class CheckpointMiddleware(AgentMiddleware):
             self._checkpointer._extra_exclusions = list(self._extra_exclusions)
         # SQLite 增量版本追踪（参考 Crush）
         self._fdb: Optional[Any] = None
+        # 后台 git 快照队列（异步，不阻塞主循环）：每次工具调用入队，后台 worker 串行执行
+        import queue as _queue
+        # 队列限长：maxsize 保护防无界增长（worker 消费慢时丢弃最旧任务，用 put_nowait 捕获 Full）
+        self._git_queue: "_queue.Queue" = _queue.Queue(maxsize=200)
+        self._git_worker_stop = False
+        self._git_worker_paused = False
+        self._git_worker = None
+        # 初始化互斥锁：主线程与后台 worker 首次初始化时防并发 ensure_init（避免并发
+        # 触发 _recover_pending_snapshots 的 git 扫描/快照）
+        self._init_lock = threading.Lock()
 
     def _ensure_fdb(self) -> Any:
         """懒初始化 SQLite 文件版本数据库（独立于 workspace 的主目录存储，随 workspace 哈希隔离）"""
@@ -944,11 +961,13 @@ class CheckpointMiddleware(AgentMiddleware):
                 deletions = 0
                 try:
                     full_path = os.path.join(self._workspace_root, path) if not os.path.isabs(path) else path
+                    content = ""
                     if os.path.isfile(full_path):
                         with open(full_path, "rb") as f:
                             raw = f.read()
                         from .file_version_db import FileVersionDB
-                        content_hash = FileVersionDB.content_hash(raw.decode("utf-8", errors="replace"))
+                        content = raw.decode("utf-8", errors="replace")
+                        content_hash = FileVersionDB.content_hash(content)
                         # 新文件：additions = 行数
                         additions = raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
                 except Exception:
@@ -967,10 +986,110 @@ class CheckpointMiddleware(AgentMiddleware):
                 changed.append({
                     "path": path, "status": status,
                     "content_hash": content_hash,
+                    "content": content,  # 完整新内容（运行时回退引擎）
                     "additions": additions, "deletions": deletions,
                 })
 
         return changed
+
+    def _is_excluded_path(self, path: str) -> bool:
+        """判断路径是否在排除规则内（gitignore 风格）"""
+        import fnmatch
+        try:
+            patterns = get_default_exclusions(self._workspace_root) + list(self._extra_exclusions)
+            p = path.replace("\\", "/")
+            for pat in patterns:
+                pat_norm = pat.rstrip("/")
+                if not pat_norm:
+                    continue
+                if pat.endswith("/"):
+                    # 目录式排除：匹配路径前缀
+                    if p.startswith(pat_norm + "/") or p == pat_norm:
+                        return True
+                elif fnmatch.fnmatch(p, pat_norm) or fnmatch.fnmatch(os.path.basename(p), pat_norm):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _capture_workspace_changes(self) -> List[Dict]:
+        """用 git status 扫描工作区，捕获映射表外写工具（cli_execute/sandbox_execute/apply_patch 等）的变更
+
+        这些工具 _extract_changed_files 无法从参数推断路径，但变更已落在工作区。
+        git status 相对上次 shadow HEAD 列出变更，过滤排除路径后即可追踪。
+        """
+        try:
+            r = self._checkpointer._run_git("status", "--porcelain")
+            if r.returncode != 0:
+                return []
+            changed = []
+            for line in r.stdout.split("\n"):
+                line = line.rstrip("\n")
+                if not line or len(line) < 4:
+                    continue
+                x = line[0]
+                path = line[3:].strip()
+                if not path:
+                    continue
+                # P3 修复：git status --porcelain 对重命名输出 "R  old -> new"（或 R100 old -> new），
+                # path 字段应取 "->" 后的新路径，而非 "old -> new" 整串
+                if x == "R" and " -> " in path:
+                    path = path.split(" -> ", 1)[1].strip()
+                if path.startswith('"') and path.endswith('"'):
+                    try:
+                        path = path[1:-1].encode("utf-8").decode("unicode_escape")
+                    except Exception:
+                        path = path[1:-1]
+                if self._is_excluded_path(path):
+                    continue
+                content = ""
+                full_path = os.path.join(self._workspace_root, path) if not os.path.isabs(path) else path
+                if os.path.isfile(full_path):
+                    try:
+                        with open(full_path, "rb") as f:
+                            content = f.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        content = ""
+                if x in ("A", "?"):
+                    status = "A"
+                elif x == "D":
+                    status = "D"
+                else:
+                    status = "M"
+                changed.append({
+                    "path": path, "status": status,
+                    "content_hash": "", "content": content,
+                    "additions": 0, "deletions": 0,
+                })
+            return changed
+        except Exception:
+            return []
+
+    def _recover_pending_snapshots(self):
+        """崩溃兜底：扫描 checkpoint_hash 为空的 checkpoint，用 git status 补齐 git 快照
+
+        对话异常（崩溃/中断）时后台 git 快照可能未完成（checkpoint_hash 为空）。
+        启动/初始化时补齐，保证 git 追踪不丢。
+        """
+        try:
+            fdb = self._ensure_fdb()
+            if not fdb:
+                return
+            pending = fdb.get_pending_checkpoints(self._instance_id)
+            if not pending:
+                return
+            changes = self._capture_workspace_changes()
+            if changes:
+                git_files = [c["path"] for c in changes]
+                h = self._checkpointer.snapshot(
+                    "", source="auto", step=self._snapshot_seq + 1, files=git_files,
+                )
+                if h:
+                    for cp_id in pending:
+                        fdb.update_checkpoint_hash(cp_id, h)
+                    self._last_hash = h
+        except Exception:
+            pass
 
     def add_exclusions(self, patterns: List[str]):
         """运行时添加排除规则"""
@@ -987,10 +1106,33 @@ class CheckpointMiddleware(AgentMiddleware):
 
     def _ensure_ready(self) -> bool:
         if not self._initialized and self._instance_id:
-            self._initialized = self._checkpointer.ensure_init(
-                self._workspace_root, instance_id=self._instance_id
-            )
+            # 初始化互斥：主线程与后台 worker 首次初始化时防并发 ensure_init
+            with self._init_lock:
+                if not self._initialized:
+                    self._initialized = self._checkpointer.ensure_init(
+                        self._workspace_root, instance_id=self._instance_id
+                    )
+                    if self._initialized:
+                        # 崩溃兜底：补齐上次异常遗留的 pending git 快照。
+                        # 入后台队列异步执行，避免在 Agent 线程同步 git 扫描/快照
+                        # 阻塞流式首屏（_recover_pending_snapshots 含 git status 全扫描）。
+                        self._schedule_recover()
         return self._initialized
+
+    def _schedule_recover(self):
+        """把崩溃兜底的 pending git 快照补齐调度到后台队列，不阻塞主线程"""
+        try:
+            fdb = self._ensure_fdb()
+            if not fdb:
+                return
+            pending = fdb.get_pending_checkpoints(self._instance_id)
+            if not pending:
+                return
+            self._ensure_git_worker()
+            # 特殊 tool_name 标记 recover 任务；git_files 携带 pending checkpoint id 列表
+            self._git_queue.put(("__RECOVER__", self._snapshot_seq + 1, list(pending), 0))
+        except Exception:
+            pass
 
     def before_agent(self, messages: List[Dict], context: MiddlewareContext) -> MiddlewareResult:
         ws = context.extra.get("workspace_root", self._workspace_root) or self._workspace_root
@@ -1008,6 +1150,9 @@ class CheckpointMiddleware(AgentMiddleware):
             self._snapshot_seq = 0
             self._initialized = False  # ← 修复：强制重新初始化
             self._last_hash = ""
+            # P2 修复：session 变更时清空后台 git 队列，丢弃旧 session 未消费任务，
+            # 防止跨 session 队列污染（旧 session 的快照任务误入新 session 分支）
+            self._clear_git_queue()
             sid_changed = True
         elif not self._instance_id:
             # 首次初始化，无 session_id
@@ -1071,6 +1216,10 @@ class CheckpointMiddleware(AgentMiddleware):
 
             # 1. SQLite 增量追踪（高频，~1ms）
             changed_files = self._extract_changed_files(tool_name, tool_args)
+            # 映射表外写工具（cli_execute/sandbox_execute/apply_patch/move_file/copy_file 等）：
+            # _extract_changed_files 无法从参数推断路径，用 git status 扫描工作区捕获变更
+            if not changed_files and tool_name not in self.WRITE_TOOL_PATH_KEYS:
+                changed_files = self._capture_workspace_changes()
             fdb = self._ensure_fdb()
             git_hash = ""
             if fdb:
@@ -1086,34 +1235,10 @@ class CheckpointMiddleware(AgentMiddleware):
                 if cp_id and cp_id > 0:
                     self._last_checkpoint_id = cp_id
 
-            # 2. Shadow Git 全量快照（低频：baseline + 每 N 步 + 手动）
-            need_git_snapshot = (
-                self._snapshot_seq == 1  # 第一步
-                or self._snapshot_seq % self._shadow_git_interval == 0  # 每 N 步
-            )
-            if need_git_snapshot:
-                # 增量：只追踪本工具调用修改的文件（git 快照不含排除项/未改动文件）
-                git_files = [cf.get("path", "") for cf in changed_files if cf.get("path")]
-                if not git_files:
-                    # 本工具未改动任何文件：跳过快照，避免 git add --force . 全树扫描
-                    # （log[3]/[4]：全量 add 绕过 info/exclude 且会拖入嵌套 .git_disabled）
-                    pass
-                else:
-                    h = self._checkpointer.snapshot(
-                        tool_name, source="auto", step=self._snapshot_seq,
-                        files=git_files,
-                    )
-                    if h:
-                        self._last_hash = h
-                        git_hash = h
-                        # 回写 git_hash 到 SQLite
-                        if fdb and cp_id and cp_id > 0:
-                            try:
-                                conn = fdb._connect()
-                                conn.execute("UPDATE checkpoints SET checkpoint_hash = ? WHERE id = ?", (git_hash, cp_id))
-                                conn.commit()
-                            except Exception:
-                                pass
+            # 2. git 快照任务入后台队列（异步，不阻塞主循环；每次工具调用都入队，不再每 N 步）
+            git_files = [cf.get("path", "") for cf in changed_files if cf.get("path")]
+            if git_files:
+                self._enqueue_git_snapshot(tool_name, self._snapshot_seq, git_files, cp_id)
 
         except Exception:
             pass
@@ -1134,6 +1259,126 @@ class CheckpointMiddleware(AgentMiddleware):
             pass
 
         return MiddlewareResult()
+
+    # ─── 后台 git 快照队列（异步，不阻塞主循环）────────────────
+    def _ensure_git_worker(self):
+        """懒启动后台 git 快照 worker 线程"""
+        if self._git_worker is None:
+            import threading
+            self._git_worker = threading.Thread(
+                target=self._git_worker_loop, name="ts2-git-snapshot", daemon=True
+            )
+            self._git_worker.start()
+
+    def _enqueue_git_snapshot(self, tool_name: str, step: int, git_files: List[str], cp_id: int):
+        """把 git 快照任务放入后台队列（每次工具调用都入队，不阻塞主循环）"""
+        self._ensure_git_worker()
+        try:
+            self._git_queue.put_nowait((tool_name, step, git_files, cp_id))
+        except Exception:
+            # 队列满（maxsize 保护）：丢弃最旧任务，防止无界增长
+            try:
+                self._git_queue.get_nowait()
+                self._git_queue.task_done()
+                self._git_queue.put_nowait((tool_name, step, git_files, cp_id))
+            except Exception:
+                pass
+
+    def _clear_git_queue(self):
+        """清空后台 git 队列（session 变更时丢弃旧 session 未消费任务）"""
+        import queue as _queue
+        while True:
+            try:
+                self._git_queue.get_nowait()
+                self._git_queue.task_done()
+            except _queue.Empty:
+                break
+            except Exception:
+                break
+
+    def _git_worker_loop(self):
+        """后台 worker 主循环：串行消费队列执行 git snapshot，回写 checkpoint_hash"""
+        import queue as _queue
+        while not self._git_worker_stop:
+            if self._git_worker_paused:
+                time.sleep(0.05)
+                continue
+            try:
+                tool_name, step, git_files, cp_id = self._git_queue.get(timeout=0.5)
+            except _queue.Empty:
+                continue
+            except Exception:
+                break
+            try:
+                if not self._ensure_ready():
+                    continue
+                if tool_name == "__RECOVER__":
+                    # 崩溃兜底：补齐 pending git 快照（后台异步，不阻塞主线程/流式首屏）
+                    self._recover_pending_snapshots()
+                    continue
+                h = self._checkpointer.snapshot(
+                    tool_name, source="auto", step=step, files=git_files,
+                )
+                if h:
+                    self._last_hash = h
+                    if cp_id and cp_id > 0:
+                        try:
+                            fdb = self._ensure_fdb()
+                            if fdb:
+                                conn = fdb._connect()
+                                conn.execute("UPDATE checkpoints SET checkpoint_hash = ? WHERE id = ?", (h, cp_id))
+                                conn.commit()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            finally:
+                self._git_queue.task_done()
+
+    def restore_from_checkpoint(self, cp_id: int) -> bool:
+        """运行时回退：从 SQLite 读 checkpoint 的文件内容写回工作区（不重启，不需等 git 快照）
+
+        竞态安全：与后台 git 快照共用 _lock（单一写入者串行化）；回退期间暂停后台队列，
+        避免边写边快照产生不一致。回退后把当前工作区做一次快照作为新基线，避免 git HEAD
+        超前于工作区导致后续追踪错乱。
+        """
+        try:
+            fdb = self._ensure_fdb()
+            if not fdb:
+                return False
+            contents = fdb.get_checkpoint_all_entries(cp_id)
+            if not contents:
+                return False
+            # 回退期间暂停后台队列（防止 worker 边写边快照产生不一致）
+            self._git_worker_paused = True
+            try:
+                # 写回工作区（持锁，与后台 git 快照互斥）
+                with self._checkpointer._lock:
+                    for path, entry in contents.items():
+                        full = os.path.join(self._workspace_root, path) if not os.path.isabs(path) else path
+                        status = entry.get("status", "M")
+                        if status == "D":
+                            # 删除文件回退：删除工作区文件（而非写空文件）
+                            if os.path.exists(full):
+                                os.remove(full)
+                            continue
+                        content = entry.get("content", "")
+                        os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
+                        # 二进制模式写回，避免 Windows 文本模式把 \n 转成 \r\n 导致双重转换
+                        with open(full, "wb") as f:
+                            f.write(content.encode("utf-8"))
+                # 重置 git 状态：snapshot 由它自己持锁（不在此处二次持锁，避免 _FileLock 不可重入死锁）
+                git_files = list(contents.keys())
+                h = self._checkpointer.snapshot(
+                    "", source="manual", step=self._snapshot_seq + 1, files=git_files,
+                )
+                if h:
+                    self._last_hash = h
+                return True
+            finally:
+                self._git_worker_paused = False
+        except Exception:
+            return False
 
     def after_agent(self, messages: List[Dict], context: MiddlewareContext) -> MiddlewareResult:
         """Agent 回复后检测 LLM 输出中的 unified diff（参考 Crush diffdetect）

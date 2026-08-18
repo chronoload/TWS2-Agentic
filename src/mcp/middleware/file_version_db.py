@@ -22,6 +22,7 @@ import hashlib
 import logging
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,7 +58,7 @@ def default_db_path(workspace_root: str) -> str:
     return str(new_path)
 
 # 当前 schema 版本，用于迁移
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA_SQL = """
 -- 检查点元数据
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS file_versions (
     checkpoint_id INTEGER NOT NULL,
     path TEXT NOT NULL,                 -- 相对路径
     content_hash TEXT NOT NULL DEFAULT '', -- 内容 SHA256 前 16 字符（避免存大文本）
+    content TEXT NOT NULL DEFAULT '',   -- 完整新内容（运行时回退引擎：从 SQLite 精确还原文件）
     status TEXT NOT NULL DEFAULT 'M',   -- A/M/D/R
     additions INTEGER NOT NULL DEFAULT 0,
     deletions INTEGER NOT NULL DEFAULT 0,
@@ -126,22 +128,29 @@ class FileVersionDB:
 
     def __init__(self, db_path: str = ""):
         self._db_path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
+        # 每线程独立连接（threading.local）：后台 git worker 线程与主线程 after_tool
+        # 各自持有独立 sqlite3 连接，避免单连接跨线程无锁并发导致事务交错/数据丢失。
+        # WAL 模式天然支持多连接并发读写，配合 busy_timeout 由 SQLite 自身串行化写。
+        self._local = threading.local()
 
     def _connect(self) -> sqlite3.Connection:
-        if self._conn is None:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
             os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
-            self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-            self._conn.executescript(_SCHEMA_SQL)
+            conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            # 多连接并发写时等待锁释放（避免 database is locked）
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.executescript(_SCHEMA_SQL)
             # 迁移：为旧表添加 parent_session_id 列
-            self._migrate()
-        return self._conn
+            self._migrate(conn)
+            self._local.conn = conn
+        return conn
 
-    def _migrate(self):
+    def _migrate(self, conn: sqlite3.Connection):
         """数据库迁移：确保 schema 版本一致
 
         迁移策略（参考 Crush 惰性迁移）：
@@ -150,60 +159,79 @@ class FileVersionDB:
         - 每次迁移完成立即更新 meta version，避免重复执行
         """
         try:
-            row = self._conn.execute("SELECT value FROM meta WHERE key = 'version'").fetchone()
+            row = conn.execute("SELECT value FROM meta WHERE key = 'version'").fetchone()
             version = int(row["value"]) if row else 0
             if version < 2:
                 # v1 → v2: 添加 parent_session_id 列 + 索引
                 # 必须先 ADD COLUMN，再 CREATE INDEX（否则索引创建会因列不存在而失败）
                 try:
-                    self._conn.execute("ALTER TABLE checkpoints ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''")
+                    conn.execute("ALTER TABLE checkpoints ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''")
                 except Exception:
                     pass
                 try:
-                    self._conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_session_id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_session_id)")
                 except Exception:
                     pass
-                self._conn.execute("UPDATE meta SET value = '2' WHERE key = 'version'")
-                self._conn.commit()
+                conn.execute("UPDATE meta SET value = '2' WHERE key = 'version'")
+                conn.commit()
             else:
                 # 兜底：即使 version>=2，也尝试补列（防止之前迁移不完整）
                 try:
-                    self._conn.execute("ALTER TABLE checkpoints ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''")
+                    conn.execute("ALTER TABLE checkpoints ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''")
                 except Exception:
                     pass
                 try:
-                    self._conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_session_id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_session_id)")
                 except Exception:
                     pass
             if version < 3:
                 # v2 → v3: 添加 conversation_checkpoint_id 列（ContextReloader 对话快照关联）
                 try:
-                    self._conn.execute("ALTER TABLE checkpoints ADD COLUMN conversation_checkpoint_id TEXT NOT NULL DEFAULT ''")
+                    conn.execute("ALTER TABLE checkpoints ADD COLUMN conversation_checkpoint_id TEXT NOT NULL DEFAULT ''")
                 except Exception:
                     pass
                 try:
-                    self._conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_conversation ON checkpoints(conversation_checkpoint_id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_conversation ON checkpoints(conversation_checkpoint_id)")
                 except Exception:
                     pass
-                self._conn.execute("UPDATE meta SET value = '3' WHERE key = 'version'")
-                self._conn.commit()
+                conn.execute("UPDATE meta SET value = '3' WHERE key = 'version'")
+                conn.commit()
             else:
                 # 兜底：即使 version>=3，也尝试补列（防止之前迁移不完整）
                 try:
-                    self._conn.execute("ALTER TABLE checkpoints ADD COLUMN conversation_checkpoint_id TEXT NOT NULL DEFAULT ''")
+                    conn.execute("ALTER TABLE checkpoints ADD COLUMN conversation_checkpoint_id TEXT NOT NULL DEFAULT ''")
                 except Exception:
                     pass
                 try:
-                    self._conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_conversation ON checkpoints(conversation_checkpoint_id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_conversation ON checkpoints(conversation_checkpoint_id)")
+                except Exception:
+                    pass
+            if version < 4:
+                # v3 → v4: file_versions 加 content 列（运行时回退引擎：存完整新内容）
+                try:
+                    conn.execute("ALTER TABLE file_versions ADD COLUMN content TEXT NOT NULL DEFAULT ''")
+                except Exception:
+                    pass
+                conn.execute("UPDATE meta SET value = '4' WHERE key = 'version'")
+                conn.commit()
+            else:
+                # 兜底：即使 version>=4，也尝试补列（防止之前迁移不完整）
+                try:
+                    conn.execute("ALTER TABLE file_versions ADD COLUMN content TEXT NOT NULL DEFAULT ''")
                 except Exception:
                     pass
         except Exception:
             pass
 
     def close(self):
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        # 关闭当前线程的连接（threading.local）
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
 
     # ─── 检查点操作 ────────────────────────────────────────
 
@@ -244,9 +272,9 @@ class FileVersionDB:
                     version = (row["v"] or 0) + 1
 
                     conn.execute(
-                        "INSERT INTO file_versions (checkpoint_id, path, content_hash, status, additions, deletions, version, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (cp_id, path, f.get("content_hash", ""), f.get("status", "M"),
+                        "INSERT INTO file_versions (checkpoint_id, path, content_hash, content, status, additions, deletions, version, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (cp_id, path, f.get("content_hash", ""), f.get("content", ""), f.get("status", "M"),
                          f.get("additions", 0), f.get("deletions", 0), version, now),
                     )
 
@@ -419,6 +447,73 @@ class FileVersionDB:
             (checkpoint_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_checkpoint_file_content(self, checkpoint_id: int, path: str) -> str:
+        """获取指定检查点中某文件的完整新内容（运行时回退引擎）"""
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT content FROM file_versions WHERE checkpoint_id = ? AND path = ? ORDER BY version DESC LIMIT 1",
+                (checkpoint_id, path),
+            ).fetchone()
+            return row["content"] if row else ""
+        except Exception:
+            return ""
+
+    def get_checkpoint_all_contents(self, checkpoint_id: int) -> Dict[str, str]:
+        """获取指定检查点的全部变更文件内容（path -> content，用于运行时回退）"""
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT path, content FROM file_versions WHERE checkpoint_id = ?",
+                (checkpoint_id,),
+            ).fetchall()
+            return {r["path"]: r["content"] for r in rows}
+        except Exception:
+            return {}
+
+    def get_checkpoint_all_entries(self, checkpoint_id: int) -> Dict[str, dict]:
+        """获取指定检查点的全部变更文件条目（path -> {content, status}，用于运行时回退含删除）
+
+        与 get_checkpoint_all_contents 的区别：额外返回 status，使回退能区分
+        status=D（删除文件，回退时删除工作区文件）与 status=M/A（写回内容）。
+        """
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT path, content, status FROM file_versions WHERE checkpoint_id = ?",
+                (checkpoint_id,),
+            ).fetchall()
+            return {r["path"]: {"content": r["content"], "status": r["status"]} for r in rows}
+        except Exception:
+            return {}
+
+    def get_pending_checkpoints(self, session_id: str = "") -> List[int]:
+        """获取 git 快照未完成的 checkpoint id 列表（checkpoint_hash 为空，崩溃兜底用）"""
+        try:
+            conn = self._connect()
+            if session_id:
+                rows = conn.execute(
+                    "SELECT id FROM checkpoints WHERE session_id = ? AND (checkpoint_hash IS NULL OR checkpoint_hash = '') AND source = 'auto'",
+                    (session_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id FROM checkpoints WHERE (checkpoint_hash IS NULL OR checkpoint_hash = '') AND source = 'auto'",
+                ).fetchall()
+            return [r["id"] for r in rows]
+        except Exception:
+            return []
+
+    def update_checkpoint_hash(self, checkpoint_id: int, git_hash: str) -> bool:
+        """更新指定 checkpoint 的 git hash（后台 worker / 崩溃兜底回写用）"""
+        try:
+            conn = self._connect()
+            conn.execute("UPDATE checkpoints SET checkpoint_hash = ? WHERE id = ?", (git_hash, checkpoint_id))
+            conn.commit()
+            return True
+        except Exception:
+            return False
 
     def get_prev_checkpoint_id(self, checkpoint_id: int, session_id: str = "") -> int:
         """获取同一会话中指定检查点的前一个检查点 ID"""

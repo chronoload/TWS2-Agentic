@@ -4866,8 +4866,9 @@ class AgentAssistantWindow:
         ).start()
 
     def _async_save_checkpoint(self, conv_id: str, conv_title: str):
-        """后台保存检查点"""
+        """后台保存检查点（真正保存对话消息历史，而非仅元数据）"""
         try:
+            # 保存元数据（工作流 artifact）
             self._workflow_engine.persistence.save_artifact(
                 conv_id,
                 "checkpoint",
@@ -4879,7 +4880,20 @@ class AgentAssistantWindow:
                 step_id="conversation",
             )
         except Exception as e:
-            print(f"Checkpoint 保存失败: {e}")
+            print(f"Checkpoint 元数据保存失败: {e}")
+        # T6 修复：真正保存对话消息历史（ContextReloader checkpoint 含 messages_snapshot），
+        # 使会话快照可恢复完整历史，而非只有 title/timestamp 空壳
+        try:
+            if self.agent and hasattr(self.agent, "create_checkpoint"):
+                cp = self.agent.create_checkpoint(
+                    summary=f"[conversation-checkpoint] {conv_title or conv_id}",
+                    snapshot_files=False,
+                )
+                if cp is not None:
+                    cp_id = getattr(cp, "checkpoint_id", "") or str(cp)
+                    print(f"会话消息历史已保存: {cp_id}")
+        except Exception as e:
+            print(f"会话消息历史保存失败: {e}")
 
     def submit_workflow(self, workflow_type: str, input_data: Dict[str, Any] = None):
         """提交后台工作流"""

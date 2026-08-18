@@ -1689,11 +1689,21 @@ class Agent:
                 args = tool_call.arguments or {}
                 # 转发子代理执行进度到主流式通道（前端实时显示工具请求/进程）
                 _sub_event_cb = getattr(self, '_current_sub_agent_cb', None)
+                # 子代理流式 token 回调：复用 _current_sub_agent_cb 通道，
+                # 以 event=token 事件转发（前端在 type=sub_agent 下按 event 分流渲染）。
+                # 复用 _emit_token 的静默吞异常语义：转发失败不抛异常、不中断子代理。
+                def _sub_token_cb(tok: str):
+                    if _sub_event_cb is not None:
+                        try:
+                            _sub_event_cb({"event": "token", "token": tok})
+                        except Exception:
+                            pass
                 result = self._agent_tool(
                     agent=args.get("agent", ""),
                     prompt=args.get("prompt", ""),
                     context=args.get("context"),
                     on_event=_sub_event_cb,
+                    on_token=_sub_token_cb,
                 )
                 logger.info(f"子Agent执行完成 ({len(str(result))} 字符)")
                 _result = str(result)
@@ -2068,8 +2078,12 @@ class Agent:
             if not HAS_CACHE:
                 return ""
             with self._messages_lock:
-                snap = list(self.messages)  # 浅拷贝列表引用，深拷贝在后台线程做
-            self._cp_executor.submit(self._save_cp_async, snap, tool_name, sqlite_cp_hash)
+                snap = list(self.messages)  # 浅拷贝列表引用，深拷贝在 _save_cp_async 做
+            # T5 修复：压缩前快照改为同步可靠落盘（原为异步 submit，进程在压缩后、
+            # 后台线程落盘前退出会丢失压缩前回退点）。压缩是低频同步操作，同步落盘
+            # 确保压缩前完整历史一定保存（与 _compress_and_save_to_memory 内
+            # [pre-compact-archive] 双保险）。
+            self._save_cp_async(snap, tool_name, sqlite_cp_hash)
             return ""
         except Exception as e:
             logger.debug(f"自动对话检查点入队失败: {e}")
