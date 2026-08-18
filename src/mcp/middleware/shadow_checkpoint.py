@@ -1094,21 +1094,26 @@ class CheckpointMiddleware(AgentMiddleware):
             if need_git_snapshot:
                 # 增量：只追踪本工具调用修改的文件（git 快照不含排除项/未改动文件）
                 git_files = [cf.get("path", "") for cf in changed_files if cf.get("path")]
-                h = self._checkpointer.snapshot(
-                    tool_name, source="auto", step=self._snapshot_seq,
-                    files=git_files or None,
-                )
-                if h:
-                    self._last_hash = h
-                    git_hash = h
-                    # 回写 git_hash 到 SQLite
-                    if fdb and cp_id and cp_id > 0:
-                        try:
-                            conn = fdb._connect()
-                            conn.execute("UPDATE checkpoints SET checkpoint_hash = ? WHERE id = ?", (git_hash, cp_id))
-                            conn.commit()
-                        except Exception:
-                            pass
+                if not git_files:
+                    # 本工具未改动任何文件：跳过快照，避免 git add --force . 全树扫描
+                    # （log[3]/[4]：全量 add 绕过 info/exclude 且会拖入嵌套 .git_disabled）
+                    pass
+                else:
+                    h = self._checkpointer.snapshot(
+                        tool_name, source="auto", step=self._snapshot_seq,
+                        files=git_files,
+                    )
+                    if h:
+                        self._last_hash = h
+                        git_hash = h
+                        # 回写 git_hash 到 SQLite
+                        if fdb and cp_id and cp_id > 0:
+                            try:
+                                conn = fdb._connect()
+                                conn.execute("UPDATE checkpoints SET checkpoint_hash = ? WHERE id = ?", (git_hash, cp_id))
+                                conn.commit()
+                            except Exception:
+                                pass
 
         except Exception:
             pass
