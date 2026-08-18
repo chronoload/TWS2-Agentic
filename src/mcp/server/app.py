@@ -8651,6 +8651,80 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
         return HTMLResponse(content="", status_code=404)
 
     # ─── 静态文件挂载（必须在 catch-all 路由之前）────────────────
+    # ─── 主题清单（动态扫描 static/theme 目录，替代前端硬编码）──────────
+    def _scan_theme_manifest() -> list:
+        """扫描 static/theme 下每个子目录，读取 theme.json + 入口 CSS，返回主题清单"""
+        from urllib.parse import quote
+        theme_root = static_dir / "theme"
+        themes = []
+        if not theme_root.exists():
+            return themes
+        for d in sorted(theme_root.iterdir()):
+            if not d.is_dir() or d.name.startswith('.'):
+                continue
+            meta = {
+                "id": d.name,
+                "dir": d.name,
+                "name": d.name,
+                "displayName": d.name,
+                "author": "",
+                "version": "",
+                "modes": [],
+                "description": "",
+                "css": "",
+                "cssUrl": "",
+                "iconUrl": "",
+                "previewUrl": "",
+            }
+            tj = d / "theme.json"
+            if tj.exists():
+                try:
+                    tj_data = json.loads(tj.read_text(encoding="utf-8"))
+                    meta["name"] = tj_data.get("name") or d.name
+                    disp = tj_data.get("displayName") or {}
+                    meta["displayName"] = (disp.get("zh_CN") or disp.get("default") or d.name)
+                    meta["author"] = tj_data.get("author") or ""
+                    meta["version"] = tj_data.get("version") or ""
+                    meta["modes"] = tj_data.get("modes") or []
+                    desc = tj_data.get("description") or {}
+                    meta["description"] = (desc.get("zh_CN") or desc.get("default") or "")
+                except Exception:
+                    pass
+            # 入口 CSS：tsw2.css（TWS2 适配层）> theme.css > {目录名}.css > 目录内第一个 .css
+            css_rel = None
+            for cand in (d / "tsw2.css", d / "theme.css", d / (d.name + ".css")):
+                if cand.exists() and cand.is_file():
+                    css_rel = cand.name
+                    break
+            if css_rel is None:
+                for f in sorted(d.iterdir()):
+                    if f.is_file() and f.suffix.lower() == ".css":
+                        css_rel = f.name
+                        break
+            if css_rel:
+                meta["css"] = css_rel
+                rel_url = "static/theme/" + d.name + "/" + css_rel
+                meta["cssUrl"] = "/" + quote(rel_url.replace("\\", "/"), safe="/")
+            for asset, key in (("icon.png", "iconUrl"), ("preview.png", "previewUrl")):
+                if (d / asset).exists():
+                    rel_url = "static/theme/" + d.name + "/" + asset
+                    meta[key] = "/" + quote(rel_url.replace("\\", "/"), safe="/")
+            themes.append(meta)
+        return themes
+
+    # ─── /api/themes 主题清单 API（异步刷新，保证目录最新）────
+    @app.get("/api/themes")
+    async def list_themes():
+        return ok(data={"themes": _scan_theme_manifest()})
+
+    # ─── /static/theme/manifest.js 主题清单注入（同步 <script> 加载，首帧兜底）────
+    # 必须注册在 /static mount 之前：显式路由优先于 mount 前缀匹配。
+    @app.get("/static/theme/manifest.js")
+    async def theme_manifest_js():
+        payload = json.dumps({"themes": _scan_theme_manifest()}, ensure_ascii=False)
+        body = "window.__TS2_THEME_MANIFEST = " + payload + ";\n"
+        return Response(content=body, media_type="application/javascript")
+
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
