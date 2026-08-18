@@ -547,11 +547,11 @@ function setupAwareness({ vd, awareness, peerAwareness, peerVd, name }) {
 
 function createVditor(id, value, after) {
   return new Vditor(id, {
-    mode: 'ir', cdn: '/static/vditor', height: '100%', theme: 'dark',
+    mode: 'ir', cdn: 'https://unpkg.com/vditor@3.10.7', height: '100%', theme: 'dark',
     icon: 'material', placeholder: '输入...', value,
     cache: { enable: false },
     preview: {
-      theme: { current: 'dark', path: '/static/vditor/css/content-theme' },
+      theme: { current: 'dark', path: 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme' },
       math: { engine: 'KaTeX', inlineDigit: true },
     },
     after,

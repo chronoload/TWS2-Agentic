@@ -148,7 +148,7 @@ function bindEditor({ vd, doc, text, peer, name }) {
 function createVditor(elId, value, after) {
   return new Vditor(elId, {
     mode: 'sv',
-    cdn: '/static/vditor',
+    cdn: 'https://unpkg.com/vditor@3.10.7',
     height: '100%',
     theme: 'dark',
     icon: 'material',
@@ -162,7 +162,7 @@ function createVditor(elId, value, after) {
       'link', 'emoji', '|', 'undo', 'redo',
     ],
     preview: {
-      theme: { current: 'dark', path: '/static/vditor/css/content-theme' },
+      theme: { current: 'dark', path: 'https://unpkg.com/vditor@3.10.7/dist/css/content-theme' },
       hljs: { style: 'tokyo-night-dark', lineNumber: true },
       math: { engine: 'KaTeX', inlineDigit: true },
     },

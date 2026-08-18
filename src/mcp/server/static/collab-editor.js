@@ -3,6 +3,11 @@
 // 作为 ES module 加载，通过 window.CollabEditor 暴露 open/close。
 import * as Loro from './collab/loro_wasm_bg.js';
 
+// Vditor CDN 必须与主编辑器一致（unpkg 3.10.7），且主资源(cdn)与所有子资源
+// (i18n/lute/content-theme) 必须同源 CDN 加载，否则子资源相对本地 /static/vditor
+// 加载会因本地文件缺失或版本错位而 404（net::ERR_ABORTED）。
+const __VDITOR_CDN = window.__VDITOR_CDN || 'https://unpkg.com/vditor@3.10.7';
+
 // ---- Loro wasm 初始化 ----
 let _wasmReady = null;
 const _WASM_CDN = 'https://cdn.jsdelivr.net/npm/loro-wasm@1.0.7/bundler/loro_wasm_bg.wasm';
@@ -506,8 +511,8 @@ async function _openImpl(srcPath, containerId, opts) {
       mode: 'ir',
       theme: isLight ? 'classic' : 'dark',
       icon: 'material',
-      cdn: '/static/vditor',
-      _lutePath: '/static/vditor/dist/js/lute/lute.min.js',
+      cdn: __VDITOR_CDN,
+      _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
       placeholder: '协同编辑中...',
       cache: { enable: false },
       value: editorContent,
@@ -537,7 +542,7 @@ async function _openImpl(srcPath, containerId, opts) {
         markdown: {
           linkBase: (location.origin || '') + '/api/file/download/',
         },
-        theme: { current: isLight ? 'light' : 'dark', path: '/static/vditor/css/content-theme' },
+        theme: { current: isLight ? 'light' : 'dark', path: __VDITOR_CDN + '/dist/css/content-theme' },
         hljs: { style: isLight ? 'github' : 'tokyo-night-dark', lineNumber: true },
         math: { engine: 'KaTeX', inlineDigit: true },
       },
