@@ -15,6 +15,7 @@ WS2 工作流引擎 — 持久化多步骤编排
 from __future__ import annotations
 
 import json
+import re
 import uuid
 import sqlite3
 import threading
@@ -1053,62 +1054,114 @@ class WorkflowRunner:
         return result
 
     def _run_agent(self, step_def: StepDefinition) -> str:
-        # 优先使用 HarnessRunner（如果可用）
+        prompt = self._render(step_def.prompt_template or "")
+        ctx = json.dumps(self.context.variables, ensure_ascii=False, indent=2)
+        full_prompt = f"{prompt}\n\n上下文数据:\n```json\n{ctx}\n```"
+        messages = [{"role": "user", "content": full_prompt}]
+
+        # ── 优先使用 HarnessRunner（含工具流水线/审批/事件）──
         if self.engine._harness_runner:
-            prompt = self._render(step_def.prompt_template or "")
-            ctx = json.dumps(self.context.variables, ensure_ascii=False, indent=2)
-            full_prompt = f"{prompt}\n\n上下文数据:\n```json\n{ctx}\n```"
-            messages = [{"role": "user", "content": full_prompt}]
-            turn_result = self.engine._harness_runner.run_turn(messages)
-            return turn_result.final_response or turn_result.content or ""
-        
-        # 回退：使用 Agent
+            return self._run_agent_multi_turn(step_def, messages,
+                                               harness=True)
+        # ── 回退：使用 Agent ──
         agent = self.engine._agent
         if not agent:
             return f"警告：Agent 未初始化，无法执行步骤 '{step_def.name or step_def.step_id}'。请先初始化 Agent。"
 
-        prompt = self._render(step_def.prompt_template or "")
-        ctx = json.dumps(self.context.variables, ensure_ascii=False, indent=2)
-        full_prompt = f"{prompt}\n\n上下文数据:\n```json\n{ctx}\n```"
-
-        wf_messages = []
         if agent.messages and agent.messages[0].get("role") == "system":
-            wf_messages.append(dict(agent.messages[0]))
+            messages.insert(0, dict(agent.messages[0]))
         else:
-            wf_messages.append({"role": "system", "content": "你是工作流执行助手。"})
-        wf_messages.append({"role": "user", "content": full_prompt})
+            messages.insert(0, {"role": "system", "content": "你是工作流执行助手。"})
 
         llm = agent.llm
         if not llm:
             return "警告：Agent LLM 未初始化"
 
         tools = agent._get_tool_schemas() if hasattr(agent, '_get_tool_schemas') else None
+        return self._run_agent_multi_turn(step_def, messages, harness=False)
 
-        max_rounds = 5
+    def _run_agent_multi_turn(self, step_def: StepDefinition, messages: list,
+                              harness: bool = False) -> str:
+        """多轮循环：工具结果反馈 LLM，直到产出最终成果或达轮次上限。
+        harness=True 时经 HarnessRunner（工具流水线/审批/事件）执行工具；
+        harness=False 时经 Agent._execute_tool 执行。"""
+        runner = self.engine._harness_runner if harness else None
+        agent = self.engine._agent
+        llm = agent.llm if agent else None
+        if not llm:
+            return "警告：Agent LLM 未初始化"
+        tools = agent._get_tool_schemas() if agent and hasattr(agent, '_get_tool_schemas') else None
+
+        max_rounds = 100
+        tool_rounds = 0          # 连续工具调用轮数
+        force_final_after = 30   # 工具轮数达此值后强制收尾（要求直接输出最终成果）
         last_content = ""
         for _ in range(max_rounds):
             if self._cancelled or self._abort_event.is_set():
                 return last_content or "(工作流步骤已取消)"
 
-            response = llm.chat(wf_messages, tools=tools)
+            if harness and runner:
+                turn_result = runner.run_turn(messages, tools=tools)
+                response = turn_result
+            else:
+                response = llm.chat(messages, tools=tools)
 
             if getattr(response, 'cancelled', False):
                 return response.content or last_content or "(工作流步骤已取消)"
 
-            if not response.tool_calls:
-                return response.content or ""
+            content = getattr(response, 'content', None) or ""
+            tool_calls = getattr(response, 'tool_calls', None) or []
 
-            last_content = response.content or last_content
-            wf_messages.append(response.message)
-            for tc in response.tool_calls:
-                if self._cancelled or self._abort_event.is_set():
-                    return last_content or "(工作流步骤已取消)"
-                result = agent._execute_tool(tc)
-                wf_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
+            if not tool_calls:
+                return content or ""
+
+            last_content = content or last_content
+            if harness and runner:
+                # HarnessRunner.run_turn 已执行工具并记录到 turn_result.tool_calls
+                executed = getattr(response, 'tool_calls', []) or []
+                messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [tc.get("tool_call") if isinstance(tc, dict) else tc
+                                   for tc in executed],
                 })
+                for tc in executed:
+                    tc_call = tc.get("tool_call") if isinstance(tc, dict) else tc
+                    tc_result = tc.get("result") if isinstance(tc, dict) else str(tc)
+                    if isinstance(tc_call, dict):
+                        tc_id = tc_call.get("id") or ""
+                    else:
+                        tc_id = getattr(tc_call, "id", None) or ""
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": str(tc_result or ""),
+                    })
+            else:
+                messages.append(response.message)
+                for tc in tool_calls:
+                    if self._cancelled or self._abort_event.is_set():
+                        return last_content or "(工作流步骤已取消)"
+                    result = agent._execute_tool(tc)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": getattr(tc, "id", None) or "",
+                        "content": str(result or ""),
+                    })
+
+            # ── 强制收尾：工具调用过多说明模型陷入工具循环，注入收尾指令 ──
+            tool_rounds += 1
+            if tool_rounds >= force_final_after:
+                messages.append({
+                    "role": "user",
+                    "content": "（系统提示）你已进行足够的工具探索。请立即基于已获得的信息，"
+                               "输出本步骤的最终成果（framework / Rmd 内容 / 审查结论 / 报告），"
+                               "不要再调用任何工具。直接给出完整最终输出。",
+                })
+                final = runner.run_turn(messages) if (harness and runner) else llm.chat(messages, tools=None)
+                if getattr(final, 'cancelled', False):
+                    return final.content or last_content or "(工作流步骤已取消)"
+                return final.content or last_content
 
         return last_content or "(工作流Agent步骤达到最大轮次)"
 
@@ -1574,7 +1627,63 @@ class WorkflowRunner:
 
     def _render_string(self, s: str) -> str:
         result = s
-        # context.variables 优先（执行器写入的 gt_xxx / lean4_xxx 等）
+
+        # ── 1) 点号路径 + 默认值语法（优先）─────────────────────────────
+        # 支持 {step_results.x} / {input_data.x} / {variables.x} / {node_outputs.x}
+        # 支持 {key|default(v)}（key 可为点号路径或裸 key；v 可带引号）
+        def _lookup_dotted(path: str):
+            parts = path.split(".")
+            root = parts[0]
+            if root == "step_results" and len(parts) >= 2:
+                sr = self.context.step_results.get(parts[1])
+                if sr is None:
+                    return None
+                if len(parts) == 2:
+                    return sr.output
+                return getattr(sr, parts[2], None)
+            if root == "input_data" and len(parts) >= 2:
+                return self.context.input_data.get(parts[1])
+            if root == "variables" and len(parts) >= 2:
+                return self.context.variables.get(parts[1])
+            if root == "node_outputs" and len(parts) >= 2:
+                return self.context.node_outputs.get(parts[1])
+            return None
+
+        def _resolve(token: str):
+            key = token
+            default = None
+            if "|default(" in token:
+                key, _, def_part = token.partition("|default(")
+                key = key.strip()
+                default = def_part.rstrip(")").strip()
+                if len(default) >= 2 and default[0] == default[-1] and default[0] in "'\"":
+                    default = default[1:-1]
+            val = _lookup_dotted(key) if "." in key else None
+            if val is None and "." not in key:
+                # 裸 key：variables > input_data > 内置别名
+                if key in self.context.variables:
+                    val = self.context.variables[key]
+                elif key in self.context.input_data:
+                    val = self.context.input_data[key]
+                elif key == "query":
+                    val = self.context.input_data.get("query", "")
+                elif key == "task":
+                    val = self.context.input_data.get("task", "")
+            if val is not None:
+                return str(val)
+            if default is not None:
+                return default
+            return None  # 未解析 → 保留原样
+
+        def _repl_ph(m):
+            resolved = _resolve(m.group(1).strip())
+            if resolved is not None:
+                return resolved
+            return m.group(0)
+
+        result = re.sub(r"\{([^{}]+)\}", _repl_ph, result)
+
+        # ── 2) 原有整体替换（{step_results} 整体 JSON 等，裸 key 形式由上面保留）──
         for key, val in self.context.variables.items():
             result = result.replace("{" + key + "}", str(val))
         # input_data 也参与 {key} 替换：预定义工作流模板依赖

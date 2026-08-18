@@ -83,3 +83,8 @@ src/skills_market/
 # throwaway 调试/验证脚本（_ 前缀一次性产物：_t*_*/_diag_*/_verify_*/_test_*/_debug_*/_boot_* 等）
 /src/_*
 !/src/__init__.py
+
+# scratch: 日志 / 音乐 / 规划草稿（按用户要求忽略）
+src/skills/macdev-skill/LOGS.md
+music/
+src/PLAN_*
