@@ -490,6 +490,11 @@ class Agent:
         self._tool_map = {tool.name: tool for tool in self.tools}
         self.messages: List[Dict[str, Any]] = []
         self._messages_lock = threading.Lock()
+        # ── 检查点性能：增量 token 估算（避免每步 O(n) 全量重算）──
+        self._token_est_count = 0  # 已计入 token 估算的消息数（增量）
+        self._token_est_total = 0  # 累计 token 估算值
+        # 异步落盘线程池（检查点快照不阻塞主循环）
+        self._cp_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="cp-async")
         self._chat_active = threading.Event()  # 标记 chat 是否在进行中
         self._chat_active.set()  # 初始状态：无 chat 运行
         self._cancelled = False  # 标记对话是否被取消
@@ -1574,7 +1579,6 @@ class Agent:
                     "content": result,
                     "checkpoint_hash": cp_hash,
                 })
-            self._auto_conversation_checkpoint(tc.name, cp_hash)
             if cp_hash:
                 for msg in reversed(self.messages):
                     if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -1587,7 +1591,7 @@ class Agent:
                         for t in msg["tool_calls"]:
                             if hasattr(t, 'id') and t.id == tc.id:
                                 if hasattr(t, 'checkpoint_hash'):
-                                    t.checkpoint_hash = cp_hash
+                                    t["checkpoint_hash"] = cp_hash
                                 break
                         break
             self._mark_tool_used(tc.name)
@@ -1611,7 +1615,6 @@ class Agent:
                         "content": result,
                         "checkpoint_hash": cp_hash,
                     })
-                self._auto_conversation_checkpoint(tc.name, cp_hash)
                 if cp_hash:
                     for msg in reversed(self.messages):
                         if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -1655,6 +1658,8 @@ class Agent:
                     f"上下文已使用 {est_tokens}/{ctx_window} tokens "
                     f"({est_tokens/ctx_window*100:.0f}%), 工具执行后自动压缩"
                 )
+                # 压缩前异步打一次对话快照（ContextReloader 设计意图：压缩前回退点，不阻塞主循环）
+                self._auto_conversation_checkpoint("__pre_compact__", self._get_last_checkpoint_hash())
                 self._compress_and_save_to_memory(reason="工具执行后上下文超过 65%")
 
         if run.round_count >= self.config.max_rounds:
@@ -2033,16 +2038,46 @@ class Agent:
             return ExecutionResult(command=f"<{language} script>", error="沙盒未初始化")
         return self._sandbox.execute_script(script, language=language)
 
-    def _auto_conversation_checkpoint(self, tool_name: str, sqlite_cp_hash: str) -> str:
-        """通用流程自动创建对话快照（迁移自 agent_assistant 的每轮自动保存）
+    def _estimate_tokens_incremental(self) -> int:
+        """增量 token 估算：只对新追加的消息计数，避免每步遍历全表（根治 O(n²)）
 
-        每次工具调用后创建一个 ContextReloader 的 cp-* 消息快照，并将其 id
-        回填到 SQLite checkpoints 记录的 conversation_checkpoint_id，使前端
-        回退检查点时后端能恢复对话历史（restore API 按 SQLite id 反查 cp-*）。
+        消息被压缩/截断（数量减少）时缓存失效，全量重算。
+        """
+        if not HAS_MODERN_PROMPT:
+            return 0
+        with self._messages_lock:
+            n = len(self.messages)
+            if self._token_est_count > n:
+                # 消息被压缩/截断，缓存失效
+                self._token_est_count = 0
+                self._token_est_total = 0
+            if n > self._token_est_count:
+                new_slice = self.messages[self._token_est_count:]
+                self._token_est_total += estimate_messages_tokens(new_slice)
+                self._token_est_count = n
+            return self._token_est_total
+
+    def _auto_conversation_checkpoint(self, tool_name: str, sqlite_cp_hash: str) -> str:
+        """异步创建对话快照（不阻塞主循环）
+
+        设计意图：ContextReloader 的对话历史快照是「压缩前做一次」的回退点，
+        而非每步全量快照。此处仅把（列表浅拷贝）入队到后台线程，立即返回；
+        深拷贝 + 序列化 + 回填 SQLite 关联在 _save_cp_async 中完成。
         """
         try:
             if not HAS_CACHE:
                 return ""
+            with self._messages_lock:
+                snap = list(self.messages)  # 浅拷贝列表引用，深拷贝在后台线程做
+            self._cp_executor.submit(self._save_cp_async, snap, tool_name, sqlite_cp_hash)
+            return ""
+        except Exception as e:
+            logger.debug(f"自动对话检查点入队失败: {e}")
+            return ""
+
+    def _save_cp_async(self, snap_list: List[Dict[str, Any]], tool_name: str, sqlite_cp_hash: str) -> None:
+        """后台线程：创建 ContextReloader 快照并回填 SQLite 关联（不阻塞主循环）"""
+        try:
             sqlite_id = None
             if sqlite_cp_hash and str(sqlite_cp_hash).isdigit():
                 sqlite_id = int(sqlite_cp_hash)
@@ -2050,9 +2085,10 @@ class Agent:
             cp = self.create_checkpoint(
                 summary=f"{step_info} {tool_name or '对话'}",
                 snapshot_files=False,
+                _messages=snap_list,
             )
             if cp is None:
-                return ""
+                return
             cp_id = getattr(cp, "checkpoint_id", "") or str(cp)
             # 回填关联：SQLite 检查点 → ContextReloader 对话快照
             if sqlite_id and HAS_MIDDLEWARE and self._middleware_chain:
@@ -2064,12 +2100,11 @@ class Agent:
                             break
                 except Exception:
                     pass
-            return str(cp_id)
         except Exception as e:
-            logger.debug(f"自动对话检查点创建失败: {e}")
-            return ""
+            logger.debug(f"自动对话检查点后台创建失败: {e}")
 
-    def create_checkpoint(self, summary: str = "", snapshot_files: bool = False) -> Optional[Any]:
+    def create_checkpoint(self, summary: str = "", snapshot_files: bool = False,
+                         _messages: Optional[List[Dict[str, Any]]] = None) -> Optional[Any]:
         """创建会话检查点（增强版 — 包含可选的文件快照和 git commit）
         
         参考 Cline 的 saveCheckpoint：
@@ -2085,10 +2120,11 @@ class Agent:
             return None
         reloader = get_context_reloader()
         workspace_root = self.config.workspace_root or ""
+        messages = _messages if _messages is not None else self.messages
         checkpoint = reloader.create_checkpoint(
-            messages=self.messages,
-            message_index=len(self.messages),
-            total_tokens=estimate_messages_tokens(self.messages) if HAS_MODERN_PROMPT else 0,
+            messages=messages,
+            message_index=len(messages),
+            total_tokens=self._estimate_tokens_incremental() if HAS_MODERN_PROMPT else 0,
             summary=summary,
             workspace_root=workspace_root,
             snapshot_files=snapshot_files,
