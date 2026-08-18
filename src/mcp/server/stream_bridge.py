@@ -92,6 +92,11 @@ class StreamSession:
         def _on_token(token: str):
             if self._cancelled:
                 return
+            # 过滤空/None token：OpenAI 流式在 reasoning-only delta 时常下发
+            # content=None 或 ''，前端若据此建泡会产生"空气泡"，且 None 会被拼成
+            # 字面量 "null"。源头过滤即根除。
+            if token is None or token == "":
+                return
             self._token_count += 1
             self._put({"type": "token", "content": token})
         return _on_token

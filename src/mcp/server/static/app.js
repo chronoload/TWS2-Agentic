@@ -13825,15 +13825,18 @@ async function sendAgentStream(text, attachments) {
             const msg = JSON.parse(data);
             switch (msg.type) {
               case 'token':
-                // tool_call 之后的首个 token：先创建新空气泡
+                // 双保险：空/纯空白 token 直接丢弃，杜绝孤儿空气泡（后端已过滤，此处兜底）
+                if (msg.content == null || !String(msg.content).trim()) break;
                 if (streamState.toolCallHappened && !streamState.fullContent) {
-                  streamState.currentIndex = addStreamMessage('assistant', '');
-                  // 下一条 assistant 回复出现 → 收起已完成工具卡片的时机；
-                  // 仅在此刻全量渲染一次（新气泡上屏 + 卡片收起），避免 token 高频重渲染
+                  // tool_call 后首个有效 token：直接带内容建泡（不再先建空泡再 rAF 填充），
+                  // 消除单帧空窗/空气泡；新气泡上屏同时收起已完成工具卡片
+                  streamState.currentIndex = addStreamMessage('assistant', msg.content);
                   if (isCurrentSession()) renderAgentMessages();
+                  streamState.fullContent = msg.content;
+                } else {
+                  streamState.fullContent += msg.content;
+                  updateStreamAssistant(streamState.fullContent);
                 }
-                streamState.fullContent += msg.content;
-                updateStreamAssistant(streamState.fullContent);
                 break;
               case 'tool_call':
                 // 分段模式
