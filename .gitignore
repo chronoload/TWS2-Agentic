@@ -88,3 +88,6 @@ src/skills_market/
 src/skills/macdev-skill/LOGS.md
 music/
 src/PLAN_*
+
+# shadow repo 检查点（禁用的 git 目录，忽略避免误提交）
+.git_disabled/
