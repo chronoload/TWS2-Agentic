@@ -8230,12 +8230,19 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                                                         if git_hash:
                                                             f["diff"] = cp_git.get_incremental_diff_content(git_hash, f["path"], max_lines=80)
                                                         else:
+                                                            # 用 SQLite content 与前一 checkpoint 对比生成真实 diff（不再把整个文件当新增）
                                                             import difflib
-                                                            full_path = os.path.join(mw._workspace_root, f["path"]) if not os.path.isabs(f["path"]) else f["path"]
-                                                            if os.path.isfile(full_path):
-                                                                new_lines = open(full_path, encoding="utf-8", errors="replace").readlines()
-                                                                diff = difflib.unified_diff([], new_lines, fromfile="/dev/null", tofile=f["path"])
-                                                                f["diff"] = "".join(diff)
+                                                            cur_content = fdb.get_checkpoint_file_content(cp_id, f["path"])
+                                                            prev_id = fdb.get_prev_checkpoint_id(cp_id, mw.instance_id or "")
+                                                            prev_content = ""
+                                                            if prev_id > 0:
+                                                                prev_content = fdb.get_checkpoint_file_content(prev_id, f["path"])
+                                                            diff = difflib.unified_diff(
+                                                                prev_content.splitlines(keepends=True),
+                                                                cur_content.splitlines(keepends=True),
+                                                                fromfile=f"a/{f['path']}", tofile=f"b/{f['path']}",
+                                                            )
+                                                            f["diff"] = "".join(diff)
                                                     except Exception:
                                                         pass
                                         total_adds = sum(f.get("additions", 0) for f in diff_files)
@@ -8368,12 +8375,20 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     elif str(commit_hash).startswith("cp-"):
                         conversation_cp_id = commit_hash
 
-                    # 恢复文件（用 git hash，仅当解析出有效 hash 时执行）
+                    # 恢复文件：优先用 SQLite 运行时回退（不重启、不需等 git 快照），git 兜底
                     if restore_type in ("files", "taskAndFiles"):
                         try:
-                            if git_hash:
+                            cp_id = int(commit_hash) if str(commit_hash).isdigit() else 0
+                            restored = False
+                            if cp_id > 0:
+                                # SQLite 运行时回退（优先，精确还原）
+                                try:
+                                    restored = mw.restore_from_checkpoint(cp_id)
+                                except Exception:
+                                    restored = False
+                            if not restored and git_hash:
                                 cp.restore_files(git_hash)
-                            else:
+                            elif not restored:
                                 logger.warning(f"恢复文件快照失败: 无 git hash (commit_hash={commit_hash})")
                         except Exception as e:
                             logger.warning(f"恢复文件快照失败: {e}")

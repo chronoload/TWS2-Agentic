@@ -94,7 +94,7 @@ class Coordinator:
                 agent.cancel()
 
     def run(self, agent_name: str, prompt: str, context=None, on_event: Optional[Callable] = None,
-            max_turns: Optional[int] = None) -> SubAgentResult:
+            max_turns: Optional[int] = None, on_token: Optional[Callable] = None) -> SubAgentResult:
         spec = self._specs.get(agent_name)
         if spec is None:
             result = SubAgentResult(agent_name=agent_name)
@@ -139,6 +139,7 @@ class Coordinator:
             tool_executor=self._execute_tool,
             cancel_event=cancel_event,
             on_event=on_event,
+            on_token=on_token,
         )
         self._agents[agent_name] = agent
         try:

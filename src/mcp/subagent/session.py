@@ -20,6 +20,7 @@ class SessionAgent:
         tool_executor: Optional[Callable] = None,
         cancel_event: Optional[threading.Event] = None,
         on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_token: Optional[Callable[[str], None]] = None,
     ):
         self.spec = spec
         self.llm = llm
@@ -27,6 +28,7 @@ class SessionAgent:
         self.tool_executor = tool_executor
         self.cancel_event = cancel_event or threading.Event()
         self.on_event = on_event  # 执行进度事件回调（转发到主 Agent 流式通道）
+        self.on_token = on_token  # 子代理 LLM 流式 token 回调（逐 token 转发到主流式通道）
         self.session_id = uuid.uuid4().hex[:12]
         self.messages: List[Dict[str, Any]] = []
         self._cancelled = False
@@ -45,6 +47,22 @@ class SessionAgent:
             self.on_event({**event, "agent": self.spec.name})
         except Exception as e:
             logger.debug(f"SessionAgent on_event error: {e}")
+
+    def _emit_token(self, token: str):
+        """转发子代理 LLM 流式 token 到主流式通道。
+
+        稳健性（参考主流式 + 不重复实现 agentloop）：
+        - 只做转发，转发失败静默吞掉（记 debug），绝不抛异常；
+        - 这样 llm._process_stream 直调 on_token 时不会因转发失败而中断
+          流式 → _call_llm 正常返回 → 不会误触发 run() 的 loop 恢复机制重试
+          （loop 恢复只应在真正 LLM 错误时触发，保持现状语义）。
+        """
+        if not self.on_token:
+            return
+        try:
+            self.on_token(token)
+        except Exception as e:
+            logger.debug(f"SessionAgent on_token error: {e}")
 
     @property
     def is_busy(self) -> bool:
@@ -211,7 +229,13 @@ class SessionAgent:
             return None
         # 异常不在此吞掉：抛给 run() 的 loop 恢复机制处理（防异常打断）
         tools_param = self.tools if self.tools else None
-        return self.llm.chat(self.messages, tools=tools_param)
+        # 子代理流式：把 token 转发回调传给 LLM（仅当设置了 on_token 时）。
+        # _emit_token 内部静默吞异常，故 LLM 流式过程中 on_token 转发失败
+        # 不会中断 _process_stream → 不会误触发上方 loop 恢复机制重试。
+        kw: Dict[str, Any] = {}
+        if self.on_token:
+            kw["on_token"] = self._emit_token
+        return self.llm.chat(self.messages, tools=tools_param, **kw)
 
     def _execute_tool(self, tool_call) -> Any:
         if self.tool_executor:

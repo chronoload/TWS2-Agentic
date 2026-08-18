@@ -51,7 +51,9 @@ class AgentTool:
         on_event = kwargs.pop("on_event", None)
         # 工具轨：max_turns 每次调用可设置（None=角色默认；0/负数=无限；>0=本轮上限）
         max_turns = kwargs.pop("max_turns", None)
-        result = self.coordinator.run(agent, prompt, context, on_event=on_event, max_turns=max_turns)
+        # 子代理流式：LLM token 逐 token 转发回调（前端实时流式渲染）
+        on_token = kwargs.pop("on_token", None)
+        result = self.coordinator.run(agent, prompt, context, on_event=on_event, max_turns=max_turns, on_token=on_token)
         # 返回结构化JSON，前端可识别 __sub_agent__ 标记做特殊渲染
         # 关键：包含子代理的完整历史 (messages)，用于状态机持久化和回退
         structured = {

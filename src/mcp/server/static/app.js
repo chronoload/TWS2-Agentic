@@ -11338,10 +11338,15 @@ function _summarizeArgs(argsObj, toolName) {
 
 // 工具友好的"结果反馈"主视图 — 直接告诉人"发生了什么/有什么"
 function _friendlyResultView(resultStr, toolName, argsObj, status, interrupted) {
-  // running 状态：保持"执行中"展示（呼吸灯是正常视觉）
+  // running 状态：优先显示已流式累积的内容（如子代理 token 逐字输出）；
+  // 仅当无实际内容时才显示"执行中…"占位（呼吸灯是正常视觉）。
   if (status === 'running') {
     if (interrupted) {
       return '<div class="tc-friend tc-running"><span class="tc-friend-icon">⚠️</span><span>执行被中断，未返回结果</span></div>';
+    }
+    if (resultStr && !_isResultPlaceholder(resultStr)) {
+      // 有流式内容（子代理 token 累积等）→ 显示内容而非"执行中"占位，让用户看到逐字输出
+      return _genericResultView(resultStr);
     }
     return '<div class="tc-friend tc-running"><span class="tc-friend-icon">⏳</span><span>执行中…</span></div>';
   }
@@ -12559,7 +12564,11 @@ function _renderAgentMessageHtml(msg, mi) {
   } else if (msg.role === 'tool' || msg.role === 'tool_call') {
     var toolName = msg.toolName || msg.name || '工具';
     var toolResult = msg.result || '';
-    if (toolName === 'sub_agent' && toolResult) {
+    if (toolName === 'sub_agent' && toolResult && msg.status !== 'running') {
+      // 流式期间（status=running）不走 renderSubAgentResult：此时 result 是累积的纯文本 token
+      // （非 __sub_agent__ JSON），renderSubAgentResult 解析失败会回退 completed 收起卡片，反而
+      // 看不到流式。因此流式期间走 _renderToolCallCard 显示 result 文本；tool_result 到达后
+      // status 变 completed、result 为完整 __sub_agent__ JSON，此处才渲染完整 sub_agent 面板。
       rendered = renderSubAgentResult(toolResult, 0);
     } else {
       // 流式过程中 status 为 'running'，此时无 result；完成后 status 为 'done'/'completed'
@@ -13879,7 +13888,11 @@ async function sendAgentStream(text, attachments) {
                 _showAskQuestionPanel(msg);
                 break;
               case 'sub_agent':
-                // 子代理执行进度：实时更新 sub_agent 工具卡片（工具请求 + 进程）
+                // 子代理执行进度：实时更新 sub_agent 工具卡片（工具请求 + 进程 + 流式 token）
+                // 核心：token 累积到 _subTokenBuf 并写入 content/result（卡片渲染读 result），
+                // 状态行（思考中/调用工具/完成）只在"没有 token 内容"时才显示，绝不覆盖已
+                // 累积的具体内容——否则多轮任务中 tool_call/tool_result 的状态行会把 token
+                // 生成的具体内容冲掉（"只显示思考轮次，具体内容不显示"的根因）。
                 var subIdx = undefined;
                 var _subArr = streamState.toolMsgMap['sub_agent'];
                 if (_subArr && _subArr.length) subIdx = _subArr[_subArr.length - 1];  // 最新 sub_agent 卡片
@@ -13887,19 +13900,48 @@ async function sendAgentStream(text, attachments) {
                   var ev = msg.event || '';
                   var agentName = msg.agent || 'sub_agent';
                   var turn = msg.turn || 1;
-                  var progressLine = '';
+                  var _sbM = streamState.messages[subIdx];
                   if (ev === 'llm') {
-                    progressLine = '🤖 子代理(' + agentName + ') 第 ' + turn + ' 轮思考中...';
+                    // 多轮子代理：不重置 _subTokenBuf（保留之前轮次的 token 内容），也只在
+                    // "没有 token 内容"时才显示"思考中"状态行——否则 llm 事件会把已累积的
+                    // 具体内容重置/覆盖掉，导致只有最后一轮 content 才流式（用户反馈的根因）。
+                    // 这样所有轮次生成的 token 内容都持续累积显示。
+                    if (_sbM && !(_sbM._subTokenBuf || '').trim()) {
+                      updateStreamMessage(subIdx, { content: '🤖 子代理(' + agentName + ') 第 ' + turn + ' 轮思考中...', status: 'running' });
+                      if (isCurrentSession()) renderAgentMessages();
+                    }
                   } else if (ev === 'tool_call') {
-                    progressLine = '🔧 子代理(' + agentName + ') 正在调用工具: ' + (msg.tool_name || '?');
+                    // 仅当没有 token 内容时才显示状态行，避免覆盖已生成的具体内容
+                    if (_sbM && !(_sbM._subTokenBuf || '').trim()) {
+                      updateStreamMessage(subIdx, { content: '🔧 子代理(' + agentName + ') 正在调用工具: ' + (msg.tool_name || '?'), status: 'running' });
+                      if (isCurrentSession()) renderAgentMessages();
+                    }
                   } else if (ev === 'tool_result') {
-                    progressLine = '✅ 子代理(' + agentName + ') 工具 ' + (msg.tool_name || '?') + ' 完成';
+                    if (_sbM && !(_sbM._subTokenBuf || '').trim()) {
+                      updateStreamMessage(subIdx, { content: '✅ 子代理(' + agentName + ') 工具 ' + (msg.tool_name || '?') + ' 完成', status: 'running' });
+                      if (isCurrentSession()) renderAgentMessages();
+                    }
                   } else if (ev === 'end') {
-                    progressLine = '🏁 子代理(' + agentName + ') 执行结束' + (msg.status ? ' (' + msg.status + ')' : '');
-                  }
-                  if (progressLine) {
-                    updateStreamMessage(subIdx, { content: progressLine, status: 'running' });
-                    if (isCurrentSession()) renderAgentMessages();
+                    // 子代理结束：仅当无 token 内容时显示结束状态；有内容则保留 token 内容
+                    if (_sbM && !(_sbM._subTokenBuf || '').trim()) {
+                      updateStreamMessage(subIdx, { content: '🏁 子代理(' + agentName + ') 执行结束' + (msg.status ? ' (' + msg.status + ')' : ''), status: 'running' });
+                      if (isCurrentSession()) renderAgentMessages();
+                    }
+                  } else if (ev === 'token') {
+                    // 子代理 LLM 流式 token：只追加到子代理卡片，绝不触碰主 assistant 气泡
+                    // （streamState.currentIndex / updateStreamAssistant 是主气泡专用通道）。
+                    // 双保险：空/纯空白 token 直接丢弃（对齐主流式 case 'token' 的 trim 检查）。
+                    var _tok = msg.token;
+                    if (_tok == null || !String(_tok).trim()) { /* 丢弃 */ }
+                    else if (_sbM) {
+                      // 独立累积 buffer：首 token 替换进度行，后续 token 追加
+                      var _buf = (_sbM._subTokenBuf || '') + _tok;
+                      _sbM._subTokenBuf = _buf;
+                      // 卡片渲染读 result 字段；流式期间（status=running）渲染走 _renderToolCallCard
+                      // 显示 result（token 文本，卡片展开）。同时更新 content 保持一致。
+                      updateStreamMessage(subIdx, { content: _buf, result: _buf, status: 'running' });
+                      if (isCurrentSession()) renderAgentMessages();
+                    }
                   }
                 }
                 break;
