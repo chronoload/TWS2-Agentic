@@ -35,15 +35,17 @@
   };
 
   var adapter = null;
-  var chunk = {
-    active: false,    // 是否处于分块模式
-    path: null,       // 对应文件路径
-    yamlPrefix: '',   // 文档开头的 YAML frontmatter（原样保留，不进入分块树）
-    src: '',          // 去除 YAML 后的完整 editor-source（内存中的唯一正文）
-    tree: null,       // 索引树根节点 {level, heading, start, end, subs, parent}
-    flat: [],         // 前序遍历节点数组（每个节点带 _fi 序号）
-    activeIdx: 0      // flat 中的活跃节点序号
-  };
+var chunk = {
+      active: false,    // 是否在分块模式
+      path: null,       // 对应文件路径
+      yamlPrefix: '',   // 文档头部 YAML frontmatter（原样保留，不参与分块）
+      src: '',          // 去掉 YAML 后的 editor-source（不含脚注定义区），内存中的唯一正文
+      footnotes: '',    // 脚注定义保留域：[^id]: ...（文档级资源，不按标题块切片隔离）
+      _fnInjected: false, // 当前喂给 Vditor 的切片尾部是否注入了脚注定义
+      tree: null,       // 标题区间树 {level, heading, start, end, subs, parent}
+      flat: [],         // 前序遍历节点数组（每节点 _fi 编号）
+      activeIdx: 0      // flat 中的活跃节点索引
+    };
 
   var TITLE_RE = /^(#{1,4})\s+(.+?)\s*$/;
 
@@ -55,12 +57,72 @@
   // 提取文档开头 YAML front matter（`---` 起止）。返回 {prefix, body}：
   // prefix 为含末尾换行的原始 YAML 块（若存在），body 为去掉前缀后的正文。
   // 不匹配或非字符串时返回 { prefix: '', body: text }。
-  function extractYamlFrontmatter(text) {
-    if (typeof text !== 'string') return { prefix: '', body: text };
-    var m = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
-    if (!m) return { prefix: '', body: text };
-    return { prefix: m[0], body: text.slice(m[0].length) };
-  }
+function extractYamlFrontmatter(text) {
+      if (typeof text !== 'string') return { prefix: '', body: text };
+      var m = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+      if (!m) return { prefix: '', body: text };
+      return { prefix: m[0], body: text.slice(m[0].length) };
+    }
+
+    // 脚注定义行：行首 `[^id]:`（CommonMark footnote definition）
+    var FN_DEF_RE = /^\[\^([^\]]+)\]:/;
+
+    // 把脚注定义区从正文剥离为独立保留域，返回 { body, footnotes }。
+    // 原理：Lute 把脚注定义 hoist 成文档级 footnotes-block 渲染，若按标题块切片
+    // 隔离，定义与引用会分属不同块；Vditor IR 回读（getValue）时无定义引用被吞，
+    // 或定义被重排导致字节区间漂移 → 覆写丢失。因此脚注定义永不进入任何块的
+    // [start,end) 区间，只在 renderActive 渲染切片时临时注入到尾部供解析。
+    // 代码围栏（```...```）内的 [^x]: 视为普通文本，不剥离。
+    function splitFootnotes(text) {
+      if (typeof text !== 'string') return { body: text, footnotes: '' };
+      var lines = text.split('\n');
+      var bodyLines = [], fnLines = [];
+      var fence = null;
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var fm = /^(`{3,})/.exec(line);
+        if (fm) {
+          if (fence === null) fence = fm[1].length;
+          else if (fm[1].length >= fence && /^`{3,}\s*$/.test(line)) fence = null;
+          bodyLines.push(line);
+          continue;
+        }
+        if (fence !== null) { bodyLines.push(line); continue; }
+        if (FN_DEF_RE.test(line)) {
+          fnLines.push(line);
+          // 吸收脚注续行：4 空格缩进行；空行仅当后续（跳过连续空行）仍是缩进续行
+          // 时才属于本脚注块，否则视为正文/文档结构的一部分。
+          for (var j = i + 1; j < lines.length; j++) {
+            var nxt = lines[j];
+            if (FN_DEF_RE.test(nxt)) break;
+            if (/^(`{3,})/.test(nxt)) break;
+            if (/^\s{4}/.test(nxt)) { fnLines.push(nxt); i = j; }
+            else if (nxt.trim() === '') {
+              var k = j + 1;
+              while (k < lines.length && lines[k].trim() === '') k++;
+              if (k < lines.length && /^\s{4}/.test(lines[k])) { fnLines.push(nxt); i = j; }
+              else break;
+            }
+            else break;
+          }
+        } else {
+          bodyLines.push(line);
+        }
+      }
+      return { body: bodyLines.join('\n'), footnotes: fnLines.join('\n') };
+    }
+
+    // 组装完整 editor-source：正文 + 脚注保留域（置于文档末尾，与 Lute 渲染一致）
+    function fullText() {
+      var body = chunk.src;
+      if (chunk.footnotes) {
+        // 规范化衔接：正文去尾部空白 + 单空行 + 脚注定义区（与 Lute 文档级渲染一致）
+        body = String(body).replace(/\s+$/, '') + '\n\n' + chunk.footnotes;
+        // 脚注区始终以换行收尾（文档末尾），保证 round-trip 稳定
+        if (body && !/[\r\n]$/.test(body)) body += '\n';
+      }
+      return chunk.yamlPrefix + body;
+    }
 
   // 扫描标题行，返回 [{offset, level, heading}]；围栏（``` ```）内的行忽略
   function scanTitles(text) {
@@ -203,15 +265,31 @@
     var after;
     try { after = vd.getValue(); } catch (e) { return; }
     var before = chunk.src.slice(node.start, node.end);
-    if (after === before) return;
+    // 若渲染时注入了脚注定义，先把读回的文本中的脚注定义剥离回保留域，
+    // 只把正文写回 [start,end)，防止 Lute 重排后的定义字节漂移截断相邻块。
+    var committed = after;
+    if (chunk._fnInjected) {
+      var sf = splitFootnotes(after);
+      committed = sf.body;
+      // 捕获用户在编辑中改写的脚注定义（含删减）
+      chunk.footnotes = sf.footnotes;
+      chunk._fnInjected = false;
+      // 注入的脚注前缀（\n\n）会被 splitFootnotes 吸收为 body 尾随空白；
+      // 若 body 相对 before 仅多出尾随空白，说明是注入伪影而非真实编辑，
+      // 保持 before 精确，避免反复叠加空行。
+      if (committed !== before && committed.replace(/\s+$/, '') === before) {
+        committed = before;
+      }
+    }
+    if (committed === before) return;
     // Vditor 刚初始化（after 钩子中）getValue() 返回空，但 before 非空时不应覆盖，
     // 否则 takeFull 会把当前块清空导致内容丢失
-    if (!after && before) return;
+    if (!committed && before) return;
 
     var path = [];
     for (var p = node; p && p.level > 0; p = p.parent) path.unshift(p.heading);
 
-    chunk.src = chunk.src.slice(0, node.start) + after + chunk.src.slice(node.end);
+    chunk.src = chunk.src.slice(0, node.start) + committed + chunk.src.slice(node.end);
     rebuildIndex();
 
     var cur = chunk.tree;
@@ -236,6 +314,14 @@
     if (!node) return;
     chunk.activeIdx = node._fi != null ? node._fi : 0;
     var text = chunk.src.slice(node.start, node.end);
+    // 注入脚注定义到切片尾部：让 Lute 能解析块内行内引用（否则无定义引用会被吞/重排丢失）
+    if (chunk.footnotes) {
+      if (text && !/[\r\n]$/.test(text)) text += '\n';
+      text += '\n\n' + chunk.footnotes;
+      chunk._fnInjected = true;
+    } else {
+      chunk._fnInjected = false;
+    }
     try { vd.setValue(text); } catch (e) {}
     var el = modeElement(vd);
     if (el) {
@@ -252,7 +338,11 @@
     chunk.path = (adapter && typeof adapter.getActivePath === 'function') ? adapter.getActivePath() : null;
     var y = extractYamlFrontmatter(src);
     chunk.yamlPrefix = y.prefix;
-    chunk.src = y.body;
+    // 脚注定义剥离到保留域，正文才参与分块（防止 Lute 渲染重排导致覆写丢失）
+    var sf = splitFootnotes(y.body);
+    chunk.src = sf.body;
+    chunk.footnotes = sf.footnotes;
+    chunk._fnInjected = false;
     rebuildIndex();
     chunk.activeIdx = chunk.flat.length > 1 ? 1 : 0;
     renderActive();
@@ -277,6 +367,8 @@
     chunk.path = null;
     chunk.yamlPrefix = '';
     chunk.src = '';
+    chunk.footnotes = '';
+    chunk._fnInjected = false;
     chunk.tree = null;
     chunk.flat = [];
     chunk.activeIdx = 0;
@@ -395,20 +487,20 @@
     read: function () {
       if (!chunk.active) return null;
       commitActive();
-      return chunk.yamlPrefix + chunk.src;
+      return fullText();
     },
 
     // 宿主 input 回调调用；返回完整 editor-source（未启用返回 null）
     notifyInput: function () {
       if (!chunk.active) return null;
       commitActive();
-      return chunk.yamlPrefix + chunk.src;
+      return fullText();
     },
 
     toggle: function () {
       if (chunk.active) {
         commitActive();
-        var full = chunk.yamlPrefix + chunk.src;
+        var full = fullText();
         // 先写回完整内容，再关闭分块触发 onStateChange，
         // 否则切回时大纲会在 Vditor 仍是分块文本时被重绘（残留旧内容）
         if (adapter && typeof adapter.setValue === 'function') {
@@ -573,7 +665,7 @@
     takeFull: function () {
       if (!chunk.active) return null;
       commitActive();
-      var full = chunk.yamlPrefix + chunk.src;
+      var full = fullText();
       disable();
       return full;
     },
@@ -583,6 +675,7 @@
     subHeadings: subHeadings,
     shouldChunk: shouldChunk,
     extractYamlFrontmatter: extractYamlFrontmatter,
+    splitFootnotes: splitFootnotes,
     scanTitles: scanTitles
   };
 
