@@ -2,7 +2,6 @@
 
 运行：cd src/mcp/server && python -m mcp.server.test_file_explorer
 """
-import os
 import tempfile
 import pathlib
 

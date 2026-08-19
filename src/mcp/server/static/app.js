@@ -5466,9 +5466,13 @@ async function srcLoadDir(path) {
     return;
   }
 
-  // 浏览列表跟随源码浏览器工具条排序
+  // 浏览列表跟随源码浏览器工具条排序 + 类型过滤
   const st = getSearchToolbarState('src');
   const filtered = entries.filter(e => matchTypeFilter(e, st.typeFilter));
+  if (!filtered.length) {
+    listEl.innerHTML = '<div class="empty-state"><span class="empty-icon">🔍</span><span>无匹配项</span></div>';
+    return;
+  }
   const sorted = sortEntries(filtered, st.sortBy, st.order);
   listEl.innerHTML = sorted.map(e => {
     const icon = e.is_dir ? '📁' : srcFileIcon(e.ext || '');

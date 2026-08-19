@@ -18,7 +18,8 @@ assert.strictEqual(matchTypeFilter(fileMd, '.md'), true, '.md 匹配 md 文件')
 assert.strictEqual(matchTypeFilter(filePy, '.md'), false, '.md 不匹配 py 文件');
 assert.strictEqual(matchTypeFilter(fileMd, 'md'), true, '无点扩展名同 .md');
 assert.strictEqual(matchTypeFilter(dir, '.md'), false, '目录不匹配扩展名');
-assert.strictEqual(matchTypeFilter(fileMd, '.PY'), false, '大写后缀不匹配小写 ext（ext 已小写化）');
+assert.strictEqual(matchTypeFilter(fileMd, '.PY'), false, '.PY 不匹配 .md 文件');
+assert.strictEqual(matchTypeFilter(filePy, '.PY'), true, '过滤器大小写不敏感：.PY 匹配 .py 文件');
 
 // ── sortEntries 默认 mtime desc ──
 const oldFile = { name: 'old.txt', is_dir: false, modified: 100, size: 1 };
