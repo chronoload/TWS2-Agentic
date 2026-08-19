@@ -3948,9 +3948,10 @@ function renderFileTree() {
     }));
   }
 
-  // 根条目也跟随工具条排序
+  // 根条目也跟随工具条排序 + 类型过滤
   const st = getSearchToolbarState();
-  const sortedRoots = sortEntries(rootEntries, st.sortBy, st.order);
+  const filteredRoots = filterByType(rootEntries, st.typeFilter);
+  const sortedRoots = sortEntries(filteredRoots, st.sortBy, st.order);
   sortedRoots.forEach(function(entry) {
     renderTreeItem(tree, entry, 0);
     if (entry.is_dir && state.expandedDirs.has(entry.path)) {
@@ -3962,9 +3963,10 @@ function renderFileTree() {
 function renderChildren(container, parentPath, depth) {
   const children = state.dirCache[parentPath];
   if (!children) return;
-  // 浏览模式也跟随工具条排序（不再固定 name，避免覆盖用户选择的重排序）
+  // 浏览模式也跟随工具条排序 + 类型过滤（不再固定 name，避免覆盖用户选择的重排序）
   const st = getSearchToolbarState();
-  const sorted = sortEntries(children, st.sortBy, st.order);
+  const filtered = filterByType(children, st.typeFilter);
+  const sorted = sortEntries(filtered, st.sortBy, st.order);
   sorted.forEach(child => {
     renderTreeItem(container, child, depth);
     if (child.is_dir && state.expandedDirs.has(child.path)) {
@@ -4077,8 +4079,8 @@ function renderTreeItem(container, entry, depth) {
 
 // 前端排序（浏览/展开用，与后端 Explorer 语义一致：目录优先 + key + 方向）
 function sortEntries(entries, sortBy, order) {
-  sortBy = sortBy || 'name';
-  const reverse = (order || 'asc') === 'desc';
+  sortBy = sortBy || 'mtime';
+  const reverse = (order || 'desc') === 'desc';
   const cmp = (a, b) => {
     let r = 0;
     if (sortBy === 'size') {
@@ -4096,6 +4098,17 @@ function sortEntries(entries, sortBy, order) {
   const dirs = entries.filter(e => e.is_dir).sort(cmp);
   const files = entries.filter(e => !e.is_dir).sort(cmp);
   return [...dirs, ...files];
+}
+
+// 类型/后缀过滤（浏览模式用，与后端 search_files type_filter 语义一致）：
+// "" = 全部；"dir" = 仅目录；"file" = 仅文件；".py" 等 = 目录 + 匹配扩展名的文件
+function filterByType(entries, typeFilter) {
+  var tf = (typeFilter || '').trim().toLowerCase();
+  if (!tf || tf === 'all') return entries;
+  if (tf === 'dir') return entries.filter(e => e.is_dir);
+  if (tf === 'file') return entries.filter(e => !e.is_dir);
+  var ext = tf.startsWith('.') ? tf : '.' + tf;
+  return entries.filter(e => e.is_dir || (e.ext || '').toLowerCase() === ext);
 }
 
 function getFileIcon(ext) {
@@ -5256,6 +5269,11 @@ function extractDomain(url) {
 
 document.getElementById('btnAddBookmark').addEventListener('click', showAddBookmarkDialog);
 
+// 搜索书签输入实时过滤（与 renderBookmarks 前端过滤配合）
+document.getElementById('bookmarkSearch').addEventListener('input', () => {
+  renderBookmarks();
+});
+
 async function showAddBookmarkDialog() {
   const html = `
 <div style="padding:4px">
@@ -5488,9 +5506,10 @@ async function srcLoadDir(path) {
     return;
   }
 
-  // 浏览列表跟随源码浏览器工具条排序
+  // 浏览列表跟随源码浏览器工具条排序 + 类型过滤
   const st = getSearchToolbarState('src');
-  const sorted = sortEntries(entries, st.sortBy, st.order);
+  const filtered = filterByType(entries, st.typeFilter);
+  const sorted = sortEntries(filtered, st.sortBy, st.order);
   listEl.innerHTML = sorted.map(e => {
     const icon = e.is_dir ? '📁' : srcFileIcon(e.ext || '');
     const sizeStr = (!e.is_dir && e.size) ? srcFormatSize(e.size) : '';
@@ -18801,7 +18820,7 @@ let searchTimer = null;
 // 读取搜索工具条状态（排序/方向/类型）；prefix='search' 为文件 nav（HTML ID 带 search 前缀），'src' 为源码浏览器
 function getSearchToolbarState(prefix) {
   prefix = prefix || 'search';
-  var sortBy = 'name', order = 'asc', typeFilter = '';
+  var sortBy = 'mtime', order = 'desc', typeFilter = '';
   try {
     var sb = document.getElementById(prefix + 'SortBy');
     var ob = document.getElementById(prefix + 'OrderBtn');

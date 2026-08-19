@@ -93,8 +93,8 @@ class DirCreateRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     subdir: str = ""
-    sort_by: str = "name"     # name | size | mtime | type
-    order: str = "asc"        # asc | desc
+    sort_by: str = "mtime"    # name | size | mtime | type
+    order: str = "desc"       # asc | desc
     type_filter: str = ""     # "" | dir | file | .ext
 
 
@@ -2847,7 +2847,13 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
             return {"cmd": "readDir", "code": 0, "data": [e.to_dict() for e in entries]}
 
         elif cmd == "search":
-            entries = engine.search_files(param.get("query", ""), param.get("subdir", ""))
+            entries = engine.search_files(
+                param.get("query", ""),
+                param.get("subdir", ""),
+                param.get("sort_by", "mtime"),
+                param.get("order", "desc"),
+                param.get("type_filter", ""),
+            )
             return {"cmd": "search", "code": 0, "data": [e.to_dict() for e in entries]}
 
         elif cmd == "ping":
@@ -3042,13 +3048,12 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     "is_dir": item.is_dir(),
                     "ext": item.suffix.lower() if item.suffix else "",
                 }
-                if not item.is_dir():
-                    try:
-                        stat = item.stat()
-                        entry["size"] = stat.st_size
-                        entry["modified"] = stat.st_mtime
-                    except (OSError, PermissionError):
-                        continue
+                try:
+                    stat = item.stat()
+                    entry["size"] = stat.st_size if not item.is_dir() else 0
+                    entry["modified"] = stat.st_mtime
+                except (OSError, PermissionError):
+                    continue
                 entries.append(entry)
         except PermissionError:
             return None, "Permission denied"

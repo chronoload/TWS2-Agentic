@@ -652,13 +652,12 @@ class FileSyncEngine:
                     is_dir=item.is_dir(),
                     ext=item.suffix.lower() if item.suffix else "",
                 )
-                if not item.is_dir():
-                    try:
-                        stat = item.stat()
-                        entry.size = stat.st_size
-                        entry.modified = stat.st_mtime
-                    except (OSError, PermissionError):
-                        continue
+                try:
+                    stat = item.stat()
+                    entry.size = stat.st_size if not item.is_dir() else 0
+                    entry.modified = stat.st_mtime
+                except (OSError, PermissionError):
+                    continue
                 entries.append(entry)
         except (OSError, PermissionError) as e:
             logger.warning(f"Read dir error: {e}")
@@ -817,7 +816,7 @@ class FileSyncEngine:
             return False
 
     def search_files(self, query: str, subdir: str = "",
-                     sort_by: str = "name", order: str = "asc",
+                     sort_by: str = "mtime", order: str = "desc",
                      type_filter: str = "") -> List[FileEntry]:
         """
         搜索文件（按名称匹配，rg 加速枚举，失败回退 Python rglob）。
@@ -867,44 +866,56 @@ class FileSyncEngine:
         if not roots:
             return results
 
-        # ── 枚举文件：优先 rg --files（零依赖，毫秒级），失败回退 Python rglob ──
-        file_items: List[Path] = []
-        rg_ok = False
-        try:
-            from ..rg_search import rg_filelist
-            excludes = []
-            for pat in getattr(self, "IGNORE_PATTERNS", ()) or ():
-                pat = str(pat)
-                if "*" in pat:
-                    excludes.append(f"!**/{pat}")
-                else:
-                    excludes.append(f"!**/{pat}/**")
-                    excludes.append(f"!**/{pat}")
+        # ── 类型筛选需求（决定枚举目标：dir 筛选需收集目录，rg 只列文件）──
+        tf = (type_filter or "").strip().lower()
+        want_dirs = tf == "dir"
+
+        # ── 枚举：type_filter="dir" 走 Python 目录收集；否则优先 rg --files（零依赖，毫秒级），失败回退 Python rglob ──
+        path_items: List[Path] = []
+        if want_dirs:
             for root in roots:
-                raw = rg_filelist(query, str(root), excludes=excludes)
-                if raw is None:
-                    rg_ok = False
-                    break
-                for s in raw:
-                    p = Path(s)
-                    if not p.is_absolute():
-                        p = root / p
-                    file_items.append(p)
-                rg_ok = True
-        except Exception as e:
-            logger.debug(f"search_files rg 枚举回退 Python: {e}")
+                if not root.is_dir():
+                    continue
+                # root 自身也算一个目录（全局搜索时 EXPOSED_DIRS 顶级目录本身应返回）
+                path_items.append(root)
+                path_items.extend(it for it in sorted(root.rglob("*")) if it.is_dir())
+        else:
             rg_ok = False
-        if not rg_ok:
-            file_items = []
-            for root in roots:
-                if root.is_file():
-                    file_items.append(root)
-                else:
-                    file_items.extend(it for it in sorted(root.rglob("*")) if it.is_file())
+            try:
+                from ..rg_search import rg_filelist
+                excludes = []
+                for pat in getattr(self, "IGNORE_PATTERNS", ()) or ():
+                    pat = str(pat)
+                    if "*" in pat:
+                        excludes.append(f"!**/{pat}")
+                    else:
+                        excludes.append(f"!**/{pat}/**")
+                        excludes.append(f"!**/{pat}")
+                for root in roots:
+                    raw = rg_filelist(query, str(root), excludes=excludes)
+                    if raw is None:
+                        rg_ok = False
+                        break
+                    for s in raw:
+                        p = Path(s)
+                        if not p.is_absolute():
+                            p = root / p
+                        path_items.append(p)
+                    rg_ok = True
+            except Exception as e:
+                logger.debug(f"search_files rg 枚举回退 Python: {e}")
+                rg_ok = False
+            if not rg_ok:
+                path_items = []
+                for root in roots:
+                    if root.is_file():
+                        path_items.append(root)
+                    else:
+                        path_items.extend(it for it in sorted(root.rglob("*")) if it.is_file())
 
         # ── 统一过滤：IGNORE_PATTERNS + 隐藏段 + name/path 包含（两路共用）──
         seen = set()
-        for abs_p in file_items:
+        for abs_p in path_items:
             try:
                 rel_path = str(abs_p.relative_to(self.workspace_dir)).replace("\\", "/")
             except ValueError:
@@ -923,17 +934,17 @@ class FileSyncEngine:
                 stat = abs_p.stat()
             except (OSError, PermissionError):
                 continue
+            is_dir = abs_p.is_dir()
             results.append(FileEntry(
                 path=rel_path,
                 name=abs_p.name,
-                is_dir=False,
-                size=stat.st_size,
+                is_dir=is_dir,
+                size=stat.st_size if not is_dir else 0,
                 modified=stat.st_mtime,
                 ext=abs_p.suffix.lower() if abs_p.suffix else "",
             ))
 
         # ── 类型筛选（对标 Explorer 的视图筛选）──
-        tf = (type_filter or "").strip().lower()
         if tf and tf != "all":
             if tf == "dir":
                 results = [e for e in results if e.is_dir]
@@ -943,17 +954,19 @@ class FileSyncEngine:
                 ext = tf if tf.startswith(".") else f".{tf}"
                 results = [e for e in results if e.ext == ext]
 
-        # ── 排序（对标 Explorer：目录优先，再按 key + 方向）──
+        # ── 排序（对标 Explorer：目录永远优先，组内再按 key + 方向；稳定两段排序）──
         key = (sort_by or "name").lower()
         reverse = (order or "asc").lower() == "desc"
         if key == "size":
-            results.sort(key=lambda e: (0 if e.is_dir else 1, e.size), reverse=reverse)
+            results.sort(key=lambda e: e.size, reverse=reverse)
         elif key == "mtime" or key == "modified":
-            results.sort(key=lambda e: (0 if e.is_dir else 1, e.modified), reverse=reverse)
+            results.sort(key=lambda e: e.modified, reverse=reverse)
         elif key == "type" or key == "ext":
-            results.sort(key=lambda e: (0 if e.is_dir else 1, e.ext, e.name.lower()), reverse=reverse)
+            results.sort(key=lambda e: (e.ext, e.name.lower()), reverse=reverse)
         else:  # name 默认
-            results.sort(key=lambda e: (0 if e.is_dir else 1, e.name.lower()), reverse=reverse)
+            results.sort(key=lambda e: e.name.lower(), reverse=reverse)
+        # 稳定排序：目录优先（保持组内已排顺序），与前端 sortEntries 语义一致
+        results.sort(key=lambda e: not e.is_dir)
 
         return results
 
