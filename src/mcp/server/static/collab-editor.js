@@ -515,7 +515,10 @@ async function _openImpl(srcPath, containerId, opts) {
       _lutePath: __VDITOR_CDN + '/dist/js/lute/lute.min.js',
       placeholder: '协同编辑中...',
       cache: { enable: false },
-      value: editorContent,
+      // 内容延迟到 after + __ensureVditorLute 就绪后注入（见 after 回调注释）：
+      // 构造时以 value 传内容，若 Lute（异步从 CDN 加载）尚未就绪，Vditor 内部
+      // 处理 value 会因 e.lute 为 undefined 崩溃 → 代码块/rmd-chunk 内容丢失。
+      value: '',
       tab: '\t',
       toolbarConfig: { pin: true },
       math: { engine: 'KaTeX', inlineDigit: true },
@@ -576,35 +579,44 @@ async function _openImpl(srcPath, containerId, opts) {
           return;
         }
         placeholderInst.vd = vd;
-        // 对标主编辑器 after：格式化保护 + 快捷键 + Rmd 增强
-        if (window.setupCodeBlockPreservation) try { window.setupCodeBlockPreservation(vd); } catch (e) {}
-        if (window.setupPandocDivPreservation) try { window.setupPandocDivPreservation(vd); } catch (e) {}
-        if (window.bindVditorShortcuts) try { window.bindVditorShortcuts(vd); } catch (e) {}
-        var cont = document.getElementById(containerId);
-        if (cont) {
-          if (window.enhanceRmdChunks) try { window.enhanceRmdChunks(cont, vd); } catch (e) {}
-          if (window.initRmdChunksWatcher) try { window.initRmdChunksWatcher(cont, vd); } catch (e) {}
-        }
-        // 主动应用主题：协同编辑器可能在 display:none 容器中初始化，
-        // Vditor 内部主题注入可能延迟。显式调 setTheme 确保外壳 + content-theme 立即生效，
-        // 不依赖后续 refreshVditorInstanceThemes（用户切设置 nav 才触发）。
-        try {
-          var _t = document.documentElement.getAttribute('data-theme') || 'dark';
-          var _isLight = (typeof isLightTheme === 'function') ? isLightTheme(_t) : (_t === 'light');
-          if (vd.setTheme) vd.setTheme(_isLight ? 'classic' : 'dark');
-        } catch (e) {}
-        // 创建光标叠加层容器（放在 .vditor-content 内，pre 的兄弟元素，避免污染 contenteditable）
-        var _pre = editorEl(vd);
-        var _parent = _pre && _pre.parentElement;
-        if (_parent && !_parent.querySelector('.vd-collab-cursors')) {
-          var _layer = document.createElement('div');
-          _layer.className = 'vd-collab-cursors';
-          _layer.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;overflow:hidden;';
-          _parent.appendChild(_layer);
-        }
-        _startCollab(srcPath, vd, copyPath, editorContent);
-        if (!created) console.log('[collab-editor] 使用已有副本', copyPath);
-        if (typeof opts.onReady === 'function') opts.onReady(placeholderInst);
+        // 与主编辑器一致：确保 Lute 就绪后再注入内容并增强 Rmd 块。
+        // collab 容器可能在 display:none 中初始化，Lute 异步加载就绪时机不定；
+        // 不在 __ensureVditorLute 内 setValue 会导致构造期 value 处理崩溃
+        // （e.lute is undefined）→ 代码块/rmd-chunk 丢失。
+        var _ensure = window.__ensureVditorLute || function (v, done) { done && done(); };
+        _ensure(vd, function () {
+          if (placeholderInst.disposed) { try { vd.destroy(); } catch (e) {} return; }
+          try { vd.setValue(editorContent); } catch (e) { console.warn('[collab-editor] 初始 setValue 失败:', e); }
+          // 对标主编辑器 after：格式化保护 + 快捷键 + Rmd 增强
+          if (window.setupCodeBlockPreservation) try { window.setupCodeBlockPreservation(vd); } catch (e) {}
+          if (window.setupPandocDivPreservation) try { window.setupPandocDivPreservation(vd); } catch (e) {}
+          if (window.bindVditorShortcuts) try { window.bindVditorShortcuts(vd); } catch (e) {}
+          var cont = document.getElementById(containerId);
+          if (cont) {
+            if (window.enhanceRmdChunks) try { window.enhanceRmdChunks(cont, vd); } catch (e) {}
+            if (window.initRmdChunksWatcher) try { window.initRmdChunksWatcher(cont, vd); } catch (e) {}
+          }
+          // 主动应用主题：协同编辑器可能在 display:none 容器中初始化，
+          // Vditor 内部主题注入可能延迟。显式调 setTheme 确保外壳 + content-theme 立即生效，
+          // 不依赖后续 refreshVditorInstanceThemes（用户切设置 nav 才触发）。
+          try {
+            var _t = document.documentElement.getAttribute('data-theme') || 'dark';
+            var _isLight = (typeof isLightTheme === 'function') ? isLightTheme(_t) : (_t === 'light');
+            if (vd.setTheme) vd.setTheme(_isLight ? 'classic' : 'dark');
+          } catch (e) {}
+          // 创建光标叠加层容器（放在 .vditor-content 内，pre 的兄弟元素，避免污染 contenteditable）
+          var _pre = editorEl(vd);
+          var _parent = _pre && _pre.parentElement;
+          if (_parent && !_parent.querySelector('.vd-collab-cursors')) {
+            var _layer = document.createElement('div');
+            _layer.className = 'vd-collab-cursors';
+            _layer.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;overflow:hidden;';
+            _parent.appendChild(_layer);
+          }
+          _startCollab(srcPath, vd, copyPath, editorContent);
+          if (!created) console.log('[collab-editor] 使用已有副本', copyPath);
+          if (typeof opts.onReady === 'function') opts.onReady(placeholderInst);
+        });
       },
     });
   } catch (e) {

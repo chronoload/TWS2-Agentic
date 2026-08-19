@@ -1591,7 +1591,8 @@ var __libFallbackMap = {
   ],
   'Lute': [
     'https://unpkg.com/vditor@3.10.7/dist/js/lute/lute.min.js',
-    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/js/lute/lute.min.js'
+    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/js/lute/lute.min.js',
+    '/static/vditor/dist/js/lute/lute.min.js'
   ],
   'katex': [
     'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js',
