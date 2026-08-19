@@ -273,10 +273,10 @@ registry.register("audit.strategy", "my", MyStrategy)
 ### project 产物目录
 
 **project/commands.py**（4 个顶层函数/类）
-- L19 `cmd_init` `(name: 'str', git: 'bool' = False, base: 'str' = '') -> 'tuple'` — 
-- L38 `cmd_list` `(base: 'str' = '') -> 'tuple'` — 
-- L51 `cmd_root` `(name: 'str', base: 'str' = '') -> 'tuple'` — 
-- L14 `project_dir` `(name: 'str', base: 'Path' = None) -> 'Path'` — 
+- L20 `cmd_init` `(name: 'str', git: 'bool' = False, base: 'str' = '') -> 'tuple'` — 
+- L39 `cmd_list` `(base: 'str' = '') -> 'tuple'` — 
+- L56 `cmd_root` `(name: 'str', base: 'str' = '') -> 'tuple'` — 
+- L15 `project_dir` `(name: 'str', base: 'Path' = None) -> 'Path'` — 
 
 ### patch 自演化修复
 

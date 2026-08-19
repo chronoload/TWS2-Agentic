@@ -73,7 +73,20 @@ class Skill:
         content = skill_file.read_text(encoding="utf-8")
         manifest = cls._parse_frontmatter(content)
         if manifest is None:
-            return None
+            # 无 frontmatter 回退：name=目录名，description=首行 # 标题
+            first_h1 = ""
+            for line in content.splitlines():
+                if line.lstrip().startswith("# "):
+                    first_h1 = line.lstrip()[2:].strip()
+                    break
+            return cls(
+                name=skill_dir.name,
+                description=first_h1 or skill_dir.name,
+                skill_dir=skill_dir,
+                skill_file=skill_file,
+                relative_path=skill_dir.name,
+                content=content,
+            )
 
         return cls(
             name=manifest.name,

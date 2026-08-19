@@ -112,6 +112,7 @@ python -m macdev requirement scan --req-dirs openspec --root .   # 扫需求文�
 | `audit.strategy` | base, dsh, ts2 |
 | `patch.generator` | insert_defuse_comment, insert_entry_comment, insert_env_todo, insert_guard_comment, insert_merge_comment, insert_reset_comment, insert_set_after_clear, insert_todo_comment |
 | `plan.runner` | default |
+| `skill.catalog` | base |
 
 ## 全部函数（模块底层反射）
 

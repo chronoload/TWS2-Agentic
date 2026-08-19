@@ -64,8 +64,14 @@ def load_workspace_files(workspace_root: str) -> WorkspaceFiles:
             pass
 
     skills_dir = root / "skills"
+    if not skills_dir.exists() or not skills_dir.is_dir() or not any(skills_dir.rglob("*")):
+        # TS2 布局 fallback：root/src/skills（root/skills 为空时也回退）
+        src_skills = root / "src" / "skills"
+        if src_skills.exists() and src_skills.is_dir():
+            skills_dir = src_skills
     if skills_dir.exists() and skills_dir.is_dir():
-        for skill_dir in sorted(skills_dir.iterdir()):
+        # 递归发现：标准 SKILL.md 目录 + 深层纯 md（如 macdev-skill/skills/*.md 子技能）
+        for skill_dir in sorted(skills_dir.rglob("*")):
             if skill_dir.is_dir():
                 skill_md = skill_dir / "SKILL.md"
                 if skill_md.exists():
@@ -73,6 +79,11 @@ def load_workspace_files(workspace_root: str) -> WorkspaceFiles:
                         result.skills.append(skill_md.read_text(encoding="utf-8"))
                     except Exception:
                         pass
+            elif skill_dir.suffix.lower() == ".md":
+                try:
+                    result.skills.append(skill_dir.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
 
     # 加载 .ts2rules/ 目录中的规则文件
     ts2rules_dir = root / ".ts2rules"

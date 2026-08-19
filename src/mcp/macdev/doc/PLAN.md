@@ -427,6 +427,30 @@ python -m macdev plan ledger --plan 1   # 进度台账（resume 用）
 `macdev doc` — 自举生成使用/开发文档
 
 - `--out` — 自举文档输出目录 默认=`macdev-skill`
+
+`macdev skill` — 子技能动态注入（scan/inject/route/list）
+
+`macdev skill list` — 列出默认目录下子技能名
+
+- `--dir` — 技能目录（缺省探测 skills/ 与 skills_market/）
+- `--root` — 缺省技能目录的基准根 默认=`.`
+
+`macdev skill scan` — 扫描目录列出子技能含推断字段
+
+- `--dir` — 技能目录（缺省探测 skills/ 与 skills_market/）
+- `--root` — 缺省技能目录的基准根 默认=`.`
+
+`macdev skill inject` — 整文件内容输出到 stdout（--name 指定子技能）
+
+- `--name`（必填） — 子技能名（文件名，不含 .md）
+- `--dir` — 技能目录（缺省探测 skills/ 与 skills_market/）
+- `--root` — 缺省技能目录的基准根 默认=`.`
+
+`macdev skill route` — 任务描述 → 自动匹配子技能名（--task）
+
+- `--task`（必填） — 任务描述
+- `--dir` — 技能目录（缺省探测 skills/ 与 skills_market/）
+- `--root` — 缺省技能目录的基准根 默认=`.`
 ```
 
 ## 状态机（事件源）
@@ -442,6 +466,7 @@ python -m macdev plan ledger --plan 1   # 进度台账（resume 用）
 | `audit.strategy` | base, dsh, ts2 |
 | `patch.generator` | insert_defuse_comment, insert_entry_comment, insert_env_todo, insert_guard_comment, insert_merge_comment, insert_reset_comment, insert_set_after_clear, insert_todo_comment |
 | `plan.runner` | default |
+| `skill.catalog` | base |
 
 ## 全部函数（模块底层反射）
 

@@ -31,7 +31,7 @@ PROJECT_ROOT = MCP_ROOT.parent.parent
 
 # macdev 顶层命令（python -m macdev 的子命令组）
 TOP_LEVEL_COMMANDS = ("audit", "plan", "patch", "log", "requirement", "dev",
-                      "project", "doc")
+                      "project", "doc", "skill")
 
 # 支持 --project 产物收敛的顶层命令（plan/patch/project 走各自参数）
 PROJECT_SUPPORTED = ("audit", "log", "requirement", "dev")
@@ -45,6 +45,7 @@ COMMAND_HELP = {
     "dev": "map --target <目录> [--depth 3] / audit --target <目录>（学习/模仿目标项目：目录编排 + 架构了解）",
     "project": "init --name <name> [--git] / list / root --name <name>（产物目录约定 <name>-project/）",
     "doc": "[--out 路径] 自举生成使用/开发文档（AUDIT/PLAN/LOG/REQI/DEV 各 5 份）",
+    "skill": "scan [--dir] / list [--dir] / route --task \"任务描述\" [--dir] / inject --name <子技能名> [--dir]（子技能动态注入：自动发现+任务路由+按需整文件注入，服务 harness）",
 }
 
 

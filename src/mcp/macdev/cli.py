@@ -12,6 +12,7 @@ from .core.registry import Registry
 from .core.bus import EventBus
 from .core.engine import Engine
 from .audit.task import AuditTask
+from .skill import cmd_skill_inject, cmd_skill_list, cmd_skill_route, cmd_skill_scan
 
 ARTIFACTS = [
     ("INTERFACE_CHAIN.md", "审计报告：端点/模型 + §8 亲属追逐依赖链(text+mermaid) + 6 维分析 + 4 维扫描"),
@@ -27,10 +28,11 @@ ARTIFACTS = [
 
 def build_engine() -> Engine:
     reg = Registry()
-    from . import audit, plan, patch
+    from . import audit, plan, patch, skill
     audit.register(reg)
     plan.register(reg)
     patch.register(reg)
+    skill.register(reg)
     # 插件平级哲学：扫描捕捉所有已导入模块中的 Plugin 子类并装配
     from .audit import strategy_ts2  # noqa: F401（import 即登记 ts2 策略）
     from .audit import strategy_dsh  # noqa: F401（import 即登记 dsh 策略：TS monorepo 语义表）
@@ -1259,6 +1261,28 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doc", help="自举生成使用/开发文档")
     d.add_argument("--out", default="macdev-skill", help="自举文档输出目录")
     d.set_defaults(fn=cmd_doc)
+
+    # skill（子技能动态注入：发现/路由/注入，服务 TS2 harness）
+    sk = sub.add_parser("skill", help="子技能动态注入（scan/inject/route/list）")
+    sks = sk.add_subparsers(dest="sub2", required=True)
+    sks_list = sks.add_parser("list", help="列出默认目录下子技能名")
+    sks_list.add_argument("--dir", default="", help="技能目录（缺省探测 skills/ 与 skills_market/）")
+    sks_list.add_argument("--root", default=".", help="缺省技能目录的基准根")
+    sks_list.set_defaults(fn=cmd_skill_list)
+    sks_scan = sks.add_parser("scan", help="扫描目录列出子技能含推断字段")
+    sks_scan.add_argument("--dir", default="", help="技能目录（缺省探测 skills/ 与 skills_market/）")
+    sks_scan.add_argument("--root", default=".", help="缺省技能目录的基准根")
+    sks_scan.set_defaults(fn=cmd_skill_scan)
+    sks_inj = sks.add_parser("inject", help="整文件内容输出到 stdout（--name 指定子技能）")
+    sks_inj.add_argument("--name", required=True, help="子技能名（文件名，不含 .md）")
+    sks_inj.add_argument("--dir", default="", help="技能目录（缺省探测 skills/ 与 skills_market/）")
+    sks_inj.add_argument("--root", default=".", help="缺省技能目录的基准根")
+    sks_inj.set_defaults(fn=cmd_skill_inject)
+    sks_route = sks.add_parser("route", help="任务描述 → 自动匹配子技能名（--task）")
+    sks_route.add_argument("--task", required=True, help="任务描述")
+    sks_route.add_argument("--dir", default="", help="技能目录（缺省探测 skills/ 与 skills_market/）")
+    sks_route.add_argument("--root", default=".", help="缺省技能目录的基准根")
+    sks_route.set_defaults(fn=cmd_skill_route)
     return ap
 
 
