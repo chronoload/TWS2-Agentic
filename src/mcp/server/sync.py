@@ -652,13 +652,13 @@ class FileSyncEngine:
                     is_dir=item.is_dir(),
                     ext=item.suffix.lower() if item.suffix else "",
                 )
-                if not item.is_dir():
-                    try:
-                        stat = item.stat()
+                try:
+                    stat = item.stat()
+                    entry.modified = stat.st_mtime
+                    if not item.is_dir():
                         entry.size = stat.st_size
-                        entry.modified = stat.st_mtime
-                    except (OSError, PermissionError):
-                        continue
+                except (OSError, PermissionError):
+                    continue
                 entries.append(entry)
         except (OSError, PermissionError) as e:
             logger.warning(f"Read dir error: {e}")
@@ -925,6 +925,40 @@ class FileSyncEngine:
                 modified=stat.st_mtime,
                 ext=abs_p.suffix.lower() if abs_p.suffix else "",
             ))
+
+        # ── 目录枚举：type_filter 为 dir 时也返回匹配目录（否则目录永不进入搜索结果）──
+        tf_now = (type_filter or "").strip().lower()
+        if tf_now == "dir":
+            dir_items = []
+            for root in roots:
+                if root.is_dir():
+                    dir_items.append(root)
+                    dir_items.extend(p for p in root.rglob("*") if p.is_dir())
+            seen_dirs = set()
+            for abs_p in dir_items:
+                try:
+                    rel_path = str(abs_p.relative_to(self.workspace_dir)).replace("\\", "/")
+                except ValueError:
+                    rel_path = str(abs_p).replace("\\", "/")
+                if rel_path in seen_dirs:
+                    continue
+                seen_dirs.add(rel_path)
+                if self._should_ignore(abs_p):
+                    continue
+                if self._is_hidden(rel_path):
+                    continue
+                if query_lower not in rel_path.lower():
+                    continue
+                try:
+                    st = abs_p.stat()
+                except (OSError, PermissionError):
+                    continue
+                results.append(FileEntry(
+                    path=rel_path,
+                    name=abs_p.name,
+                    is_dir=True,
+                    modified=st.st_mtime,
+                ))
 
         # ── 类型筛选（对标 Explorer 的视图筛选）──
         tf = (type_filter or "").strip().lower()
