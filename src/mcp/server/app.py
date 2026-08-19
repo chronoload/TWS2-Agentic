@@ -2789,13 +2789,13 @@ def create_app(workspace_dir: Optional[str] = None, host: str = "0.0.0.0",
                     "is_dir": item.is_dir(),
                     "ext": item.suffix.lower() if item.suffix else "",
                 }
-                if not item.is_dir():
-                    try:
-                        stat = item.stat()
+                try:
+                    stat = item.stat()
+                    entry["modified"] = stat.st_mtime
+                    if not item.is_dir():
                         entry["size"] = stat.st_size
-                        entry["modified"] = stat.st_mtime
-                    except (OSError, PermissionError):
-                        continue
+                except (OSError, PermissionError):
+                    continue
                 entries.append(entry)
         except PermissionError:
             return None, "Permission denied"
