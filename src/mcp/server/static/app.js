@@ -3964,7 +3964,8 @@ function renderChildren(container, parentPath, depth) {
   if (!children) return;
   // 浏览模式也跟随工具条排序（不再固定 name，避免覆盖用户选择的重排序）
   const st = getSearchToolbarState();
-  const sorted = sortEntries(children, st.sortBy, st.order);
+  const filtered = children.filter(e => matchTypeFilter(e, st.typeFilter));
+  const sorted = sortEntries(filtered, st.sortBy, st.order);
   sorted.forEach(child => {
     renderTreeItem(container, child, depth);
     if (child.is_dir && state.expandedDirs.has(child.path)) {
@@ -4073,29 +4074,6 @@ function renderTreeItem(container, entry, depth) {
   }
 
   container.appendChild(item);
-}
-
-// 前端排序（浏览/展开用，与后端 Explorer 语义一致：目录优先 + key + 方向）
-function sortEntries(entries, sortBy, order) {
-  sortBy = sortBy || 'name';
-  const reverse = (order || 'asc') === 'desc';
-  const cmp = (a, b) => {
-    let r = 0;
-    if (sortBy === 'size') {
-      r = (a.size || 0) - (b.size || 0);
-    } else if (sortBy === 'mtime' || sortBy === 'modified') {
-      r = (a.modified || 0) - (b.modified || 0);
-    } else if (sortBy === 'type' || sortBy === 'ext') {
-      r = (a.ext || '').localeCompare(b.ext || '');
-      if (r === 0) r = a.name.localeCompare(b.name);
-    } else {
-      r = a.name.localeCompare(b.name);
-    }
-    return reverse ? -r : r;
-  };
-  const dirs = entries.filter(e => e.is_dir).sort(cmp);
-  const files = entries.filter(e => !e.is_dir).sort(cmp);
-  return [...dirs, ...files];
 }
 
 function getFileIcon(ext) {
@@ -5490,7 +5468,8 @@ async function srcLoadDir(path) {
 
   // 浏览列表跟随源码浏览器工具条排序
   const st = getSearchToolbarState('src');
-  const sorted = sortEntries(entries, st.sortBy, st.order);
+  const filtered = entries.filter(e => matchTypeFilter(e, st.typeFilter));
+  const sorted = sortEntries(filtered, st.sortBy, st.order);
   listEl.innerHTML = sorted.map(e => {
     const icon = e.is_dir ? '📁' : srcFileIcon(e.ext || '');
     const sizeStr = (!e.is_dir && e.size) ? srcFormatSize(e.size) : '';
