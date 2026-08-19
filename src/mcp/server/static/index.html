@@ -251,11 +251,11 @@ function __fallbackLink(el, urls) {
       <div class="search-toolbar" id="searchToolbar">
         <select id="searchSortBy" title="排序方式" class="st-select">
           <option value="name">名称</option>
-          <option value="mtime">修改日期</option>
+          <option value="mtime" selected>修改日期</option>
           <option value="type">类型</option>
           <option value="size">大小</option>
         </select>
-        <button id="searchOrderBtn" class="st-btn" title="切换升/降序">↑</button>
+        <button id="searchOrderBtn" class="st-btn" title="切换升/降序" data-order="desc">↓</button>
         <select id="searchTypeFilter" title="类型筛选" class="st-select">
           <option value="">全部</option>
           <option value="dir">📁 文件夹</option>
@@ -365,11 +365,11 @@ function __fallbackLink(el, urls) {
               <div class="search-toolbar" id="srcSearchToolbar">
                 <select id="srcSortBy" title="排序方式" class="st-select">
                   <option value="name">名称</option>
-                  <option value="mtime">修改日期</option>
+                  <option value="mtime" selected>修改日期</option>
                   <option value="type">类型</option>
                   <option value="size">大小</option>
                 </select>
-                <button id="srcOrderBtn" class="st-btn" title="切换升/降序">↑</button>
+                <button id="srcOrderBtn" class="st-btn" title="切换升/降序" data-order="desc">↓</button>
                 <select id="srcTypeFilter" title="类型筛选" class="st-select">
                   <option value="">全部</option>
                   <option value="dir">📁 文件夹</option>
