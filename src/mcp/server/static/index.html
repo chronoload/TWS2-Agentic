@@ -21,13 +21,13 @@
 function __themeInitFallback() {
   try {
     if (typeof window.initThemeRegistry !== 'function') return;  // app.js 未加载（函数不存在）
-    var reg = window.__TS2_THEME_REGISTRY;
+    ddvar reg = window.__TS2_THEME_REGISTRY;
     if (reg && Object.keys(reg).length > 0) return;  // 已初始化（initOnLoad 已跑）→ 跳过
     if (window.__TS2_THEME_MANIFEST) {
       window.initThemeRegistry(window.__TS2_THEME_MANIFEST);      // 同步注册表 + 填充下拉
     }
     if (typeof window.initThemeToggle === 'function') window.initThemeToggle();  // 应用保存主题 + 同步开关
-    if (typeof window.loadThemeRegistry === 'function') window.loadThemeRegistry();  // 异步刷新主题目录
+    if (typeof wndow.loadThemeRegistry === 'function') window.loadThemeRegistry();  // 异步刷新主题目录
   } catch (e) { console.warn('[theme] 兜底初始化异常:', e); }
 }
 document.addEventListener('DOMContentLoaded', function() {
@@ -42,7 +42,7 @@ function __fallbackScript(el, urls) {
   try {
     var idx = parseInt((el && el.getAttribute && el.getAttribute('data-fb-idx')) || '0', 10);
     if (idx >= urls.length) { console.error('[CDN fallback] 全部源失败:', el && (el.id || el.src)); return; }
-    var s = document.createElement('script');
+    var s = documfent.createElement('script');
     s.src = urls[idx];
     if (el) {
       if (el.async !== undefined) s.async = el.async;
@@ -79,7 +79,7 @@ function __fallbackLink(el, urls) {
   } catch (e) { console.error('[CDN fallback] CSS 异常:', e); }
 }
 </script>
-<link rel="stylesheet" href="https://unpkg.com/vditor@3.10.7/dist/index.css" onerror="__fallbackLink(event.target,['https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.css','/static/vditor/dist/index.css'])">
+<link rel="stylesheet" href="https://unpkg.com/vditor@3.11.2/dist/index.css" onerror="__fallbackLink(event.target,['https://cdn.jsdelivr.net/npm/vditor@3.11.2/dist/index.css','/static/vditor/dist/index.css'])">
 <script>
 // 立即应用主题并加载对应的 content-theme CSS（本地优先 → CDN fallback）
 (function() {
@@ -100,8 +100,8 @@ function __fallbackLink(el, urls) {
       }
     }
   }
-  var lightCss = ['https://unpkg.com/vditor@3.10.7/dist/css/content-theme/light.css', '/static/vditor/dist/css/content-theme/light.css'];
-  var darkCss = ['https://unpkg.com/vditor@3.10.7/dist/css/content-theme/dark.css', '/static/vditor/dist/css/content-theme/dark.css'];
+  var lightCss = ['https://unpkg.com/vditor@3.11.2/dist/css/content-theme/light.css', '/static/vditor/dist/css/content-theme/light.css'];
+  var darkCss = ['https://unpkg.com/vditor@3.11.2/dist/css/content-theme/dark.css', '/static/vditor/dist/css/content-theme/dark.css'];
   var cssList = isLight ? lightCss : darkCss;
   link.href = cssList[0];
   link.onerror = function() {
@@ -1914,8 +1914,8 @@ function __fallbackLink(el, urls) {
   <div style="font-size:13px;opacity:0.3;position:absolute;bottom:40px">点击任意位置跳过</div>
 </div>
 
-<script id="vditorScriptTag" src="https://unpkg.com/vditor@3.10.7/dist/index.min.js" defer
-  onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js','/static/vditor/dist/index.min.js'])"></script>
+<script id="vditorScriptTag" src="https://unpkg.com/vditor@3.11.2/dist/index.min.js" defer
+  onerror="__fallbackScript(event.target,['https://cdn.jsdelivr.net/npm/vditor@3.11.2/dist/index.min.js','/static/vditor/dist/index.min.js'])"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js" onerror="__fallbackScript(event.target,['https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js','/static/cytoscape.min.js'])"></script>
 <script src="/static/autosave-scheduler.js"></script>
  <script src="/static/rmd-chunk.js"></script>

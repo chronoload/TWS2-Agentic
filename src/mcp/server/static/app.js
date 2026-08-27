@@ -1582,16 +1582,16 @@ function setupCodeBlockPreservation(v) {
 // 动态加载第三方库：CDN 优先 → 本地兜底（unpkg → jsdelivr → /static）。
 // 注：static/vditor 目录未随仓库部署（缺失），Vditor 内部资源（i18n/css/lute）
 // 统一走 CDN 基址 __VDITOR_CDN（Vditor cdn 参数内部拼 {cdn}/dist/...）。
-var __VDITOR_CDN = 'https://unpkg.com/vditor@3.10.7';
+var __VDITOR_CDN = 'https://unpkg.com/vditor@3.11.2';
 var __libFallbackMap = {
   'Vditor': [
-    'https://unpkg.com/vditor@3.10.7/dist/index.min.js',
-    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/index.min.js',
+    'https://unpkg.com/vditor@3.11.2/dist/index.min.js',
+    'https://cdn.jsdelivr.net/npm/vditor@3.11.2/dist/index.min.js',
     '/static/vditor/dist/index.min.js'
   ],
   'Lute': [
-    'https://unpkg.com/vditor@3.10.7/dist/js/lute/lute.min.js',
-    'https://cdn.jsdelivr.net/npm/vditor@3.10.7/dist/js/lute/lute.min.js',
+    'https://unpkg.com/vditor@3.11.2/dist/js/lute/lute.min.js',
+    'https://cdn.jsdelivr.net/npm/vditor@3.11.2/dist/js/lute/lute.min.js',
     '/static/vditor/dist/js/lute/lute.min.js'
   ],
   'katex': [
