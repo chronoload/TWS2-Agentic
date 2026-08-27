@@ -21,13 +21,13 @@
 function __themeInitFallback() {
   try {
     if (typeof window.initThemeRegistry !== 'function') return;  // app.js 未加载（函数不存在）
-    ddvar reg = window.__TS2_THEME_REGISTRY;
+    var reg = window.__TS2_THEME_REGISTRY;
     if (reg && Object.keys(reg).length > 0) return;  // 已初始化（initOnLoad 已跑）→ 跳过
     if (window.__TS2_THEME_MANIFEST) {
       window.initThemeRegistry(window.__TS2_THEME_MANIFEST);      // 同步注册表 + 填充下拉
     }
     if (typeof window.initThemeToggle === 'function') window.initThemeToggle();  // 应用保存主题 + 同步开关
-    if (typeof wndow.loadThemeRegistry === 'function') window.loadThemeRegistry();  // 异步刷新主题目录
+    if (typeof window.loadThemeRegistry === 'function') window.loadThemeRegistry();  // 异步刷新主题目录
   } catch (e) { console.warn('[theme] 兜底初始化异常:', e); }
 }
 document.addEventListener('DOMContentLoaded', function() {
